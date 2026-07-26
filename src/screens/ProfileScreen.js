@@ -89,6 +89,11 @@ export default function ProfileScreen({ navigation }) {
   useFocusEffect(
     useCallback(() => {
       let alive = true;
+      // Let the tab transition PAINT first — parsing the (multi-MB)
+      // analysis cache synchronously during the switch blanks the screen
+      // on slower Androids.
+      const timer = setTimeout(() => {
+      if (!alive) return;
       analyzer
         .getCached(ALL_ALBUM_ID, 'photo')
         .then(async (cache) => {
@@ -112,8 +117,10 @@ export default function ProfileScreen({ navigation }) {
           }
         })
         .catch(() => {});
+      }, 400);
       return () => {
         alive = false;
+        clearTimeout(timer);
       };
     }, [])
   );
@@ -123,6 +130,10 @@ export default function ProfileScreen({ navigation }) {
     let alive = true;
     (async () => {
       try {
+        // Paint first; the daily rescan below is HEAVY (full metadata
+        // fetch + hundreds of file stats).
+        await new Promise((r) => setTimeout(r, 600));
+        if (!alive) return;
         const raw = await AsyncStorage.getItem(SUGGESTIONS_KEY);
         if (raw) {
           const cached = JSON.parse(raw);
@@ -142,10 +153,13 @@ export default function ProfileScreen({ navigation }) {
         ]);
         const pool = [...photos.slice(0, SIZE_SCAN_CAP), ...videos.slice(0, SIZE_SCAN_CAP)];
         const sized = [];
+        let n = 0;
         for (const a of pool) {
           if (!alive) return;
           const size = await getAssetSize(a);
           sized.push({ id: a.id, uri: a.uri, size, mediaType: a.mediaType });
+          // Yield to the UI thread every 20 stats — no long JS stalls.
+          if (++n % 20 === 0) await new Promise((r) => setTimeout(r, 0));
         }
         const largest = sized.sort((x, y) => y.size - x.size).slice(0, 10);
 
@@ -185,6 +199,7 @@ export default function ProfileScreen({ navigation }) {
             const size = await getAssetSize(v);
             if (!bySize.has(size)) bySize.set(size, []);
             bySize.get(size).push(v.id);
+            if (++n % 20 === 0) await new Promise((r) => setTimeout(r, 0));
           }
           for (const [size, ids] of bySize.entries()) {
             if (size > 0 && ids.length >= 2) videoDupes.push({ ids });

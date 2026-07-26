@@ -83,16 +83,18 @@ export default function AlbumSelectScreen({ navigation }) {
           const order = (await sessionManager.getOrder()) || [];
           const gs = pending.groupSize || 5;
           const gi = pending.groupIndex || 0;
-          const ids = order.slice(gi * gs, gi * gs + 3);
+          // Whole group, then the SAME within-group ordering the cleaning
+          // screen uses (newest first) — the cards show exactly the
+          // group's first three photos.
+          const ids = order.slice(gi * gs, (gi + 1) * gs);
           if (ids.length === 0) {
             if (alive) setSessionPreview(null);
             return;
           }
           const assets = await getAssetsByIds(ids);
-          const byId = Object.fromEntries(assets.map((a) => [a.id, a]));
-          const thumbs = ids
-            .map((id) => byId[id])
-            .filter(Boolean)
+          const thumbs = [...assets]
+            .sort((a, b) => (b.creationTime || 0) - (a.creationTime || 0))
+            .slice(0, 3)
             .map((a) => ({ id: a.id, uri: a.uri }));
           if (alive) setSessionPreview(thumbs.length ? { thumbs } : null);
         } catch (e) {
