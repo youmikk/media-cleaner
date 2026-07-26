@@ -183,6 +183,17 @@ export default function CleaningScreen({ route, navigation }) {
     opacity: interpolate(Math.abs(tx.value), [0, SCREEN_W], [1, 0.4]),
   }));
 
+  // photoo-style CARD STACK: the neighbour the gesture is moving toward is
+  // ALREADY rendered underneath, so committing a swipe swaps to a photo
+  // that's fully on screen — zero load gap, zero flicker, and what you see
+  // is always the real asset (no stale frames).
+  const prevUnderStyle = useAnimatedStyle(() => ({
+    opacity: tx.value > 8 ? 1 : 0,
+  }));
+  const nextUnderStyle = useAnimatedStyle(() => ({
+    opacity: tx.value < -8 || ty.value < -8 ? 1 : 0,
+  }));
+
   const showToast = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(null), 1800);
@@ -446,7 +457,11 @@ export default function CleaningScreen({ route, navigation }) {
     }
     return [...inGroup, ...others];
   }, [group, markedIds]);
-  const current = visible[Math.min(pi, Math.max(0, visible.length - 1))] || null;
+  const currentIdx = Math.min(pi, Math.max(0, visible.length - 1));
+  const current = visible[currentIdx] || null;
+  // Stack neighbours (pre-rendered underneath the top card).
+  const prevAsset = currentIdx > 0 ? visible[currentIdx - 1] : null;
+  const nextAsset = visible[currentIdx + 1] || null;
 
   // Freeze the background photo while the confirm sheet is open.
   useEffect(() => {
@@ -549,36 +564,28 @@ export default function CleaningScreen({ route, navigation }) {
     [pi]
   );
 
-  // ---- Gesture callbacks ----
-  const slideInFrom = useCallback(
-    (fromX) => {
-      // Start closer (35%) so the next photo is visible almost instantly —
-      // no blank gap while it slides in.
-      tx.value = fromX * 0.35;
-      ty.value = 0;
-      tx.value = withTiming(0, EASE);
-    },
-    [tx, ty]
-  );
-
+  // ---- Gesture callbacks (card stack: committing a swipe resets the top
+  // card INSTANTLY — the photo underneath is already fully on screen) ----
   const onSwipeNext = useCallback(() => {
     if (pi < visible.length - 1) {
       setPi(pi + 1);
-      slideInFrom(SCREEN_W);
+      tx.value = 0;
+      ty.value = 0;
     } else {
       tx.value = withTiming(0, EASE);
       endOfGroupRef.current();
     }
-  }, [pi, visible.length, slideInFrom, SCREEN_W, tx]);
+  }, [pi, visible.length, tx, ty]);
 
   const onSwipePrev = useCallback(() => {
     if (pi > 0) {
       setPi(pi - 1);
-      slideInFrom(-SCREEN_W);
+      tx.value = 0;
+      ty.value = 0;
     } else {
       tx.value = withTiming(0, EASE);
     }
-  }, [pi, slideInFrom, SCREEN_W, tx]);
+  }, [pi, tx, ty]);
 
   const onSwipeDelete = useCallback(() => {
     if (!current) return;
@@ -588,11 +595,10 @@ export default function CleaningScreen({ route, navigation }) {
       // haptics unavailable
     }
     mark(current);
-    ty.value = SCREEN_H * 0.12;
     tx.value = 0;
-    ty.value = withTiming(0, EASE);
+    ty.value = 0;
     afterRemovalAdvance(visible.length - 1);
-  }, [current, mark, visible.length, afterRemovalAdvance, ty, tx, SCREEN_H]);
+  }, [current, mark, visible.length, afterRemovalAdvance, ty, tx]);
 
   const onSwipeDown = useCallback(() => {
     if (current) setShowMove(true);
@@ -1056,16 +1062,31 @@ export default function CleaningScreen({ route, navigation }) {
         </Pressable>
       </View>
 
-      <GestureDetector gesture={pan}>
-        <Animated.View style={[styles.photoArea, cardStyle]}>
-          <PhotoCard
-            asset={displayAsset}
-            isFavorite={displayAsset ? isFavorite(displayAsset.id) : false}
-            marked={displayAsset ? markedIds.has(displayAsset.id) : false}
-            sizeLabel={sizeLabel}
-          />
-        </Animated.View>
-      </GestureDetector>
+      <View style={styles.photoArea}>
+        {/* UNDER layer: the neighbours, already rendered (photoo stack) */}
+        {prevAsset && (
+          <Animated.View style={[StyleSheet.absoluteFill, prevUnderStyle]}>
+            <PhotoCard asset={prevAsset} inactive isFavorite={false} marked={false} />
+          </Animated.View>
+        )}
+        {nextAsset && (
+          <Animated.View style={[StyleSheet.absoluteFill, nextUnderStyle]}>
+            <PhotoCard asset={nextAsset} inactive isFavorite={false} marked={false} />
+          </Animated.View>
+        )}
+        {/* TOP card: keyed per asset — always shows the REAL current photo */}
+        <GestureDetector gesture={pan}>
+          <Animated.View style={[StyleSheet.absoluteFill, cardStyle]}>
+            <PhotoCard
+              key={displayAsset ? displayAsset.id : 'none'}
+              asset={displayAsset}
+              isFavorite={displayAsset ? isFavorite(displayAsset.id) : false}
+              marked={displayAsset ? markedIds.has(displayAsset.id) : false}
+              sizeLabel={sizeLabel}
+            />
+          </Animated.View>
+        </GestureDetector>
+      </View>
 
       <View style={styles.indicatorWrap}>
         <PageIndicator

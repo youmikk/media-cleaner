@@ -29,7 +29,11 @@ import TutorialOverlay from './src/components/TutorialOverlay';
 import { ensureMediaPermission } from './src/utils/permissions';
 import * as trashManager from './src/utils/trashManager';
 import * as sessionManager from './src/utils/sessionManager';
-import { autoCheckDaily } from './src/utils/updateChecker';
+import { autoCheckDaily, APP_VERSION } from './src/utils/updateChecker';
+import { installLogger } from './src/utils/logger';
+
+// Capture crashes and console errors from the very first frame.
+installLogger(APP_VERSION);
 
 const navigationRef = createNavigationContainerRef();
 const TUTORIAL_KEY = '@mediacleaner/tutorial_seen';

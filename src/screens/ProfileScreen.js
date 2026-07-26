@@ -8,6 +8,8 @@ import {
   StyleSheet,
   Linking,
   Alert,
+  Share,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
@@ -40,6 +42,17 @@ import {
   checkGitHubRelease,
   fetchLatestChangelog,
 } from '../utils/updateChecker';
+
+import { getLogFileUri } from '../utils/logger';
+
+// expo-sharing (system share sheet for FILES) — guarded for Expo Go.
+let Sharing = null;
+try {
+  // eslint-disable-next-line global-require
+  Sharing = require('expo-sharing');
+} catch (e) {
+  Sharing = null;
+}
 
 // useUpdates reports a DOWNLOADED-but-not-applied update (the launch-time
 // auto-check downloads silently; only a restart applies it). Guarded so
@@ -292,6 +305,25 @@ export default function ProfileScreen({ navigation }) {
     }
   };
 
+  // ---- Log export: flush, then hand the file to the system share sheet --
+  const onExportLog = async () => {
+    try {
+      const uri = await getLogFileUri();
+      if (Sharing && (await Sharing.isAvailableAsync())) {
+        await Sharing.shareAsync(uri, { mimeType: 'text/plain' });
+      } else if (Platform.OS === 'ios') {
+        await Share.share({ url: uri });
+      } else {
+        // last resort: share the tail as text
+        const FileSystem = require('expo-file-system/legacy');
+        const content = await FileSystem.readAsStringAsync(uri);
+        await Share.share({ message: content.slice(-8000) });
+      }
+    } catch (e) {
+      // user dismissed the sheet / sharing unavailable
+    }
+  };
+
   // ---- Settings handlers ----
   const onToggleReminder = async (value) => {
     if (value) {
@@ -497,7 +529,7 @@ export default function ProfileScreen({ navigation }) {
             <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
           </Pressable>
           <Pressable
-            style={[styles.binRow, { backgroundColor: colors.card }]}
+            style={[styles.binRow, { backgroundColor: colors.card, marginBottom: 10 }]}
             onPress={onCheckUpdate}
           >
             <Ionicons name="refresh-circle-outline" size={22} color={colors.accent} />
@@ -510,6 +542,21 @@ export default function ProfileScreen({ navigation }) {
               </Text>
             </View>
             <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
+          </Pressable>
+          <Pressable
+            style={[styles.binRow, { backgroundColor: colors.card }]}
+            onPress={onExportLog}
+          >
+            <Ionicons name="document-text-outline" size={22} color={colors.accent} />
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowLabel, { color: colors.text }]}>
+                {t('export_log')}
+              </Text>
+              <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
+                {t('export_log_desc')}
+              </Text>
+            </View>
+            <Ionicons name="share-outline" size={18} color={colors.subtext} />
           </Pressable>
         </Section>
 

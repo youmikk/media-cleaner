@@ -40,25 +40,40 @@ export default function OptionPicker({ label, value, options, onChange }) {
   const rowRef = useRef(null);
   const current = options.find((o) => o.value === value);
 
-  const openMenu = () => {
-    const show = (a) => {
-      setAnchor(a);
+  const openMenu = (pressEvent) => {
+    // Press-point fallback: measureInWindow can fail silently on some
+    // Android versions — pageY always exists, so the menu still anchors
+    // to the tapped row instead of jumping to the screen center.
+    const pageY =
+      pressEvent && pressEvent.nativeEvent ? pressEvent.nativeEvent.pageY : null;
+    const est = 34 + options.length * 44 + 6; // header + 44pt per option
+    const place = (rowBottomY, rowTopY) => {
+      if (rowBottomY + est + 16 < SCREEN_H) {
+        setAnchor({ top: rowBottomY + 6 }); // below the row
+      } else {
+        setAnchor({ bottom: SCREEN_H - rowTopY + 6 }); // above the row
+      }
       setOpen(true);
     };
     const node = rowRef.current;
+    let measured = false;
     if (node && node.measureInWindow) {
       node.measureInWindow((x, y, w, h) => {
-        // Estimated menu height: header + 44pt per option.
-        const est = 34 + options.length * 44 + 6;
-        if (y + h + est + 16 < SCREEN_H) {
-          show({ top: y + h + 6 }); // below the row
-        } else {
-          show({ bottom: SCREEN_H - y + 6 }); // above the row
+        if (typeof y === 'number' && h > 0) {
+          measured = true;
+          place(y + h, y);
         }
       });
-    } else {
-      show(null); // measurement unavailable — centered fallback
     }
+    // measureInWindow is synchronous in practice; fall back if it didn't fire.
+    setTimeout(() => {
+      if (measured) return;
+      if (pageY !== null) place(pageY + 22, pageY - 22);
+      else {
+        setAnchor(null); // centered as the last resort
+        setOpen(true);
+      }
+    }, 0);
   };
 
   const select = (opt) => {
@@ -85,33 +100,44 @@ export default function OptionPicker({ label, value, options, onChange }) {
     </>
   );
 
-  // Builds WITH the native module: the row opens a real system menu
-  // (UIMenu on iOS — exact native material, corners and anchoring).
-  // The visible row lives OUTSIDE the MenuView (its children get
-  // re-attached natively on every change, which flashes); the MenuView is
-  // an invisible tap layer whose child NEVER changes.
+  // Builds WITH the native module: a real system menu (UIMenu / PopupMenu).
+  // Two tricks combined:
+  // - the visible texts live OUTSIDE the MenuView (its children get
+  //   re-attached natively on change, which flashes)
+  // - the invisible MenuView overlays ONLY the value area, so UIMenu's
+  //   dismiss morph animation is scoped to that small region (like an iOS
+  //   Settings pull-down button) and never disturbs the row label.
   if (MenuView) {
     return (
       <View style={[styles.row, { borderColor: colors.border }]}>
-        {rowContent}
-        <MenuView
-          style={StyleSheet.absoluteFill}
-          title={label}
-          onPressAction={({ nativeEvent }) => {
-            const opt = options.find(
-              (o) => String(o.value) === nativeEvent.event
-            );
-            if (opt) select(opt);
-          }}
-          actions={options.map((o) => ({
-            id: String(o.value),
-            title: o.label,
-            state: o.value === value ? 'on' : 'off',
-          }))}
-          shouldOpenOnLongPress={false}
-        >
-          <View style={StyleSheet.absoluteFill} />
-        </MenuView>
+        <Text style={[styles.label, { color: colors.text }]}>{label}</Text>
+        <View style={styles.valueWrap}>
+          <Text
+            style={[styles.value, { color: colors.subtext }]}
+            numberOfLines={1}
+          >
+            {current ? current.label : '—'}
+          </Text>
+          <Ionicons name="chevron-expand" size={15} color={colors.subtext} />
+          <MenuView
+            style={styles.menuOverlay}
+            title={label}
+            onPressAction={({ nativeEvent }) => {
+              const opt = options.find(
+                (o) => String(o.value) === nativeEvent.event
+              );
+              if (opt) select(opt);
+            }}
+            actions={options.map((o) => ({
+              id: String(o.value),
+              title: o.label,
+              state: o.value === value ? 'on' : 'off',
+            }))}
+            shouldOpenOnLongPress={false}
+          >
+            <View style={StyleSheet.absoluteFill} />
+          </MenuView>
+        </View>
       </View>
     );
   }
@@ -121,7 +147,7 @@ export default function OptionPicker({ label, value, options, onChange }) {
       <Pressable
         ref={rowRef}
         style={[styles.row, { borderColor: colors.border }]}
-        onPress={openMenu}
+        onPress={(e) => openMenu(e)}
       >
         {rowContent}
       </Pressable>
@@ -220,6 +246,11 @@ const styles = StyleSheet.create({
   },
   label: { fontSize: 14, fontWeight: '600', flexShrink: 1 },
   valueWrap: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  menuOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    // slightly larger than the value area for a comfortable tap target
+    margin: -10,
+  },
   value: { fontSize: 13, maxWidth: 140 },
   backdrop: {
     flex: 1,

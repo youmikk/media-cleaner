@@ -27,6 +27,7 @@ export default function EXIFModal({ visible, asset, onClose }) {
   useEffect(() => {
     if (!visible || !asset) return;
     setRows(null);
+    let alive = true;
     (async () => {
       const out = [];
       try {
@@ -39,23 +40,32 @@ export default function EXIFModal({ visible, asset, onClose }) {
           out.push([t('exif_duration'), `${info.duration.toFixed(1)}s`]);
         const size = await getAssetSize(info);
         if (size) out.push([t('exif_size'), formatBytes(size)]);
-        // Each section below is individually guarded — one failing step
-        // must never swallow the remaining rows.
-        try {
-          if (info.location) {
-            const address = await reverseGeocode(
+        // PROGRESSIVE: show the basic rows IMMEDIATELY — camera fields and
+        // the (network-bound) location row stream in as they resolve.
+        if (alive) setRows([...out]);
+
+        // Location: coordinates shown right away, geocoding upgrades the
+        // row when it answers within 4s — it must never block the modal.
+        if (info.location) {
+          const coords = `${info.location.latitude.toFixed(5)}, ${info.location.longitude.toFixed(5)}`;
+          const locIndex = out.length;
+          out.push([t('exif_location'), coords]);
+          if (alive) setRows([...out]);
+          Promise.race([
+            reverseGeocode(
               info.location.latitude,
               info.location.longitude,
               language
-            );
-            out.push([
-              t('exif_location'),
-              address ||
-                `${info.location.latitude.toFixed(5)}, ${info.location.longitude.toFixed(5)}`,
-            ]);
-          }
-        } catch (e) {
-          // geocoding failed — skip the location row only
+            ),
+            new Promise((r) => setTimeout(() => r(null), 4000)),
+          ])
+            .then((address) => {
+              if (alive && address) {
+                out[locIndex] = [t('exif_location'), address];
+                setRows([...out]);
+              }
+            })
+            .catch(() => {});
         }
         // Camera FIELDS from an exif object (system-shaped OR our parser's).
         // Field-based so multiple sources can be MERGED — e.g. iOS system
@@ -162,8 +172,11 @@ export default function EXIFModal({ visible, asset, onClose }) {
         // basic info failed — fall through with whatever we collected
         out.push(['Debug', `basic:ERR ${String(e && e.message ? e.message : e).slice(0, 60)}`]);
       }
-      setRows(out);
+      if (alive) setRows([...out]);
     })();
+    return () => {
+      alive = false;
+    };
   }, [visible, asset, language, t]);
 
   return (

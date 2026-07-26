@@ -76,25 +76,34 @@ function formatDuration(seconds) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-export default function PhotoCard({ asset, isFavorite, marked, sizeLabel }) {
+export default function PhotoCard({
+  asset,
+  isFavorite,
+  marked,
+  sizeLabel,
+  inactive = false, // UNDER-card in the stack: no video/live playback
+}) {
   const { colors, t, settings } = useSettings();
   const isVideo = asset ? asset.mediaType === 'video' : false;
-  const player = useVideoPlayer(isVideo ? asset.uri : null, (p) => {
+  const player = useVideoPlayer(isVideo && !inactive ? asset.uri : null, (p) => {
     p.loop = true;
     p.muted = true; // autoplay politely muted; native controls can unmute
   });
   // AUTO-PLAY videos (e.g. in the Largest Files flow) so it's obvious
   // they're videos, with a badge as a second cue.
   useEffect(() => {
-    if (isVideo && player) {
+    if (isVideo && !inactive && player) {
       try {
         player.play();
       } catch (e) {
         // best effort
       }
     }
-  }, [isVideo, player, asset?.id]); // eslint-disable-line react-hooks/exhaustive-deps
-  const liveSource = usePairedLivePhoto(asset, settings.liveAutoplay && !isVideo);
+  }, [isVideo, inactive, player, asset?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const liveSource = usePairedLivePhoto(
+    asset,
+    settings.liveAutoplay && !isVideo && !inactive
+  );
   const liveRef = useRef(null);
 
   // Stop Live Photo playback the moment the photo changes / unmounts —
@@ -115,7 +124,11 @@ export default function PhotoCard({ asset, isFavorite, marked, sizeLabel }) {
 
   return (
     <View style={styles.card}>
-      {isVideo ? (
+      {isVideo && inactive ? (
+        <View style={[styles.fill, styles.videoPlaceholder]}>
+          <Ionicons name="videocam" size={40} color="rgba(255,255,255,0.5)" />
+        </View>
+      ) : isVideo ? (
         <VideoView
           player={player}
           style={styles.fill}
@@ -194,6 +207,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   fill: { ...StyleSheet.absoluteFillObject },
+  videoPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#000',
+    borderRadius: 14,
+  },
   image: {
     width: '100%',
     maxHeight: '100%',
