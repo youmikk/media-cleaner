@@ -11,20 +11,20 @@ import {
   Pressable,
   StyleSheet,
   ActivityIndicator,
-  Alert,
   useWindowDimensions,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
   useDerivedValue,
-  withSpring,
   withTiming,
   runOnJS,
   interpolate,
+  Easing,
 } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import { Image as ExpoImage } from 'expo-image';
@@ -38,7 +38,9 @@ import GlowingTrashBar from '../components/GlowingTrashBar';
 import EXIFModal from '../components/EXIFModal';
 import SimilarModal from '../components/SimilarModal';
 import MoveSheet from '../components/MoveSheet';
+import AlbumChips from '../components/AlbumChips';
 import GroupConfirmSheet from '../components/GroupConfirmSheet';
+import { incrementUsage } from '../utils/albumUsage';
 import { batchDelete } from '../utils/deletionManager';
 import * as sessionManager from '../utils/sessionManager';
 import analyzer from '../utils/chunkedAnalyzer';
@@ -49,11 +51,15 @@ import {
   getAlbumSnapshot,
   moveAssetsToAlbum,
   formatBytes,
+  ALL_ALBUM_ID,
 } from '../utils/albumHelpers';
 
-const SWIPE_X = 80;
+const SWIPE_X = 70;
 const MOVE_THRESHOLD = 120;
-const SPRING = { damping: 18, stiffness: 180 };
+// Plain ease-out transition — no spring, no wobble: the card just glides
+// to its resting position and stops.
+const EASE = { duration: 200, easing: Easing.out(Easing.cubic) };
+const FLICK_VELOCITY = -900; // fast upward flick deletes without full drag
 
 function chunk(list, size) {
   const out = [];
@@ -89,24 +95,40 @@ export default function CleaningScreen({ route, navigation }) {
   const { colors, t, settings, recycleBinActive, language } = useSettings();
   const { recordCleaned, recordViewed, toggleFavorite, isFavorite } = useApp();
   const { width: SCREEN_W, height: SCREEN_H } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const groupSize = route.params.groupSize || settings.groupSize || 5;
-  const DELETE_THRESHOLD = SCREEN_H * 0.4;
+  // ~22% of screen height — no need to drag all the way to the top; a fast
+  // flick (velocity) deletes from even less.
+  const DELETE_THRESHOLD = SCREEN_H * 0.22;
 
   const [loading, setLoading] = useState(true);
   const [groups, setGroups] = useState([]);
   const [gi, setGi] = useState(0);
   const [pi, setPi] = useState(0);
   const [markedIds, setMarkedIds] = useState(new Set());
-  const [movedIds, setMovedIds] = useState(new Set());
+  // Categorizing is NOT deleting: moving a photo to an album keeps it in the
+  // cleaning flow — we only remember its new album so the ✓ chip follows it.
+  const [albumOverrides, setAlbumOverrides] = useState({});
   const [clusters, setClusters] = useState([]);
   const [showExif, setShowExif] = useState(false);
   const [showSimilar, setShowSimilar] = useState(false);
   const [showMove, setShowMove] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
-  const [moveMarkedMode, setMoveMarkedMode] = useState(false);
   const [completed, setCompleted] = useState(false);
   const [finalStats, setFinalStats] = useState({ count: 0, bytes: 0 });
   const [toast, setToast] = useState(null);
+  const [realAlbums, setRealAlbums] = useState([]); // for the quick chips
+
+  // Real device albums for the quick-categorize chip row.
+  useEffect(() => {
+    let alive = true;
+    MediaLibrary.getAlbumsAsync()
+      .then((list) => alive && setRealAlbums(list.filter((a) => a.assetCount > 0)))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const sessionRef = useRef(null);
   const cleanedRef = useRef({ count: 0, bytes: 0 });
@@ -114,6 +136,13 @@ export default function CleaningScreen({ route, navigation }) {
   const markStackRef = useRef([]); // mark order, for undo
   const frozenAssetRef = useRef(null);
   const orderRef = useRef([]); // asset ids in cleaning order
+  // Lazy segment loading: only ~3 groups ahead are fetched; more pages load
+  // AFTER the user confirms a group.
+  const allRef = useRef([]);
+  const cursorRef = useRef({ after: undefined, hasNext: true });
+  const loadingMoreRef = useRef(false);
+  const aliveRef = useRef(true);
+  const rangeRef = useRef(null);
 
   // ---- Animation shared values ----
   const tx = useSharedValue(0);
@@ -132,9 +161,52 @@ export default function CleaningScreen({ route, navigation }) {
     setTimeout(() => setToast(null), 1800);
   };
 
-  // ---- Load: progressive for fresh sessions, ordered for resume ----
+  // Suspend background analysis while cleaning — swipes stay buttery.
+  useFocusEffect(
+    useCallback(() => {
+      analyzer.suspend();
+      return () => analyzer.resume();
+    }, [])
+  );
+
+  /** Pull pages until at least `minCount` scoped photos are loaded. */
+  const ensureLoaded = useCallback(
+    async (minCount) => {
+      if (loadingMoreRef.current) return;
+      loadingMoreRef.current = true;
+      try {
+        while (
+          aliveRef.current &&
+          cursorRef.current.hasNext &&
+          allRef.current.length < Math.min(minCount, 5000)
+        ) {
+          const page = await getAssetsPage(albumId, 'photo', cursorRef.current.after);
+          if (!aliveRef.current) return;
+          const r = rangeRef.current;
+          const scoped = page.assets.filter(
+            (a) =>
+              !r ||
+              (a.creationTime && a.creationTime >= r.start && a.creationTime < r.end)
+          );
+          const pageAssets =
+            settings.order === 'random' ? shuffle(scoped) : scoped;
+          allRef.current = [...allRef.current, ...pageAssets];
+          cursorRef.current = { after: page.endCursor, hasNext: page.hasNext };
+          orderRef.current = allRef.current.map((a) => a.id);
+          setGroups(chunk(allRef.current, groupSize));
+        }
+        sessionManager.saveOrder(orderRef.current);
+      } finally {
+        loadingMoreRef.current = false;
+      }
+    },
+    [albumId, groupSize, settings.order]
+  );
+
+  // ---- Load: lazy segments for fresh sessions, full ordered for resume ----
   useEffect(() => {
     let alive = true;
+    aliveRef.current = true;
     (async () => {
       const pending = await sessionManager.getPendingSession();
       const resuming =
@@ -149,63 +221,65 @@ export default function CleaningScreen({ route, navigation }) {
           a.creationTime >= range.start &&
           a.creationTime < range.end);
 
+      let fullAlbumList = null; // reused for the "before" snapshot
+
+      rangeRef.current = range;
+
       if (assetIds) {
         // Explicit subset (suggestions) — small, load directly.
         const assets = await getAssetsByIds(assetIds);
         if (!alive) return;
         const ordered =
           settings.order === 'random' && !resuming ? shuffle(assets) : assets;
+        allRef.current = ordered;
+        cursorRef.current = { after: undefined, hasNext: false };
         orderRef.current = ordered.map((a) => a.id);
         setGroups(chunk(ordered, groupSize));
         setLoading(false);
-      } else {
-        // Stream pages: first page starts the session instantly.
+      } else if (resuming) {
+        // Resume needs the full list to rebuild the EXACT saved order.
         let all = [];
         let after;
         let hasNext = true;
-        let first = true;
         while (hasNext && all.length < 5000) {
           const page = await getAssetsPage(albumId, 'photo', after);
           if (!alive) return;
-          const scoped = page.assets.filter(inRange);
-          const pageAssets =
-            settings.order === 'random' && !resuming ? shuffle(scoped) : scoped;
-          all = [...all, ...pageAssets];
+          all = [...all, ...page.assets.filter(inRange)];
           hasNext = page.hasNext;
           after = page.endCursor;
-          if (!resuming) {
-            orderRef.current = all.map((a) => a.id);
-            setGroups(chunk(all, groupSize));
-            if (first) setLoading(false);
-          }
-          first = false;
         }
-        if (resuming) {
-          // Rebuild the EXACT saved order (dropping deleted assets).
-          const savedOrder = (await sessionManager.getOrder()) || [];
-          const byId = Object.fromEntries(all.map((a) => [a.id, a]));
-          const ordered = savedOrder.map((id) => byId[id]).filter(Boolean);
-          const rest = all.filter((a) => !savedOrder.includes(a.id));
-          const finalList = [...ordered, ...rest];
-          orderRef.current = finalList.map((a) => a.id);
-          if (!alive) return;
-          setGroups(chunk(finalList, groupSize));
-          setGi(Math.min(pending.groupIndex || 0, Math.max(0, Math.ceil(finalList.length / groupSize) - 1)));
-          setPi(pending.photoIndex || 0);
-          const savedMarks = new Set(pending.markedIds || []);
-          setMarkedIds(savedMarks);
-          markStackRef.current = [...savedMarks];
-          setLoading(false);
-        } else {
-          sessionManager.saveOrder(orderRef.current);
-        }
+        if (!range) fullAlbumList = all;
+        const savedOrder = (await sessionManager.getOrder()) || [];
+        const byId = Object.fromEntries(all.map((a) => [a.id, a]));
+        const ordered = savedOrder.map((id) => byId[id]).filter(Boolean);
+        const rest = all.filter((a) => !savedOrder.includes(a.id));
+        const finalList = [...ordered, ...rest];
+        allRef.current = finalList;
+        cursorRef.current = { after: undefined, hasNext: false };
+        orderRef.current = finalList.map((a) => a.id);
+        if (!alive) return;
+        setGroups(chunk(finalList, groupSize));
+        setGi(Math.min(pending.groupIndex || 0, Math.max(0, Math.ceil(finalList.length / groupSize) - 1)));
+        setPi(pending.photoIndex || 0);
+        const savedMarks = new Set(pending.markedIds || []);
+        setMarkedIds(savedMarks);
+        markStackRef.current = [...savedMarks];
+        setLoading(false);
+      } else {
+        // Fresh session: SEGMENTED loading — just ~3 groups ahead. The rest
+        // loads only as the user confirms groups.
+        await ensureLoaded(groupSize * 3);
+        if (!alive) return;
+        setLoading(false);
+        if (!range && !cursorRef.current.hasNext) fullAlbumList = allRef.current;
       }
 
-      // Session bookkeeping
+      // Session bookkeeping (snapshot reuses the already-loaded list when
+      // the scope is the whole album — no second full fetch).
       if (resuming) {
         sessionRef.current = pending;
       } else {
-        const before = await getAlbumSnapshot(albumId, 'photo');
+        const before = await getAlbumSnapshot(albumId, 'photo', fullAlbumList);
         sessionRef.current = await sessionManager.startSession({
           type: 'photo',
           albumId,
@@ -225,31 +299,39 @@ export default function CleaningScreen({ route, navigation }) {
     })();
     return () => {
       alive = false;
+      aliveRef.current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Keep ~3 groups pre-loaded ahead of the current one.
+  useEffect(() => {
+    ensureLoaded((gi + 3) * groupSize);
+  }, [gi, groupSize, ensureLoaded]);
+
   // Persist progress (group, position, marks) for exact resume.
-  const persistProgress = useCallback((patch = {}) => {
+  // Only on group / mark changes — NOT every swipe (no per-swipe disk IO).
+  const piRef = useRef(pi);
+  piRef.current = pi;
+  useEffect(() => {
     if (!sessionRef.current) return;
     sessionManager.saveProgress({
       groupIndex: gi,
-      photoIndex: pi,
+      photoIndex: piRef.current,
       markedIds: [...markedIds],
-      ...patch,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gi, pi, markedIds]);
-
-  useEffect(() => {
-    persistProgress();
-  }, [gi, markedIds, persistProgress]);
+  }, [gi, markedIds]);
 
   // ---- Derived state ----
   const group = groups[gi] || [];
   const visible = useMemo(
-    () => group.filter((a) => !markedIds.has(a.id) && !movedIds.has(a.id)),
-    [group, markedIds, movedIds]
+    () => group.filter((a) => !markedIds.has(a.id)),
+    [group, markedIds]
+  );
+  const markedInGroup = useMemo(
+    () => group.filter((a) => markedIds.has(a.id)),
+    [group, markedIds]
   );
   const current = visible[Math.min(pi, Math.max(0, visible.length - 1))] || null;
 
@@ -339,9 +421,14 @@ export default function CleaningScreen({ route, navigation }) {
 
   const undoCount = markStackRef.current.length; // fresh on every re-render
 
+  // End of group: only ask for confirmation when something is actually
+  // marked for deletion — otherwise move straight on to the next group.
+  // (Assigned every render below, after nextGroup exists.)
+  const endOfGroupRef = useRef(() => {});
+
   const afterRemovalAdvance = useCallback(
     (remainingCount) => {
-      if (remainingCount === 0) setShowConfirm(true);
+      if (remainingCount === 0) endOfGroupRef.current();
       else if (pi >= remainingCount) setPi(remainingCount - 1);
     },
     [pi]
@@ -350,9 +437,11 @@ export default function CleaningScreen({ route, navigation }) {
   // ---- Gesture callbacks ----
   const slideInFrom = useCallback(
     (fromX) => {
-      tx.value = fromX;
+      // Start closer (35%) so the next photo is visible almost instantly —
+      // no blank gap while it slides in.
+      tx.value = fromX * 0.35;
       ty.value = 0;
-      tx.value = withSpring(0, SPRING);
+      tx.value = withTiming(0, EASE);
     },
     [tx, ty]
   );
@@ -362,8 +451,8 @@ export default function CleaningScreen({ route, navigation }) {
       setPi(pi + 1);
       slideInFrom(SCREEN_W);
     } else {
-      tx.value = withSpring(0, SPRING);
-      setShowConfirm(true);
+      tx.value = withTiming(0, EASE);
+      endOfGroupRef.current();
     }
   }, [pi, visible.length, slideInFrom, SCREEN_W, tx]);
 
@@ -372,7 +461,7 @@ export default function CleaningScreen({ route, navigation }) {
       setPi(pi - 1);
       slideInFrom(-SCREEN_W);
     } else {
-      tx.value = withSpring(0, SPRING);
+      tx.value = withTiming(0, EASE);
     }
   }, [pi, slideInFrom, SCREEN_W, tx]);
 
@@ -386,7 +475,7 @@ export default function CleaningScreen({ route, navigation }) {
     mark(current);
     ty.value = SCREEN_H * 0.12;
     tx.value = 0;
-    ty.value = withSpring(0, SPRING);
+    ty.value = withTiming(0, EASE);
     afterRemovalAdvance(visible.length - 1);
   }, [current, mark, visible.length, afterRemovalAdvance, ty, tx, SCREEN_H]);
 
@@ -422,56 +511,92 @@ export default function CleaningScreen({ route, navigation }) {
       'worklet';
       const horizontal = Math.abs(e.translationX) > Math.abs(e.translationY);
       if (horizontal) {
-        if (e.translationX < -SWIPE_X) {
-          tx.value = withTiming(-SCREEN_W, { duration: 150 }, (finished) => {
+        if (e.translationX < -SWIPE_X || e.velocityX < -800) {
+          tx.value = withTiming(-SCREEN_W, { duration: 110 }, (finished) => {
             if (finished) runOnJS(callNext)();
           });
-        } else if (e.translationX > SWIPE_X) {
-          tx.value = withTiming(SCREEN_W, { duration: 150 }, (finished) => {
+        } else if (e.translationX > SWIPE_X || e.velocityX > 800) {
+          tx.value = withTiming(SCREEN_W, { duration: 110 }, (finished) => {
             if (finished) runOnJS(callPrev)();
           });
         } else {
-          tx.value = withSpring(0, SPRING);
+          tx.value = withTiming(0, EASE);
         }
-      } else if (e.translationY < -DELETE_THRESHOLD) {
-        ty.value = withTiming(-SCREEN_H, { duration: 180 }, (finished) => {
+      } else if (
+        e.translationY < -DELETE_THRESHOLD ||
+        (e.translationY < -60 && e.velocityY < FLICK_VELOCITY)
+      ) {
+        ty.value = withTiming(-SCREEN_H, { duration: 140 }, (finished) => {
           if (finished) runOnJS(callDel)();
         });
       } else if (e.translationY > MOVE_THRESHOLD) {
-        ty.value = withSpring(0, SPRING);
+        ty.value = withTiming(0, EASE);
         runOnJS(callDown)();
       } else {
-        ty.value = withSpring(0, SPRING);
+        ty.value = withTiming(0, EASE);
       }
     });
 
-  // ---- Move flow ----
-  const handleMove = async (album) => {
-    setShowMove(false);
+  // ---- Move flow (shared by swipe-down sheet AND the quick chips) ----
+  // Categorizing ≠ deleting: the photo STAYS in the cleaning flow; only the
+  // ✓ chip switches to the new album.
+  const moveCurrentTo = async (album) => {
     if (!current) return;
+    const id = current.id;
     try {
       await moveAssetsToAlbum([current], album);
-      setMovedIds((s) => new Set(s).add(current.id));
+      incrementUsage(album.id);
+      setAlbumOverrides((m) => ({ ...m, [id]: album.id }));
       showToast(t('moved_to', { album: album.title }));
-      afterRemovalAdvance(visible.length - 1);
     } catch (e) {
-      // move failed — keep photo in place
+      // move failed — nothing changes
     }
   };
 
+  const handleMove = async (album) => {
+    setShowMove(false);
+    await moveCurrentTo(album);
+  };
+
+  // "+" chip: create a NEW album with the current photo (photo stays).
+  const createAlbumWithCurrent = async (name) => {
+    if (!current || !name) return;
+    const id = current.id;
+    try {
+      const album = await MediaLibrary.createAlbumAsync(name, current, false);
+      if (album) {
+        incrementUsage(album.id);
+        setAlbumOverrides((m) => ({ ...m, [id]: album.id }));
+      }
+      showToast(t('moved_to', { album: name }));
+      const list = await MediaLibrary.getAlbumsAsync();
+      setRealAlbums(list.filter((a) => a.assetCount > 0));
+    } catch (e) {
+      // creation failed — photo stays
+    }
+  };
+
+  // The current photo's album for the ✓ chip: a manual move wins, then the
+  // asset's own albumId (Android), then the cleaning scope's album.
+  const currentAssetAlbumId =
+    (displayAsset &&
+      (albumOverrides[displayAsset.id] || displayAsset.albumId)) ||
+    (albumId !== ALL_ALBUM_ID ? albumId : null);
+
   // ---- Group confirmation (ONE batched delete per group) ----
-  const toggleMark = (id) => {
+  // Spare / re-mark from the confirm sheet and its full-screen viewer.
+  const unmark = (id) => {
+    markStackRef.current = markStackRef.current.filter((x) => x !== id);
     setMarkedIds((s) => {
       const next = new Set(s);
-      if (next.has(id)) {
-        next.delete(id);
-        markStackRef.current = markStackRef.current.filter((x) => x !== id);
-      } else {
-        next.add(id);
-        markStackRef.current.push(id);
-      }
+      next.delete(id);
       return next;
     });
+  };
+
+  const remark = (id) => {
+    if (!markStackRef.current.includes(id)) markStackRef.current.push(id);
+    setMarkedIds((s) => new Set(s).add(id));
   };
 
   const clearGroupMarks = () => {
@@ -486,17 +611,38 @@ export default function CleaningScreen({ route, navigation }) {
     );
   };
 
-  const nextGroup = () => {
+  const nextGroup = async () => {
     setShowConfirm(false);
     setPi(0);
     tx.value = 0;
     ty.value = 0;
-    if (gi < groups.length - 1) setGi(gi + 1);
-    else finishAll();
+    if (gi < groups.length - 1) {
+      setGi(gi + 1);
+      return;
+    }
+    // Last loaded group but more photos exist — load the next segment first.
+    if (cursorRef.current.hasNext) {
+      await ensureLoaded((gi + 2) * groupSize);
+      const totalGroups = Math.ceil(allRef.current.length / groupSize);
+      if (gi < totalGroups - 1) {
+        setGi(gi + 1);
+        return;
+      }
+    }
+    finishAll();
+  };
+
+  // Fresh closure every render: open the sheet only if this group has marks
+  // (markStackRef is updated synchronously, so a just-marked last photo is
+  // seen immediately). No marks → straight to the next group, no sheet.
+  endOfGroupRef.current = () => {
+    const stack = new Set(markStackRef.current);
+    if (group.some((a) => stack.has(a.id))) setShowConfirm(true);
+    else nextGroup();
   };
 
   const skipGroup = () => {
-    clearGroupMarks(); // skip = keep everything in this group
+    clearGroupMarks(); // keep all = spare everything in this group
     nextGroup();
   };
 
@@ -520,26 +666,11 @@ export default function CleaningScreen({ route, navigation }) {
     nextGroup();
   };
 
-  const moveMarked = async (album) => {
-    setMoveMarkedMode(false);
-    const targets = group.filter((a) => markedIds.has(a.id));
-    try {
-      await moveAssetsToAlbum(targets, album);
-      setMovedIds((s) => {
-        const next = new Set(s);
-        targets.forEach((a) => next.add(a.id));
-        return next;
-      });
-      clearGroupMarks();
-      showToast(t('moved_to', { album: album.title }));
-    } catch (e) {
-      // ignore
-    }
-    nextGroup();
-  };
-
   const closeConfirmOnly = () => {
     if (visible.length === 0) {
+      // Every photo in the group is marked and the user backed out —
+      // treat it as "keep all" so nothing is deleted silently later.
+      clearGroupMarks();
       nextGroup();
       return;
     }
@@ -551,29 +682,32 @@ export default function CleaningScreen({ route, navigation }) {
 
   // ---- Completion / exit (marks are discarded — deletion only happens
   // through the explicit batched group action) ----
-  const finishAll = async () => {
+  /** Session bookkeeping runs in the BACKGROUND — never blocks the UI. */
+  const settleSession = () => {
     const viewed = viewedRef.current.size;
-    if (viewed > 0) recordViewed('photo', viewed);
-    if (sessionRef.current) await sessionManager.finishSession(sessionRef.current);
-    setFinalStats({ ...cleanedRef.current });
-    setCompleted(true);
+    const session = sessionRef.current;
+    sessionRef.current = null;
+    (async () => {
+      try {
+        if (viewed > 0) await recordViewed('photo', viewed);
+        if (session) await sessionManager.finishSession(session);
+      } catch (e) {
+        // stats are best-effort
+      }
+    })();
   };
 
+  const finishAll = () => {
+    setFinalStats({ ...cleanedRef.current });
+    setCompleted(true);
+    settleSession();
+  };
+
+  // X = leave, no confirmation needed: deletion only ever happens through
+  // the explicit per-group batch action, so exiting loses nothing.
   const exit = () => {
-    Alert.alert(t('exit'), '', [
-      { text: t('cancel'), style: 'cancel' },
-      {
-        text: t('exit'),
-        style: 'destructive',
-        onPress: async () => {
-          const viewed = viewedRef.current.size;
-          if (viewed > 0) recordViewed('photo', viewed);
-          if (sessionRef.current)
-            await sessionManager.finishSession(sessionRef.current);
-          navigation.goBack();
-        },
-      },
-    ]);
+    navigation.goBack(); // leave IMMEDIATELY
+    settleSession();
   };
 
   // ---- Render ----
@@ -677,7 +811,13 @@ export default function CleaningScreen({ route, navigation }) {
 
       {currentCluster && (
         <Pressable
-          style={[styles.similarPill, { backgroundColor: colors.accent }]}
+          style={[
+            styles.similarPill,
+            {
+              backgroundColor: colors.accent,
+              bottom: Math.max(insets.bottom, 12) + 128,
+            },
+          ]}
           onPress={() => setShowSimilar(true)}
         >
           <Ionicons name="copy-outline" size={14} color="#fff" />
@@ -686,6 +826,19 @@ export default function CleaningScreen({ route, navigation }) {
           </Text>
         </Pressable>
       )}
+
+      {/* Quick-categorize chips: [+] [✓current] [others by usage] */}
+      <View
+        style={[styles.chipsWrap, { bottom: Math.max(insets.bottom, 12) + 80 }]}
+        pointerEvents="box-none"
+      >
+        <AlbumChips
+          albums={realAlbums}
+          currentAlbumId={currentAssetAlbumId}
+          onSelect={moveCurrentTo}
+          onCreate={createAlbumWithCurrent}
+        />
+      </View>
 
       {toast && (
         <View style={[styles.toast, { backgroundColor: colors.elevated }]}>
@@ -731,22 +884,14 @@ export default function CleaningScreen({ route, navigation }) {
         onSelect={handleMove}
       />
 
-      <MoveSheet
-        visible={moveMarkedMode}
-        excludeAlbumId={albumId}
-        onClose={() => setMoveMarkedMode(false)}
-        onSelect={moveMarked}
-      />
-
       <GroupConfirmSheet
-        visible={showConfirm && !moveMarkedMode}
-        assets={group.filter((a) => !movedIds.has(a.id))}
-        markedIds={markedIds}
-        onToggleMark={toggleMark}
+        visible={showConfirm}
+        assets={markedInGroup}
+        onUnmark={unmark}
+        onRemark={remark}
         onClose={closeConfirmOnly}
-        onSkip={skipGroup}
-        onDeleteMarked={deleteMarkedNow}
-        onMoveMarked={() => setMoveMarkedMode(true)}
+        onKeepAll={skipGroup}
+        onDelete={deleteMarkedNow}
       />
     </SafeAreaView>
   );
@@ -766,9 +911,9 @@ const styles = StyleSheet.create({
   exitBtn: { borderRadius: 18, padding: 8 },
   photoArea: { flex: 1, marginBottom: 8 },
   indicatorWrap: { paddingVertical: 8, marginBottom: 120 },
+  chipsWrap: { position: 'absolute', left: 0, right: 0 },
   similarPill: {
     position: 'absolute',
-    bottom: 108,
     alignSelf: 'center',
     flexDirection: 'row',
     alignItems: 'center',

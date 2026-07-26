@@ -13,6 +13,8 @@ import {
   StyleSheet,
   ActivityIndicator,
   useWindowDimensions,
+  Share,
+  Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
@@ -23,8 +25,21 @@ import VideoCard from '../components/VideoCard';
 import BottomInfoBar from '../components/BottomInfoBar';
 import EXIFModal from '../components/EXIFModal';
 import AlbumPicker from '../components/AlbumPicker';
+import AlbumChips from '../components/AlbumChips';
 import GroupConfirmSheet from '../components/GroupConfirmSheet';
-import MoveSheet from '../components/MoveSheet';
+import { incrementUsage } from '../utils/albumUsage';
+import * as MediaLibrary from 'expo-media-library';
+import * as VideoThumbnails from 'expo-video-thumbnails';
+
+// expo-sharing (system share sheet for FILES) — guarded so the app still
+// runs before `npx expo install expo-sharing` has been executed.
+let Sharing = null;
+try {
+  // eslint-disable-next-line global-require
+  Sharing = require('expo-sharing');
+} catch (e) {
+  Sharing = null;
+}
 import { batchDelete } from '../utils/deletionManager';
 import * as sessionManager from '../utils/sessionManager';
 import {
@@ -44,37 +59,44 @@ function formatDuration(seconds) {
 }
 
 /**
- * Videos tab — DIRECT cleaning feed (no album-select screen).
- * The trash button MARKS a video (hidden from the feed, undoable); the
- * actual deletion happens ONCE per group via the confirmation sheet —
- * a single system dialog per batch.
+ * Videos tab — GROUP-AT-A-TIME cleaning feed.
+ * The feed only contains the CURRENT group (size from settings). When the
+ * last video of the group finishes (or the user swipes past it), the
+ * DELETE-confirmation sheet pops up IF anything is marked — otherwise the
+ * next group loads directly. Deletion is one batch per group.
  */
 export default function VideoCleaningScreen({ navigation }) {
   const { colors, t, settings, recycleBinActive } = useSettings();
   const { recordCleaned, recordViewed, toggleFavorite, isFavorite } = useApp();
   const { height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  const groupSize = settings.groupSize || 5;
+  const groupSize = settings.videoGroupSize || settings.groupSize || 5;
 
   const [albums, setAlbums] = useState([]);
   const [albumId, setAlbumId] = useState(ALL_ALBUM_ID);
   const [loading, setLoading] = useState(true);
-  const [videos, setVideos] = useState([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [remaining, setRemaining] = useState([]); // not yet reviewed
+  const [processedGroups, setProcessedGroups] = useState(0);
   const [index, setIndex] = useState(0);
   const [markedIds, setMarkedIds] = useState(new Set());
+  // Categorizing ≠ deleting: moving a video keeps it in the feed; only the
+  // ✓ chip follows to its new album.
+  const [albumOverrides, setAlbumOverrides] = useState({});
+  const [videoThumbs, setVideoThumbs] = useState({});
   const [showConfirm, setShowConfirm] = useState(false);
   const [showExif, setShowExif] = useState(false);
-  const [moveMarkedMode, setMoveMarkedMode] = useState(false);
-  const [confirmedUpTo, setConfirmedUpTo] = useState(0);
   const [completed, setCompleted] = useState(false);
   const [focused, setFocused] = useState(false);
   const [finalStats, setFinalStats] = useState({ count: 0, bytes: 0 });
+  const [videoProgress, setVideoProgress] = useState(0);
 
   const listRef = useRef(null);
   const sessionRef = useRef(null);
   const cleanedRef = useRef({ count: 0, bytes: 0 });
   const viewedRef = useRef(new Set());
   const markStackRef = useRef([]);
+  const finishedRef = useRef(false);
 
   const albumTitle = useMemo(() => {
     const a = albums.find((x) => x.id === albumId);
@@ -94,19 +116,22 @@ export default function VideoCleaningScreen({ navigation }) {
       .catch(() => {});
   }, [t]);
 
-  // (Re)load videos whenever the album filter changes — restarts cleaning.
+  // (Re)load whenever the album filter changes — restarts cleaning.
   useEffect(() => {
     let alive = true;
     setLoading(true);
     setCompleted(false);
     setIndex(0);
-    setConfirmedUpTo(0);
+    setProcessedGroups(0);
+    setVideoProgress(0);
     viewedRef.current = new Set();
     markStackRef.current = [];
+    finishedRef.current = false;
     (async () => {
       const assets = await getAssets(albumId, 'video');
       if (!alive) return;
-      setVideos(assets);
+      setTotalCount(assets.length);
+      setRemaining(assets);
       setMarkedIds(new Set());
       setLoading(false);
 
@@ -130,88 +155,72 @@ export default function VideoCleaningScreen({ navigation }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [albumId]);
 
-  const visible = useMemo(
-    () => videos.filter((v) => !markedIds.has(v.id)),
-    [videos, markedIds]
+  // ---- Group-at-a-time model ----
+  const currentGroup = useMemo(
+    () => remaining.slice(0, groupSize),
+    [remaining, groupSize]
   );
-  const current = visible[index] || null;
+  const visibleGroup = useMemo(
+    () => currentGroup.filter((v) => !markedIds.has(v.id)),
+    [currentGroup, markedIds]
+  );
+  const current = visibleGroup[Math.min(index, Math.max(0, visibleGroup.length - 1))] || null;
 
   useEffect(() => {
     if (current) viewedRef.current.add(current.id);
+    setVideoProgress(0);
   }, [current]);
 
   useEffect(() => {
-    const watched = viewedRef.current.size;
-    if (watched > 0 && watched >= confirmedUpTo + groupSize) {
-      setShowConfirm(true);
-    }
-  }, [index, confirmedUpTo, groupSize]);
-
-  useEffect(() => {
     if (sessionRef.current) {
-      sessionManager.saveProgress({
-        groupIndex: Math.floor(confirmedUpTo / groupSize),
-      });
+      sessionManager.saveProgress({ groupIndex: processedGroups });
     }
-  }, [confirmedUpTo, groupSize]);
+  }, [processedGroups]);
 
-  const currentGroupAssets = useMemo(() => {
-    const ids = [...viewedRef.current].slice(confirmedUpTo, confirmedUpTo + groupSize);
-    return videos.filter((v) => ids.includes(v.id));
-  }, [showConfirm, videos, confirmedUpTo, groupSize]); // eslint-disable-line react-hooks/exhaustive-deps
+  const watchedInGroup = currentGroup.filter((v) =>
+    viewedRef.current.has(v.id)
+  ).length;
 
-  // ---- Mark / undo (deletion is batched at group confirmation) ----
+  // ---- Mark / undo ----
   const markCurrent = useCallback(() => {
     if (!current) return;
     markStackRef.current.push(current.id);
     setMarkedIds((s) => new Set(s).add(current.id));
-    const remaining = visible.length - 1;
-    if (remaining === 0) setShowConfirm(true);
-    else if (index >= remaining) setIndex(remaining - 1);
-  }, [current, visible.length, index]);
+    const remainingVisible = visibleGroup.length - 1;
+    if (remainingVisible === 0) setShowConfirm(true);
+    else if (index >= remainingVisible) setIndex(remainingVisible - 1);
+  }, [current, visibleGroup.length, index]);
 
-  const undo = useCallback(() => {
-    const id = markStackRef.current.pop();
-    if (!id) return;
+  // Spare / re-mark from the confirm sheet and its full-screen viewer.
+  const unmark = (id) => {
+    markStackRef.current = markStackRef.current.filter((x) => x !== id);
     setMarkedIds((s) => {
       const next = new Set(s);
       next.delete(id);
       return next;
     });
-  }, []);
-
-  const toggleMark = (id) => {
-    setMarkedIds((s) => {
-      const next = new Set(s);
-      if (next.has(id)) {
-        next.delete(id);
-        markStackRef.current = markStackRef.current.filter((x) => x !== id);
-      } else {
-        next.add(id);
-        markStackRef.current.push(id);
-      }
-      return next;
-    });
   };
 
-  const clearGroupMarks = () => {
-    const ids = new Set(currentGroupAssets.map((a) => a.id));
-    setMarkedIds((s) => {
-      const next = new Set(s);
-      currentGroupAssets.forEach((a) => next.delete(a.id));
-      return next;
-    });
-    markStackRef.current = markStackRef.current.filter((id) => !ids.has(id));
+  const remark = (id) => {
+    if (!markStackRef.current.includes(id)) markStackRef.current.push(id);
+    setMarkedIds((s) => new Set(s).add(id));
   };
 
-  const closeConfirm = () => {
-    clearGroupMarks(); // skip = keep everything in this group
+  // ---- Group advance (ONLY after the user confirms) ----
+  const advanceGroup = useCallback(() => {
     setShowConfirm(false);
-    setConfirmedUpTo((c) => c + groupSize);
-  };
+    const groupIds = new Set(currentGroup.map((v) => v.id));
+    markStackRef.current = markStackRef.current.filter((id) => !groupIds.has(id));
+    setMarkedIds((prev) => new Set([...prev].filter((id) => !groupIds.has(id))));
+    setRemaining((r) => r.filter((v) => !groupIds.has(v.id)));
+    setProcessedGroups((g) => g + 1);
+    setIndex(0);
+    setVideoProgress(0);
+    if (listRef.current) listRef.current.scrollToOffset({ offset: 0, animated: false });
+  }, [currentGroup]);
 
   const deleteMarkedNow = async () => {
-    const targets = currentGroupAssets.filter((a) => markedIds.has(a.id));
+    const targets = currentGroup.filter((a) => markedIds.has(a.id));
     if (targets.length > 0) {
       try {
         // SINGLE system deletion dialog for the whole group.
@@ -221,48 +230,186 @@ export default function VideoCleaningScreen({ navigation }) {
         cleanedRef.current.count += count;
         cleanedRef.current.bytes += bytes;
         recordCleaned('video', count, bytes);
-        setVideos((v) => v.filter((x) => !targets.some((a) => a.id === x.id)));
-        clearGroupMarks();
       } catch (e) {
         return; // user cancelled the system dialog — keep marks
       }
     }
-    setShowConfirm(false);
-    setConfirmedUpTo((c) => c + groupSize);
+    advanceGroup();
   };
 
-  const moveMarked = async (album) => {
-    setMoveMarkedMode(false);
-    const targets = currentGroupAssets.filter((a) => markedIds.has(a.id));
-    try {
-      await moveAssetsToAlbum(targets, album);
-      setVideos((v) => v.filter((x) => !targets.some((a) => a.id === x.id)));
-      clearGroupMarks();
-    } catch (e) {
-      // ignore
+  // End of group: confirm sheet ONLY if something is marked for deletion;
+  // otherwise advance straight to the next group. A per-group latch stops
+  // repeated overscroll events from advancing several groups at once.
+  const groupEndFiredRef = useRef(false);
+  useEffect(() => {
+    groupEndFiredRef.current = false;
+  }, [currentGroup]);
+
+  const endGroup = useCallback(() => {
+    if (groupEndFiredRef.current || showConfirm) return;
+    groupEndFiredRef.current = true;
+    const stack = new Set(markStackRef.current);
+    if (currentGroup.some((v) => stack.has(v.id))) setShowConfirm(true);
+    else advanceGroup();
+  }, [currentGroup, advanceGroup, showConfirm]);
+
+  const closeConfirm = () => {
+    if (visibleGroup.length === 0) {
+      // Every video in the group is marked and the user backed out —
+      // advance (advanceGroup clears the group's marks; nothing is deleted).
+      advanceGroup();
+      return;
     }
     setShowConfirm(false);
-    setConfirmedUpTo((c) => c + groupSize);
+    groupEndFiredRef.current = false; // allow re-triggering after a back-out
   };
 
-  const finishAll = async () => {
+  // Thumbnails for the confirm sheet (expo-image can't render video URIs).
+  useEffect(() => {
+    if (!showConfirm) return undefined;
+    let alive = true;
+    (async () => {
+      const targets = currentGroup.filter(
+        (v) => markedIds.has(v.id) && !videoThumbs[v.id]
+      );
+      for (const v of targets) {
+        try {
+          const { uri } = await VideoThumbnails.getThumbnailAsync(v.uri, {
+            time: 500,
+            quality: 0.4,
+          });
+          if (!alive) return;
+          setVideoThumbs((m) => ({ ...m, [v.id]: uri }));
+        } catch (e) {
+          // thumbnail failed — sheet shows a blank cell, still tappable
+        }
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showConfirm]);
+
+  // ---- Quick-categorize chips (move CURRENT video) ----
+  const realAlbums = useMemo(
+    () => albums.filter((a) => a.id !== ALL_ALBUM_ID && a.assetCount > 0),
+    [albums]
+  );
+  // The current video's album for the ✓ chip: a manual move wins, then the
+  // asset's own albumId (Android), then the cleaning scope's album.
+  const currentAssetAlbumId =
+    (current && (albumOverrides[current.id] || current.albumId)) ||
+    (albumId !== ALL_ALBUM_ID ? albumId : null);
+
+  // Categorizing ≠ deleting: the video STAYS in the feed; only the ✓ chip
+  // switches to the new album.
+  const moveCurrentTo = async (album) => {
+    if (!current) return;
+    const id = current.id;
+    try {
+      await moveAssetsToAlbum([current], album);
+      incrementUsage(album.id);
+      setAlbumOverrides((m) => ({ ...m, [id]: album.id }));
+    } catch (e) {
+      // move failed — nothing changes
+    }
+  };
+
+  const createAlbumWithCurrent = async (name) => {
+    if (!current || !name) return;
+    const id = current.id;
+    try {
+      const album = await MediaLibrary.createAlbumAsync(name, current, false);
+      if (album) {
+        incrementUsage(album.id);
+        setAlbumOverrides((m) => ({ ...m, [id]: album.id }));
+      }
+      const list = await getAlbums('video', t('all_videos'));
+      setAlbums(list);
+    } catch (e) {
+      // creation failed — video stays
+    }
+  };
+
+  // ---- System share sheet for the current video ----
+  const shareCurrent = async () => {
+    if (!current) return;
+    try {
+      const info = await MediaLibrary.getAssetInfoAsync(current.id);
+      const uri = info.localUri || info.uri || current.uri;
+      if (Sharing && (await Sharing.isAvailableAsync())) {
+        await Sharing.shareAsync(uri);
+      } else if (Platform.OS === 'ios') {
+        await Share.share({ url: uri });
+      } else {
+        await Share.share({ message: uri });
+      }
+    } catch (e) {
+      // user dismissed the sheet / sharing unavailable
+    }
+  };
+
+  // ---- Completion / exit ----
+  const settleSession = () => {
     const viewed = viewedRef.current.size;
-    if (viewed > 0) recordViewed('video', viewed);
-    if (sessionRef.current) await sessionManager.finishSession(sessionRef.current);
+    const session = sessionRef.current;
+    sessionRef.current = null;
+    (async () => {
+      try {
+        if (viewed > 0) await recordViewed('video', viewed);
+        if (session) await sessionManager.finishSession(session);
+      } catch (e) {
+        // stats are best-effort
+      }
+    })();
+  };
+
+  const finishAll = useCallback(() => {
+    if (finishedRef.current) return;
+    finishedRef.current = true;
     setFinalStats({ ...cleanedRef.current });
     setCompleted(true);
-  };
+    settleSession();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const exit = async () => {
-    const viewed = viewedRef.current.size;
-    if (viewed > 0) recordViewed('video', viewed);
-    if (sessionRef.current) await sessionManager.finishSession(sessionRef.current);
-    navigation.navigate('PhotosTab');
+  // All groups processed -> completion.
+  useEffect(() => {
+    if (!loading && totalCount > 0 && remaining.length === 0) finishAll();
+  }, [loading, totalCount, remaining.length, finishAll]);
+
+  const exit = () => {
+    navigation.navigate('PhotosTab'); // leave IMMEDIATELY
+    settleSession();
   };
 
   const onViewableItemsChanged = useRef(({ viewableItems }) => {
     if (viewableItems.length > 0) setIndex(viewableItems[0].index ?? 0);
   }).current;
+
+  // Swiping PAST the last video of the group ends the group (confirm sheet
+  // only if something is marked).
+  const onScroll = (e) => {
+    const y = e.nativeEvent.contentOffset.y;
+    if (
+      visibleGroup.length > 0 &&
+      y > (visibleGroup.length - 1) * height + 40 &&
+      !showConfirm
+    ) {
+      endGroup();
+    }
+  };
+
+  // The last video finishing its playback ends the group too.
+  const onActiveEnded = useCallback(() => {
+    if (index === visibleGroup.length - 1 && !showConfirm) endGroup();
+  }, [index, visibleGroup.length, showConfirm, endGroup]);
+
+  const isEmpty = !loading && !completed && totalCount === 0;
+  useEffect(() => {
+    navigation.setParams({ empty: isEmpty });
+  }, [isEmpty, navigation]);
 
   if (loading) {
     return (
@@ -272,22 +419,31 @@ export default function VideoCleaningScreen({ navigation }) {
     );
   }
 
-  if (completed || visible.length === 0) {
+  if (isEmpty) {
+    return (
+      <View style={[styles.center, { backgroundColor: colors.background }]}>
+        <Ionicons name="videocam-off-outline" size={48} color={colors.subtext} />
+        <Text style={[styles.emptyText, { color: colors.subtext }]}>
+          {t('no_videos')}
+        </Text>
+      </View>
+    );
+  }
+
+  if (completed) {
     return (
       <View style={[styles.center, { backgroundColor: colors.background }]}>
         <Ionicons name="sparkles" size={54} color={colors.accent} />
         <Text style={[styles.doneTitle, { color: colors.text }]}>
-          {completed ? t('completion_title') : t('no_videos')}
+          {t('completion_title')}
         </Text>
-        {completed && (
-          <Text style={[styles.doneStat, { color: colors.text }]}>
-            {t('completion_deleted', { count: finalStats.count })} ·{' '}
-            {t('completion_saved', { size: formatBytes(finalStats.bytes) })}
-          </Text>
-        )}
+        <Text style={[styles.doneStat, { color: colors.text }]}>
+          {t('completion_deleted', { count: finalStats.count })} ·{' '}
+          {t('completion_saved', { size: formatBytes(finalStats.bytes) })}
+        </Text>
         <Pressable
           style={[styles.doneBtn, { backgroundColor: colors.accent }]}
-          onPress={() => (completed ? navigation.navigate('PhotosTab') : finishAll())}
+          onPress={() => navigation.navigate('PhotosTab')}
         >
           <Text style={styles.doneBtnText}>{t('done')}</Text>
         </Pressable>
@@ -299,20 +455,29 @@ export default function VideoCleaningScreen({ navigation }) {
     <View style={{ flex: 1, backgroundColor: '#000' }}>
       <FlatList
         ref={listRef}
-        data={visible}
+        data={visibleGroup}
         keyExtractor={(item) => item.id}
         renderItem={({ item, index: i }) => (
-          <VideoCard asset={item} active={focused && i === index} height={height} />
+          <VideoCard
+            asset={item}
+            active={focused && i === index && !showConfirm}
+            height={height}
+            onProgress={i === index ? setVideoProgress : undefined}
+            onEnded={i === index ? onActiveEnded : undefined}
+          />
         )}
         pagingEnabled
         showsVerticalScrollIndicator={false}
         onViewableItemsChanged={onViewableItemsChanged}
         viewabilityConfig={{ itemVisiblePercentThreshold: 60 }}
         getItemLayout={(_, i) => ({ length: height, offset: height * i, index: i })}
+        onScroll={onScroll}
+        scrollEventThrottle={64}
         windowSize={5}
         maxToRenderPerBatch={3}
       />
 
+      {/* Top bar: album filter · group progress (x / group size) · exit */}
       <View style={[styles.topBar, { top: insets.top + 6 }]}>
         <AlbumPicker
           albums={albums}
@@ -320,13 +485,18 @@ export default function VideoCleaningScreen({ navigation }) {
           onSelect={(a) => setAlbumId(a.id)}
         />
         <Text style={styles.topText} numberOfLines={1}>
-          {t('videos_watched', { current: index + 1, total: visible.length })}
+          {t('group_of', {
+            current: processedGroups + 1,
+            total: Math.max(1, processedGroups + Math.ceil(remaining.length / groupSize)),
+          })}{' '}
+          · {Math.min(watchedInGroup, currentGroup.length)}/{currentGroup.length}
         </Text>
         <Pressable onPress={exit} hitSlop={10} style={styles.exitBtn}>
           <Ionicons name="close" size={22} color="#fff" />
         </Pressable>
       </View>
 
+      {/* Right floating actions */}
       <View style={[styles.actions, { bottom: insets.bottom + 170 }]}>
         <Pressable
           onPress={() => current && toggleFavorite(current.id)}
@@ -341,36 +511,60 @@ export default function VideoCleaningScreen({ navigation }) {
         <Pressable onPress={markCurrent} style={styles.actionBtn}>
           <Ionicons name="trash-outline" size={28} color="#fff" />
         </Pressable>
+        <Pressable onPress={shareCurrent} style={styles.actionBtn}>
+          <Ionicons name="share-outline" size={26} color="#fff" />
+        </Pressable>
       </View>
 
+      {/* Quick-categorize chips: [+] [✓current] [others by usage] */}
+      <View
+        style={[styles.chipsWrap, { bottom: Math.max(insets.bottom, 12) + 88 }]}
+        pointerEvents="box-none"
+      >
+        <AlbumChips
+          albums={realAlbums}
+          currentAlbumId={currentAssetAlbumId}
+          onSelect={moveCurrentTo}
+          onCreate={createAlbumWithCurrent}
+          dark
+        />
+      </View>
+
+      {/* Playback progress bar (just above the info bar) */}
+      <View
+        style={[
+          styles.progressTrack,
+          { bottom: Math.max(insets.bottom, 12) + 74 },
+        ]}
+        pointerEvents="none"
+      >
+        <View
+          style={[
+            styles.progressFill,
+            { width: `${Math.round(videoProgress * 100)}%`, backgroundColor: colors.accent },
+          ]}
+        />
+      </View>
+
+      {/* Floating date + duration (no bar, nothing on either side) */}
       <BottomInfoBar
         asset={current}
         subtitle={current ? formatDuration(current.duration) : null}
-        isFavorite={current ? isFavorite(current.id) : false}
-        onToggleFavorite={() => current && toggleFavorite(current.id)}
         onPressDate={() => current && setShowExif(true)}
-        undoCount={markStackRef.current.length}
-        onUndo={undo}
+        floating
       />
 
       <EXIFModal visible={showExif} asset={current} onClose={() => setShowExif(false)} />
 
-      <MoveSheet
-        visible={moveMarkedMode}
-        excludeAlbumId={albumId}
-        onClose={() => setMoveMarkedMode(false)}
-        onSelect={moveMarked}
-      />
-
       <GroupConfirmSheet
-        visible={showConfirm && !moveMarkedMode}
-        assets={currentGroupAssets}
-        markedIds={markedIds}
-        onToggleMark={toggleMark}
-        onClose={() => setShowConfirm(false)}
-        onSkip={closeConfirm}
-        onDeleteMarked={deleteMarkedNow}
-        onMoveMarked={() => setMoveMarkedMode(true)}
+        visible={showConfirm}
+        assets={currentGroup.filter((v) => markedIds.has(v.id))}
+        onUnmark={unmark}
+        onRemark={remark}
+        onClose={closeConfirm}
+        onKeepAll={advanceGroup}
+        onDelete={deleteMarkedNow}
+        thumbs={videoThumbs}
       />
     </View>
   );
@@ -378,6 +572,7 @@ export default function VideoCleaningScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  emptyText: { fontSize: 15, marginTop: 12, fontWeight: '600' },
   topBar: {
     position: 'absolute',
     left: 12,
@@ -407,6 +602,17 @@ const styles = StyleSheet.create({
     borderRadius: 26,
     padding: 12,
   },
+  chipsWrap: { position: 'absolute', left: 0, right: 0 },
+  progressTrack: {
+    position: 'absolute',
+    left: 20,
+    right: 20,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.25)',
+    overflow: 'hidden',
+  },
+  progressFill: { height: 3, borderRadius: 2 },
   doneTitle: { fontSize: 24, fontWeight: '800', marginTop: 16 },
   doneStat: { fontSize: 15, fontWeight: '600', marginTop: 14 },
   doneBtn: {

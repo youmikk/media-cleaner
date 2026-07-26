@@ -11,21 +11,25 @@ import {
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
+import PhotoViewer from './PhotoViewer';
 import { getAssetsByIds } from '../utils/albumHelpers';
 
 /**
  * Grid modal of all photos in a similarity cluster (whole album scope).
- * Multi-select, then soft-delete the selection via `onDeleteSelected`.
+ * Tap a photo to view it FULL SCREEN (zoomable); tap its circle badge to
+ * (de)select. Soft-deletes the selection via `onDeleteSelected`.
  */
 export default function SimilarModal({ visible, clusterIds, onClose, onDeleteSelected }) {
   const { colors, t } = useSettings();
   const { width } = useWindowDimensions();
   const [assets, setAssets] = useState([]);
   const [selected, setSelected] = useState({});
+  const [viewerIndex, setViewerIndex] = useState(null); // null = closed
 
   useEffect(() => {
     if (!visible || !clusterIds) return;
     setSelected({});
+    setViewerIndex(null);
     getAssetsByIds(clusterIds).then(setAssets);
   }, [visible, clusterIds]);
 
@@ -51,20 +55,23 @@ export default function SimilarModal({ visible, clusterIds, onClose, onDeleteSel
             columnWrapperStyle={{ gap: 8 }}
             contentContainerStyle={{ gap: 8, paddingBottom: 12 }}
             style={{ maxHeight: 420 }}
-            renderItem={({ item }) => {
+            renderItem={({ item, index }) => {
               const isSel = !!selected[item.id];
               return (
                 <Pressable
-                  onPress={() =>
-                    setSelected((s) => ({ ...s, [item.id]: !s[item.id] }))
-                  }
+                  onPress={() => setViewerIndex(index)} // tap = view full screen
                   style={{ width: cell, height: cell }}
                 >
                   <Image
                     source={{ uri: item.uri }}
                     style={[styles.thumb, isSel && { opacity: 0.55 }]}
                   />
-                  <View
+                  {/* circle badge = (de)select */}
+                  <Pressable
+                    hitSlop={8}
+                    onPress={() =>
+                      setSelected((s) => ({ ...s, [item.id]: !s[item.id] }))
+                    }
                     style={[
                       styles.check,
                       {
@@ -77,7 +84,7 @@ export default function SimilarModal({ visible, clusterIds, onClose, onDeleteSel
                       size={14}
                       color="#fff"
                     />
-                  </View>
+                  </Pressable>
                 </Pressable>
               );
             }}
@@ -108,6 +115,17 @@ export default function SimilarModal({ visible, clusterIds, onClose, onDeleteSel
           </Pressable>
         </View>
       </View>
+
+      <PhotoViewer
+        visible={viewerIndex !== null}
+        assets={assets}
+        initialIndex={viewerIndex || 0}
+        onClose={() => setViewerIndex(null)}
+        selected={selected}
+        onToggleSelect={(id) =>
+          setSelected((s) => ({ ...s, [id]: !s[id] }))
+        }
+      />
     </Modal>
   );
 }

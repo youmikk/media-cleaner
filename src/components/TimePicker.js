@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import {
   Modal,
   View,
@@ -24,33 +24,14 @@ function yearLabel(year, language) {
 
 /**
  * Time-scope picker: clean a whole YEAR or a specific YEAR-MONTH.
- * Emits { label, start, end } (ms epoch range) or null for "all time".
+ * Takes a precomputed `years` histogram (see buildYearHistogram) so it can
+ * render from the album-summary cache without any scanning.
+ * Emits { label, year, month, start, end } or null for "all time".
  */
-export default function TimePicker({ assets, value, onSelect }) {
+export default function TimePicker({ years = [], value, onSelect }) {
   const { colors, t, language } = useSettings();
   const [open, setOpen] = useState(false);
   const [expandedYear, setExpandedYear] = useState(null);
-
-  const years = useMemo(() => {
-    const map = new Map(); // year -> {count, months: Map(month -> count)}
-    for (const a of assets) {
-      if (!a.creationTime) continue;
-      const d = new Date(a.creationTime);
-      const y = d.getFullYear();
-      const m = d.getMonth();
-      if (!map.has(y)) map.set(y, { count: 0, months: new Map() });
-      const e = map.get(y);
-      e.count++;
-      e.months.set(m, (e.months.get(m) || 0) + 1);
-    }
-    return [...map.entries()]
-      .sort((a, b) => b[0] - a[0])
-      .map(([year, e]) => ({
-        year,
-        count: e.count,
-        months: [...e.months.entries()].sort((a, b) => b[0] - a[0]),
-      }));
-  }, [assets]);
 
   const pick = (selection) => {
     setOpen(false);
@@ -60,6 +41,8 @@ export default function TimePicker({ assets, value, onSelect }) {
   const pickYear = (year) =>
     pick({
       label: yearLabel(year, language),
+      year,
+      month: null,
       start: new Date(year, 0, 1).getTime(),
       end: new Date(year + 1, 0, 1).getTime(),
     });
@@ -67,6 +50,8 @@ export default function TimePicker({ assets, value, onSelect }) {
   const pickMonth = (year, month) =>
     pick({
       label: monthLabel(year, month, language),
+      year,
+      month,
       start: new Date(year, month, 1).getTime(),
       end: new Date(year, month + 1, 1).getTime(),
     });

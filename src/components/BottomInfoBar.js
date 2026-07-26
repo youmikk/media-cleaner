@@ -10,6 +10,9 @@ import { formatDate } from '../utils/albumHelpers';
  * Floating info bar shown on cleaning screens (replaces the tab bar).
  * Liquid Glass on iOS 26, blur fallback elsewhere.
  * Left: favorite · Center: date (+optional subtitle, opens EXIF) · Right: undo.
+ *
+ * `floating` mode (video feed): NO bar at all — just the date/address text
+ * floating over the video with a shadow, nothing on either side.
  */
 export default function BottomInfoBar({
   asset,
@@ -18,11 +21,51 @@ export default function BottomInfoBar({
   isFavorite,
   onToggleFavorite,
   onPressDate,
-  undoCount,
+  undoCount = 0,
   onUndo,
+  hideFavorite = false,
+  floating = false,
 }) {
   const { colors, language, t } = useSettings();
   const insets = useSafeAreaInsets();
+
+  if (floating) {
+    return (
+      <View
+        style={[styles.wrap, { bottom: Math.max(insets.bottom, 12) }]}
+        pointerEvents="box-none"
+      >
+        <Pressable onPress={onPressDate} hitSlop={8} style={styles.floatingCenter}>
+          <View style={styles.dateRow}>
+            <Text style={[styles.date, styles.floatingText]} numberOfLines={1}>
+              {asset ? formatDate(asset.creationTime, language) : '—'}
+              {subtitle ? ` · ${subtitle}` : ''}
+            </Text>
+            <Ionicons
+              name="information-circle-outline"
+              size={15}
+              color="rgba(255,255,255,0.8)"
+            />
+          </View>
+          {!!address && (
+            <View style={styles.addressRow}>
+              <Ionicons
+                name="location-outline"
+                size={11}
+                color="rgba(255,255,255,0.8)"
+              />
+              <Text
+                style={[styles.address, styles.floatingText]}
+                numberOfLines={1}
+              >
+                {address}
+              </Text>
+            </View>
+          )}
+        </Pressable>
+      </View>
+    );
+  }
 
   return (
     <View
@@ -34,18 +77,22 @@ export default function BottomInfoBar({
         overlayColor={colors.barOverlay}
       >
         <View style={styles.row}>
-          <Pressable
-            onPress={onToggleFavorite}
-            hitSlop={10}
-            style={styles.side}
-            accessibilityLabel={t('favorite')}
-          >
-            <Ionicons
-              name={isFavorite ? 'heart' : 'heart-outline'}
-              size={24}
-              color={isFavorite ? colors.heart : colors.subtext}
-            />
-          </Pressable>
+          {hideFavorite ? (
+            <View style={styles.side} />
+          ) : (
+            <Pressable
+              onPress={onToggleFavorite}
+              hitSlop={10}
+              style={styles.side}
+              accessibilityLabel={t('favorite')}
+            >
+              <Ionicons
+                name={isFavorite ? 'heart' : 'heart-outline'}
+                size={24}
+                color={isFavorite ? colors.heart : colors.subtext}
+              />
+            </Pressable>
+          )}
 
           <Pressable onPress={onPressDate} style={styles.center} hitSlop={6}>
             <View style={styles.centerText}>
@@ -125,6 +172,12 @@ const styles = StyleSheet.create({
   },
   date: { fontSize: 14, fontWeight: '600' },
   address: { fontSize: 11 },
+  floatingCenter: { alignItems: 'center' },
+  floatingText: {
+    color: '#fff',
+    textShadowColor: 'rgba(0,0,0,0.65)',
+    textShadowRadius: 4,
+  },
   badge: {
     position: 'absolute',
     top: -4,

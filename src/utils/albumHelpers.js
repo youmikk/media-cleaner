@@ -1,11 +1,13 @@
 import * as MediaLibrary from 'expo-media-library';
 // SDK 54: use the stable legacy file-system API (getInfoAsync etc.).
 import * as FileSystem from 'expo-file-system/legacy';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export const ALL_ALBUM_ID = 'all';
 const PAGE_SIZE = 200;
 const MAX_ASSETS = 5000; // safety cap for very large libraries
-const SNAPSHOT_SAMPLE = 300; // size sampling cap for storage snapshots
+const SNAPSHOT_SAMPLE = 60; // size sampling cap for storage snapshots
+const SNAPSHOT_CONCURRENCY = 6;
 
 /**
  * List device albums for the given media type, prefixed by a synthetic
@@ -104,10 +106,13 @@ export async function getAssetSize(asset) {
  */
 export async function getAlbumSnapshot(albumId, mediaType, precomputedAssets) {
   const assets = precomputedAssets || (await getAssets(albumId, mediaType));
+  // Small sample, parallel batches — keeps cleaning-screen entry snappy.
   const sample = assets.slice(0, SNAPSHOT_SAMPLE);
   let sampleBytes = 0;
-  for (const a of sample) {
-    sampleBytes += await getAssetSize(a);
+  for (let i = 0; i < sample.length; i += SNAPSHOT_CONCURRENCY) {
+    const batch = sample.slice(i, i + SNAPSHOT_CONCURRENCY);
+    const sizes = await Promise.all(batch.map((a) => getAssetSize(a)));
+    for (const s of sizes) sampleBytes += s;
   }
   const bytes =
     sample.length > 0
@@ -148,6 +153,53 @@ export async function findAlbumByTitle(title) {
 export async function moveAssetsToAlbum(assets, album) {
   const ids = assets.map((a) => (typeof a === 'string' ? a : a.id));
   await MediaLibrary.addAssetsToAlbumAsync(ids, album.id, false);
+}
+
+// ---- Album summary cache: the home screen renders INSTANTLY from this and
+// skips scanning entirely while the album's fingerprint is unchanged. ----
+
+const SUMMARY_PREFIX = 'album_summary_';
+
+/** Build the year -> month photo-count histogram used by the time picker. */
+export function buildYearHistogram(assets) {
+  const map = new Map();
+  for (const a of assets) {
+    if (!a.creationTime) continue;
+    const d = new Date(a.creationTime);
+    const y = d.getFullYear();
+    const m = d.getMonth();
+    if (!map.has(y)) map.set(y, { count: 0, months: new Map() });
+    const e = map.get(y);
+    e.count++;
+    e.months.set(m, (e.months.get(m) || 0) + 1);
+  }
+  return [...map.entries()]
+    .sort((a, b) => b[0] - a[0])
+    .map(([year, e]) => ({
+      year,
+      count: e.count,
+      months: [...e.months.entries()].sort((a, b) => b[0] - a[0]),
+    }));
+}
+
+export async function getAlbumSummary(albumId) {
+  try {
+    const raw = await AsyncStorage.getItem(`${SUMMARY_PREFIX}${albumId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+export async function saveAlbumSummary(albumId, entry) {
+  try {
+    await AsyncStorage.setItem(
+      `${SUMMARY_PREFIX}${albumId}`,
+      JSON.stringify(entry)
+    );
+  } catch (e) {
+    // best effort
+  }
 }
 
 export function formatBytes(bytes) {

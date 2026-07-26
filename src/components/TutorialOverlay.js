@@ -1,5 +1,11 @@
-import React, { useState } from 'react';
-import { Modal, View, Text, Pressable, StyleSheet } from 'react-native';
+import React, { useRef, useState } from 'react';
+import {
+  View,
+  Text,
+  Pressable,
+  StyleSheet,
+  PanResponder,
+} from 'react-native';
 import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
@@ -18,9 +24,40 @@ export default function TutorialOverlay({ visible, onDone }) {
   const [step, setStep] = useState(0);
   const isLast = step === STEPS.length - 1;
 
+  // Swipe left/right to move through steps (practising the gesture itself).
+  const stateRef = useRef({ step, onDone });
+  stateRef.current = { step, onDone };
+  const pan = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 12,
+      onPanResponderRelease: (_, g) => {
+        const { step: s, onDone: done } = stateRef.current;
+        if (g.dx < -40) {
+          if (s === STEPS.length - 1) {
+            setStep(0);
+            done();
+          } else {
+            setStep(s + 1);
+          }
+        } else if (g.dx > 40 && s > 0) {
+          setStep(s - 1);
+        }
+      },
+    })
+  ).current;
+
+  if (!visible) return null;
+
   return (
-    <Modal visible={visible} transparent animationType="fade">
-      <BlurView intensity={40} tint={colors.glassTint} style={styles.backdrop}>
+    // Absolute in-app overlay (NOT a Modal) — immune to Android's
+    // modal-vs-dialog touch conflicts. Swipe ANYWHERE to move through steps.
+    <View style={styles.overlay} pointerEvents="auto">
+      <BlurView
+        intensity={40}
+        tint={colors.glassTint}
+        style={styles.backdrop}
+        {...pan.panHandlers}
+      >
         <View style={[styles.card, { backgroundColor: colors.card }]}>
           <View
             style={[
@@ -71,11 +108,16 @@ export default function TutorialOverlay({ visible, onDone }) {
           </Pressable>
         </View>
       </BlurView>
-    </Modal>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 1000,
+    elevation: 1000,
+  },
   backdrop: {
     flex: 1,
     alignItems: 'center',

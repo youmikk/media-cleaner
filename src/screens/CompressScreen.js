@@ -40,6 +40,9 @@ const QUALITIES = [
   { key: 'medium', value: 0.6 },
   { key: 'low', value: 0.4 },
 ];
+// Rough post-compression size ratios (shown as estimates in the UI).
+const IMG_RATIO = { high: 0.7, medium: 0.45, low: 0.25 };
+const VID_RATIO = { high: 0.5, medium: 0.35, low: 0.2 };
 const SCAN_CAP = 200;
 const LIST_SIZE = 30;
 
@@ -86,6 +89,14 @@ export default function CompressScreen({ navigation }) {
 
   const selectedItems = (items || []).filter((i) => selected[i.id]);
   const q = QUALITIES.find((x) => x.key === quality).value;
+
+  const estimateFor = (item) =>
+    Math.round(
+      item.size *
+        (item.mediaType === 'video' ? VID_RATIO[quality] : IMG_RATIO[quality])
+    );
+  const selectedAfter = selectedItems.reduce((s, i) => s + estimateFor(i), 0);
+  const selectedBefore = selectedItems.reduce((s, i) => s + i.size, 0);
 
   const run = async () => {
     setProgress({ done: 0, total: selectedItems.length });
@@ -209,6 +220,21 @@ export default function CompressScreen({ navigation }) {
         />
       </View>
 
+      {/* Honest disclosure: re-encoding drops EXIF (capture time, GPS…). */}
+      <Text style={[styles.note, { color: colors.subtext }]}>
+        {t('compress_note')}
+      </Text>
+
+      {selectedItems.length > 0 && (
+        <Text style={[styles.summary, { color: colors.text }]}>
+          {t('compress_selected_summary', {
+            count: selectedItems.length,
+            after: formatBytes(selectedAfter),
+            saved: formatBytes(Math.max(0, selectedBefore - selectedAfter)),
+          })}
+        </Text>
+      )}
+
       {items === null ? (
         <ActivityIndicator style={{ marginTop: 40 }} size="large" color={colors.accent} />
       ) : (
@@ -239,6 +265,9 @@ export default function CompressScreen({ navigation }) {
                 <View style={{ flex: 1 }}>
                   <Text style={{ color: colors.text, fontSize: 13, fontWeight: '600' }}>
                     {item.mediaType === 'video' ? '🎬' : '🖼'} {formatBytes(item.size)}
+                  </Text>
+                  <Text style={{ color: colors.subtext, fontSize: 11, marginTop: 2 }}>
+                    {t('compress_after', { size: formatBytes(estimateFor(item)) })}
                   </Text>
                 </View>
               </Pressable>
@@ -285,6 +314,8 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   label: { fontSize: 14, fontWeight: '600' },
+  note: { fontSize: 11, lineHeight: 16, marginBottom: 6 },
+  summary: { fontSize: 13, fontWeight: '700', marginBottom: 4 },
   segmented: { flexDirection: 'row', borderRadius: 10, padding: 3 },
   segment: { paddingHorizontal: 14, paddingVertical: 5, borderRadius: 8 },
   row: {

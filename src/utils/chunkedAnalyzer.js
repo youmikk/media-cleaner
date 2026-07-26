@@ -53,6 +53,7 @@ class ChunkedAnalyzer {
     this.listeners = new Set();
     this.lowPower = false;
     this.memoryPaused = false;
+    this.suspended = false; // e.g. while a cleaning session is active
     this.metrics = null; // id -> {hash, sharpness, brightness}
     this.state = {
       running: false,
@@ -213,6 +214,16 @@ class ChunkedAnalyzer {
     this.cancel();
   }
 
+  /** Pause heavy work while the user is actively cleaning — keeps swipes
+   *  buttery. resume() picks up exactly where it left off. */
+  suspend() {
+    this.suspended = true;
+  }
+
+  resume() {
+    this.suspended = false;
+  }
+
   async _next() {
     if (this.current || this.queue.length === 0) return;
     const job = this.queue.shift();
@@ -250,11 +261,15 @@ class ChunkedAnalyzer {
           finished = true; // re-queued by analyzeAlbum
           return;
         }
-        while (this.memoryPaused && !job.cancelled) await sleep(500);
+        while ((this.memoryPaused || this.suspended) && !job.cancelled)
+          await sleep(400);
 
         const chunk = chunkSizeFor(this.lowPower);
         const end = Math.min(i + chunk, total);
+        // YIELD the JS thread after EVERY small batch — the analyzer must
+        // never hold the thread long enough for touches to feel laggy.
         while (i < end && !job.cancelled && !job.pauseRequested) {
+          if (this.suspended || this.memoryPaused) break;
           const batch = targets.slice(i, Math.min(i + CONCURRENCY, end));
           await Promise.all(
             batch.map(async (a) => {
@@ -266,6 +281,7 @@ class ChunkedAnalyzer {
             })
           );
           i += batch.length;
+          await sleep(0); // give the UI thread a turn between batches
         }
         sinceSave += chunk;
         if (sinceSave >= 50) {

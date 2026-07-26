@@ -32,6 +32,11 @@ const translations = {
     group_of: 'Group {current} of {total}',
     photo_of: '{current} / {total}',
     group_review_title: 'Review this group',
+    confirm_delete_title: 'Delete {count} items?',
+    confirm_delete_hint: 'Tap a photo to keep it. Deletion asks the system once.',
+    keep_all: 'Keep all',
+    viewer_mark: 'Mark for deletion',
+    viewer_marked: 'Marked — tap to keep',
     skip: 'Skip',
     delete_all_marked: 'Delete All Marked',
     move_all_marked: 'Move All Marked to Album…',
@@ -94,6 +99,7 @@ const translations = {
     theme_light: 'Light',
     theme_dark: 'Dark',
     setting_language: 'Language',
+    follow_system: 'Follow system',
     reminder_notif_title: 'Time to tidy up 🧹',
     reminder_notif_body: 'A quick 2-minute sweep keeps your gallery light.',
     burst_title: 'Burst Photos',
@@ -154,12 +160,19 @@ const translations = {
       'Video compression needs an installed (EAS) build',
     compress_delete_original: 'Delete originals after compressing',
     compressing: 'Compressing… ({done}/{total})',
+    compress_after: 'after ~{size}',
+    compress_selected_summary: '{count} selected · ~{after} after · save ~{saved}',
+    compress_note:
+      'Compressing re-encodes into a NEW file: EXIF metadata (capture time, location, camera info) is NOT kept, and the library date becomes the compression time. Originals are kept unless you enable deletion.',
+    setting_live_autoplay: 'Auto-play Live Photos',
+    setting_live_muted: 'Mute Live Photos',
     tutorial_step1: 'Swipe left / right to browse photos.',
     tutorial_step2:
       'Swipe up to delete — a glowing red bar with a trash icon slides down from the top.',
     tutorial_step3: 'Swipe down to move the photo to another album.',
     got_it: 'Got it',
-    setting_group_size: 'Group size',
+    setting_group_size: 'Photos per group',
+    setting_group_size_videos: 'Videos per group',
     photo_count: '{count} photos',
     video_count: '{count} videos',
     footer_github: 'Star on GitHub',
@@ -168,6 +181,9 @@ const translations = {
     moved_to: 'Moved to "{album}"',
     deleted_toast: 'Deleted',
     choose_album: 'Choose album',
+    new_album: 'New album',
+    album_name_placeholder: 'Album name',
+    create: 'Create',
     videos_watched: 'Video {current} of {total}',
     keep: 'Keep',
     favorite: 'Favorite',
@@ -198,6 +214,11 @@ const translations = {
     group_of: '第 {current} / {total} 组',
     photo_of: '{current} / {total}',
     group_review_title: '检查本组',
+    confirm_delete_title: '确认删除这 {count} 项？',
+    confirm_delete_hint: '点按某张可以保留它。删除只需向系统确认一次。',
+    keep_all: '全部保留',
+    viewer_mark: '标记删除',
+    viewer_marked: '已标记，点击保留',
     skip: '跳过',
     delete_all_marked: '删除所有标记',
     move_all_marked: '移动所有标记到相册…',
@@ -259,6 +280,7 @@ const translations = {
     theme_light: '浅色',
     theme_dark: '深色',
     setting_language: '语言',
+    follow_system: '跟随系统',
     reminder_notif_title: '该整理相册啦 🧹',
     reminder_notif_body: '花 2 分钟快速清理，让相册保持轻盈。',
     burst_title: '连拍照片',
@@ -318,11 +340,18 @@ const translations = {
     compress_video_unavailable: '视频压缩需要安装版应用（EAS 构建）',
     compress_delete_original: '压缩后删除原文件',
     compressing: '正在压缩… ({done}/{total})',
+    compress_after: '压缩后约 {size}',
+    compress_selected_summary: '已选 {count} 项 · 压缩后约 {after} · 节省约 {saved}',
+    compress_note:
+      '压缩会重新编码生成新文件：EXIF 信息（拍摄时间、地点、相机参数）不会保留，相册中的日期将变为压缩时间。默认保留原文件。',
+    setting_live_autoplay: '自动播放实况照片',
+    setting_live_muted: '实况照片静音',
     tutorial_step1: '左右滑动浏览照片。',
     tutorial_step2: '上滑删除——顶部会滑下一个带垃圾桶图标的红色发光提示条。',
     tutorial_step3: '下滑把照片移动到其他相册。',
     got_it: '知道了',
-    setting_group_size: '分组大小',
+    setting_group_size: '每组照片数量',
+    setting_group_size_videos: '每组视频数量',
     photo_count: '{count} 张照片',
     video_count: '{count} 个视频',
     footer_github: '在 GitHub 上点亮 Star',
@@ -331,6 +360,9 @@ const translations = {
     moved_to: '已移动到「{album}」',
     deleted_toast: '已删除',
     choose_album: '选择相册',
+    new_album: '新建分类',
+    album_name_placeholder: '输入分类名称',
+    create: '创建',
     videos_watched: '视频 {current} / {total}',
     keep: '保留',
     favorite: '收藏',
@@ -341,9 +373,9 @@ export function detectDeviceLanguage() {
   try {
     const locales = getLocales();
     const code = locales && locales[0] && locales[0].languageCode;
-    return translations[code] ? code : 'en';
+    return translations[code] ? code : 'zh'; // unknown locales fall back to 中文
   } catch (e) {
-    return 'en';
+    return 'zh';
   }
 }
 

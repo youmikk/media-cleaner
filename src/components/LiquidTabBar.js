@@ -1,11 +1,23 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { View, Pressable, Text, StyleSheet } from 'react-native';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring,
+} from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
 import GlassSurface from './GlassSurface';
 
-const HIDDEN_ROUTES = ['Cleaning', 'VideoCleaning', 'BurstClean', 'RecycleBin'];
+const HIDDEN_ROUTES = [
+  'Cleaning',
+  'VideoCleaning',
+  'BurstClean',
+  'RecycleBin',
+  'Compress',
+  'Insights',
+];
 
 const ICONS = {
   PhotosTab: ['images-outline', 'images'],
@@ -13,14 +25,30 @@ const ICONS = {
   ProfileTab: ['person-circle-outline', 'person-circle'],
 };
 
+const TAB_W = 92; // fixed tab width so the sliding pill lines up exactly
+const PILL_INSET = 6;
+
 /**
- * Floating capsule tab bar. On iOS 26 this is REAL Liquid Glass
- * (expo-glass-effect); elsewhere it falls back to an expo-blur frosted
- * capsule. Hides itself while a cleaning screen is focused.
+ * Floating capsule tab bar. On iOS 26 the surface is REAL Liquid Glass;
+ * a translucent selection pill SLIDES (spring) to the active tab on every
+ * switch — the iOS 26 tab-bar interaction. Hides on cleaning screens.
  */
 export default function LiquidTabBar({ state, descriptors, navigation }) {
   const { colors, t } = useSettings();
   const insets = useSafeAreaInsets();
+
+  // Sliding selection pill.
+  const pillX = useSharedValue(state.index * TAB_W);
+  useEffect(() => {
+    pillX.value = withSpring(state.index * TAB_W, {
+      damping: 28,
+      stiffness: 260,
+      overshootClamping: true, // slide fast, but never past the target tab
+    });
+  }, [state.index, pillX]);
+  const pillStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: pillX.value }],
+  }));
 
   const focusedRoute = state.routes[state.index];
   const nestedState = focusedRoute.state;
@@ -29,10 +57,14 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
       ? nestedState.routes[nestedState.index ?? nestedState.routes.length - 1]
           ?.name
       : null;
-  // The Videos tab IS a cleaning screen (direct access) — hide the tab bar
-  // there too; its own floating info bar takes over.
-  if (focusedRoute.name === 'VideosTab' || HIDDEN_ROUTES.includes(nestedName))
-    return null;
+  const nestedRoute =
+    nestedState && nestedState.routes
+      ? nestedState.routes[nestedState.index ?? nestedState.routes.length - 1]
+      : null;
+  const videosEmpty = !!(nestedRoute && nestedRoute.params && nestedRoute.params.empty);
+  const shouldHide =
+    focusedRoute.name === 'VideosTab' || HIDDEN_ROUTES.includes(nestedName);
+  if (shouldHide && !videosEmpty) return null;
 
   const labels = {
     PhotosTab: t('tab_photos'),
@@ -47,6 +79,15 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
     >
       <GlassSurface style={[styles.capsule, { borderColor: colors.border }]}>
         <View style={styles.row}>
+          {/* Sliding selection pill (under the icons) */}
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.pill,
+              { backgroundColor: colors.accentSoft },
+              pillStyle,
+            ]}
+          />
           {state.routes.map((route, index) => {
             const focused = state.index === index;
             const [outline, filled] = ICONS[route.name] || ICONS.PhotosTab;
@@ -106,10 +147,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 8,
   },
+  pill: {
+    position: 'absolute',
+    left: 10,
+    top: PILL_INSET,
+    bottom: PILL_INSET,
+    width: TAB_W,
+    borderRadius: 24,
+  },
   tab: {
+    width: TAB_W,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 22,
     paddingVertical: 4,
   },
   label: {

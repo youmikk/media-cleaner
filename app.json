@@ -7,7 +7,10 @@
     "userInterfaceStyle": "automatic",
     "icon": "./assets/icon.png",
     "updates": {
-      "url": "https://u.expo.dev/b743ab9c-d60e-4d6c-8da5-7712618b985b"
+      "url": "https://u.expo.dev/b743ab9c-d60e-4d6c-8da5-7712618b985b",
+      "requestHeaders": {
+        "expo-channel-name": "preview"
+      }
     },
     "runtimeVersion": {
       "policy": "appVersion"
@@ -22,7 +25,8 @@
       "bundleIdentifier": "com.mediacleaner.app",
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "MediaCleaner needs access to your photo library to help you review and clean up photos and videos.",
-        "NSPhotoLibraryAddUsageDescription": "MediaCleaner needs write access to move, restore and delete photos on your behalf."
+        "NSPhotoLibraryAddUsageDescription": "MediaCleaner needs write access to move, restore and delete photos on your behalf.",
+        "CADisableMinimumFrameDurationOnPhone": true
       }
     },
     "android": {

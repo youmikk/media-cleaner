@@ -14,14 +14,23 @@ import { useSettings } from '../context/SettingsContext';
 import AlbumPicker from '../components/AlbumPicker';
 import TimePicker from '../components/TimePicker';
 import AnalysisProgress from '../components/AnalysisProgress';
-import CacheStalePrompt from '../components/CacheStalePrompt';
 import analyzer from '../utils/chunkedAnalyzer';
-import { getAlbums, getAssets, ALL_ALBUM_ID } from '../utils/albumHelpers';
+import {
+  getAlbums,
+  getAssetsPage,
+  getAlbumFingerprint,
+  getAlbumSummary,
+  saveAlbumSummary,
+  buildYearHistogram,
+  ALL_ALBUM_ID,
+} from '../utils/albumHelpers';
 
 /**
- * Photos tab entry: album picker top-left, three preview cards centered
- * (middle taller), photo count below. Group size comes from the global
- * setting (Profile → Settings). Kicks off / reuses chunked analysis.
+ * Photos tab entry. Renders INSTANTLY from a cached album summary (count,
+ * preview thumbs, time histogram) — the album is only re-scanned when its
+ * fingerprint (count + latest modification) changed. Stale analysis
+ * refreshes SILENTLY and incrementally in the background (no prompt: old
+ * photos are already in the global metric store, only new ones get decoded).
  */
 export default function AlbumSelectScreen({ navigation }) {
   const { colors, t, settings } = useSettings();
@@ -29,10 +38,9 @@ export default function AlbumSelectScreen({ navigation }) {
 
   const [albums, setAlbums] = useState([]);
   const [albumId, setAlbumId] = useState(ALL_ALBUM_ID);
-  const [assets, setAssets] = useState([]);
-  const [timeFilter, setTimeFilter] = useState(null); // {label, start, end}
+  const [summary, setSummary] = useState(null); // {count, thumbs, years}
+  const [timeFilter, setTimeFilter] = useState(null);
   const [analysisState, setAnalysisState] = useState(null);
-  const [stalePrompt, setStalePrompt] = useState(false);
 
   const albumTitle = useMemo(() => {
     const a = albums.find((x) => x.id === albumId);
@@ -51,11 +59,58 @@ export default function AlbumSelectScreen({ navigation }) {
     }, [t])
   );
 
+  // Summary: cached-first, rescan ONLY when the album actually changed.
   useEffect(() => {
     let alive = true;
-    getAssets(albumId, 'photo')
-      .then((list) => alive && setAssets(list))
-      .catch(() => alive && setAssets([]));
+    setSummary(null);
+    (async () => {
+      try {
+        const cached = await getAlbumSummary(albumId);
+        if (alive && cached) setSummary(cached.summary);
+
+        const fp = await getAlbumFingerprint(albumId, 'photo');
+        if (!alive) return;
+        if (
+          cached &&
+          cached.fingerprint &&
+          cached.fingerprint.assetCount === fp.assetCount &&
+          cached.fingerprint.latestModificationTime === fp.latestModificationTime
+        ) {
+          return; // unchanged — ZERO scanning this visit
+        }
+
+        // Album changed (or first visit): stream pages, show early.
+        let all = [];
+        let after;
+        let hasNext = true;
+        let first = true;
+        while (hasNext && all.length < 5000) {
+          const page = await getAssetsPage(albumId, 'photo', after);
+          if (!alive) return;
+          all = [...all, ...page.assets];
+          hasNext = page.hasNext;
+          after = page.endCursor;
+          if (first) {
+            setSummary((s) => ({
+              count: fp.assetCount || all.length,
+              thumbs: all.slice(0, 3).map((a) => ({ id: a.id, uri: a.uri })),
+              years: s ? s.years : [],
+            }));
+            first = false;
+          }
+        }
+        const fresh = {
+          count: all.length,
+          thumbs: all.slice(0, 3).map((a) => ({ id: a.id, uri: a.uri })),
+          years: buildYearHistogram(all),
+        };
+        if (!alive) return;
+        setSummary(fresh);
+        saveAlbumSummary(albumId, { fingerprint: fp, summary: fresh });
+      } catch (e) {
+        if (alive) setSummary({ count: 0, thumbs: [], years: [] });
+      }
+    })();
     return () => {
       alive = false;
     };
@@ -63,34 +118,41 @@ export default function AlbumSelectScreen({ navigation }) {
 
   useEffect(() => analyzer.subscribe(setAnalysisState), []);
 
-  // Analysis when cache is missing/stale (similar detection enabled).
+  // Missing/stale analysis: SILENT, delayed, incremental background refresh.
   useEffect(() => {
     if (!settings.similarDetection) return;
     let alive = true;
+    let timer;
     (async () => {
       const { cache, stale } = await analyzer.checkCache(albumId, 'photo');
       if (!alive) return;
-      if (cache && stale) setStalePrompt(true);
-      else if (!cache) analyzer.analyzeAlbum(albumId, { mediaType: 'photo' });
+      if (!cache || stale) {
+        timer = setTimeout(() => {
+          if (alive)
+            analyzer.analyzeAlbum(albumId, { mediaType: 'photo', force: true });
+        }, 2500);
+      }
     })();
     return () => {
       alive = false;
+      if (timer) clearTimeout(timer);
     };
   }, [albumId, settings.similarDetection]);
 
-  // Apply the year / year-month scope.
-  const filteredAssets = useMemo(() => {
-    if (!timeFilter) return assets;
-    return assets.filter(
-      (a) =>
-        a.creationTime &&
-        a.creationTime >= timeFilter.start &&
-        a.creationTime < timeFilter.end
-    );
-  }, [assets, timeFilter]);
+  // Scoped count straight from the cached histogram — no asset scanning.
+  const filteredCount = useMemo(() => {
+    if (!summary) return 0;
+    if (!timeFilter) return summary.count;
+    const yearEntry = summary.years.find((y) => y.year === timeFilter.year);
+    if (!yearEntry) return 0;
+    if (timeFilter.month === null || timeFilter.month === undefined)
+      return yearEntry.count;
+    const m = yearEntry.months.find(([mm]) => mm === timeFilter.month);
+    return m ? m[1] : 0;
+  }, [summary, timeFilter]);
 
   const startCleaning = () => {
-    if (filteredAssets.length === 0) return;
+    if (filteredCount === 0) return;
     navigation.navigate('Cleaning', {
       albumId,
       albumTitle: timeFilter ? `${albumTitle} · ${timeFilter.label}` : albumTitle,
@@ -100,7 +162,7 @@ export default function AlbumSelectScreen({ navigation }) {
     });
   };
 
-  const thumbs = filteredAssets.slice(0, 3);
+  const thumbs = summary ? summary.thumbs : [];
   const cardW = (width - 16 * 2 - 12 * 2) / 3;
   const cardHeights = [cardW * 1.5, cardW * 1.9, cardW * 1.5];
 
@@ -110,7 +172,6 @@ export default function AlbumSelectScreen({ navigation }) {
         {t('clean_photos')}
       </Text>
 
-      {/* Top-left: album picker + time scope (year / year-month) */}
       <View style={styles.controls}>
         <AlbumPicker
           albums={albums}
@@ -121,13 +182,12 @@ export default function AlbumSelectScreen({ navigation }) {
           }}
         />
         <TimePicker
-          assets={assets}
+          years={summary ? summary.years : []}
           value={timeFilter}
           onSelect={setTimeFilter}
         />
       </View>
 
-      {/* Centered preview cards */}
       <View style={styles.centerArea}>
         <View style={styles.cards}>
           {[0, 1, 2].map((i) => (
@@ -144,7 +204,12 @@ export default function AlbumSelectScreen({ navigation }) {
               ]}
             >
               {thumbs[i] ? (
-                <Image source={{ uri: thumbs[i].uri }} style={styles.cardImage} />
+                <Image
+                  source={{ uri: thumbs[i].uri }}
+                  style={styles.cardImage}
+                  cachePolicy="memory-disk"
+                  recyclingKey={thumbs[i].id}
+                />
               ) : (
                 <View style={styles.cardEmpty}>
                   <Ionicons name="image-outline" size={28} color={colors.subtext} />
@@ -154,11 +219,11 @@ export default function AlbumSelectScreen({ navigation }) {
           ))}
         </View>
         <Text style={[styles.count, { color: colors.subtext }]}>
-          {filteredAssets.length === 0
+          {filteredCount === 0
             ? t('no_photos')
-            : t('photo_count', { count: filteredAssets.length })}
+            : t('photo_count', { count: filteredCount })}
         </Text>
-        {filteredAssets.length > 0 && (
+        {filteredCount > 0 && (
           <Text style={[styles.hint, { color: colors.subtext }]}>
             {t('start_hint')}
           </Text>
@@ -169,14 +234,6 @@ export default function AlbumSelectScreen({ navigation }) {
         state={analysisState}
         mediaType="photo"
         onCancel={() => analyzer.cancel(albumId)}
-      />
-      <CacheStalePrompt
-        visible={stalePrompt}
-        onReanalyze={() => {
-          setStalePrompt(false);
-          analyzer.analyzeAlbum(albumId, { mediaType: 'photo', force: true });
-        }}
-        onUseStale={() => setStalePrompt(false)}
       />
     </SafeAreaView>
   );
@@ -195,7 +252,7 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 90, // keep visually centered above the floating tab bar
+    marginBottom: 90,
   },
   cards: {
     flexDirection: 'row',

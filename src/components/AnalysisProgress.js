@@ -1,6 +1,7 @@
 import React from 'react';
 import { View, Text, Pressable, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
 import GlassSurface from './GlassSurface';
 
@@ -10,7 +11,9 @@ import GlassSurface from './GlassSurface';
  */
 export default function AnalysisProgress({ state, mediaType = 'photo', onCancel }) {
   const { colors, t } = useSettings();
-  if (!state || !state.running) return null;
+  const insets = useSafeAreaInsets();
+  // Hide entirely for zero-work refreshes (all photos already analyzed).
+  if (!state || !state.running || !state.total) return null;
 
   const pct = state.total > 0 ? state.done / state.total : 0;
   let label = t(mediaType === 'video' ? 'analyzing_videos' : 'analyzing', {
@@ -21,7 +24,11 @@ export default function AnalysisProgress({ state, mediaType = 'photo', onCancel 
   else if (state.lowPower) label = `${label} · ${t('analysis_low_power_chunk')}`;
 
   return (
-    <View style={styles.wrap} pointerEvents="box-none">
+    <View
+      // Sits ABOVE the floating tab bar (capsule ≈64px + its bottom offset).
+      style={[styles.wrap, { bottom: Math.max(insets.bottom, 12) + 80 }]}
+      pointerEvents="box-none"
+    >
       <GlassSurface style={[styles.card, { borderColor: colors.border }]}>
         <View style={styles.inner}>
         <View style={styles.row}>
@@ -51,7 +58,6 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 16,
     right: 16,
-    bottom: 96,
   },
   card: {
     borderRadius: 16,

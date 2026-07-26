@@ -17,6 +17,7 @@ import { useSettings } from '../context/SettingsContext';
 import { useApp } from '../context/AppContext';
 import SuggestionCard from '../components/SuggestionCard';
 import StorageChart from '../components/StorageChart';
+import OptionPicker from '../components/OptionPicker';
 import { LANGUAGES } from '../i18n';
 import {
   getAssets,
@@ -262,34 +263,6 @@ export default function ProfileScreen({ navigation }) {
     <View style={styles.section}>
       <Text style={[styles.sectionTitle, { color: colors.text }]}>{title}</Text>
       {children}
-    </View>
-  );
-
-  const SegmentedRow = ({ label, options, value, onChange }) => (
-    <View style={[styles.row, { borderColor: colors.border }]}>
-      <Text style={[styles.rowLabel, { color: colors.text }]}>{label}</Text>
-      <View style={[styles.segmented, { backgroundColor: colors.chartTrack }]}>
-        {options.map((opt) => (
-          <Pressable
-            key={opt.value}
-            onPress={() => onChange(opt.value)}
-            style={[
-              styles.segment,
-              value === opt.value && { backgroundColor: colors.card },
-            ]}
-          >
-            <Text
-              style={{
-                fontSize: 12,
-                fontWeight: '600',
-                color: value === opt.value ? colors.accent : colors.subtext,
-              }}
-            >
-              {opt.label}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
     </View>
   );
 
@@ -547,13 +520,19 @@ export default function ProfileScreen({ navigation }) {
         {/* Settings */}
         <Section title={t('settings_title')}>
           <View style={[styles.settingsCard, { backgroundColor: colors.card }]}>
-            <SegmentedRow
+            <OptionPicker
               label={t('setting_group_size')}
               value={settings.groupSize}
               onChange={(v) => setSetting('groupSize', v)}
               options={[5, 10, 15, 20].map((n) => ({ value: n, label: String(n) }))}
             />
-            <SegmentedRow
+            <OptionPicker
+              label={t('setting_group_size_videos')}
+              value={settings.videoGroupSize || 5}
+              onChange={(v) => setSetting('videoGroupSize', v)}
+              options={[5, 10, 15, 20].map((n) => ({ value: n, label: String(n) }))}
+            />
+            <OptionPicker
               label={t('setting_order')}
               value={settings.order}
               onChange={(v) => setSetting('order', v)}
@@ -567,6 +546,20 @@ export default function ProfileScreen({ navigation }) {
               value={settings.similarDetection}
               onChange={(v) => setSetting('similarDetection', v)}
             />
+            {!isAndroid && (
+              <>
+                <ToggleRow
+                  label={t('setting_live_autoplay')}
+                  value={settings.liveAutoplay}
+                  onChange={(v) => setSetting('liveAutoplay', v)}
+                />
+                <ToggleRow
+                  label={t('setting_live_muted')}
+                  value={settings.liveMuted !== false}
+                  onChange={(v) => setSetting('liveMuted', v)}
+                />
+              </>
+            )}
             {isAndroid && (
               <ToggleRow
                 label={t('setting_recycle')}
@@ -579,7 +572,7 @@ export default function ProfileScreen({ navigation }) {
               value={settings.dailyReminder}
               onChange={onToggleReminder}
             />
-            <SegmentedRow
+            <OptionPicker
               label={t('setting_theme')}
               value={settings.theme}
               onChange={(v) => setSetting('theme', v)}
@@ -589,11 +582,14 @@ export default function ProfileScreen({ navigation }) {
                 { value: 'dark', label: t('theme_dark') },
               ]}
             />
-            <SegmentedRow
+            <OptionPicker
               label={t('setting_language')}
-              value={settings.language || 'en'}
+              value={settings.language || 'system'}
               onChange={(v) => setSetting('language', v)}
-              options={LANGUAGES.map((l) => ({ value: l.code, label: l.label }))}
+              options={[
+                { value: 'system', label: t('follow_system') },
+                ...LANGUAGES.map((l) => ({ value: l.code, label: l.label })),
+              ]}
             />
           </View>
         </Section>

@@ -9,18 +9,21 @@ import React, {
 import { Platform, useColorScheme } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { palettes } from '../theme';
-import { translate } from '../i18n';
+import { translate, detectDeviceLanguage } from '../i18n';
 
 const STORAGE_KEY = '@mediacleaner/settings';
 
 export const DEFAULT_SETTINGS = {
-  groupSize: 5, // global group size: 5 | 10 | 15 | 20
+  groupSize: 5, // PHOTOS per group: 5 | 10 | 15 | 20
+  videoGroupSize: 5, // VIDEOS per group: 5 | 10 | 15 | 20
   order: 'random', // 'random' | 'date' (default: random)
   similarDetection: true,
+  liveAutoplay: true, // iOS: auto-play Live Photos in the cleaning flow
+  liveMuted: true, // iOS: mute Live Photo playback
   recycleBin: true, // Android only
   dailyReminder: false,
   theme: 'system', // 'system' | 'light' | 'dark'
-  language: null, // null -> 中文 (default)
+  language: 'system', // 'system' (follow device) | 'zh' | 'en'
 };
 
 const SettingsContext = createContext(null);
@@ -51,7 +54,10 @@ export function SettingsProvider({ children }) {
     });
   }, []);
 
-  const language = settings.language || 'zh'; // default 中文
+  const language =
+    settings.language && settings.language !== 'system'
+      ? settings.language
+      : detectDeviceLanguage(); // default: follow the system language
   const isDark =
     settings.theme === 'dark' ||
     (settings.theme === 'system' && systemScheme === 'dark');

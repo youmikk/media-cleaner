@@ -15,6 +15,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
 import { useApp } from '../context/AppContext';
+import PhotoViewer from '../components/PhotoViewer';
 import { getAssetsByIds, formatBytes } from '../utils/albumHelpers';
 import { hammingDistance } from '../utils/imageHashing';
 import analyzer from '../utils/chunkedAnalyzer';
@@ -45,6 +46,8 @@ export default function BurstCleanScreen({ route, navigation }) {
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [working, setWorking] = useState(false);
   const [thumbs, setThumbs] = useState({}); // video id -> generated thumbnail uri
+  // Full-screen viewer: {assets, index, bestId} of the tapped group, or null.
+  const [viewer, setViewer] = useState(null);
 
   useEffect(() => {
     let alive = true;
@@ -222,14 +225,19 @@ export default function BurstCleanScreen({ route, navigation }) {
           )}
           renderItem={({ item: rowAssets, section }) => (
             <View style={styles.grid}>
-              {rowAssets.map((asset) => {
+              {rowAssets.map((asset, ai) => {
                 const isSel = !!selected[asset.id];
                 const isBest = asset.id === section.bestId;
                 return (
                   <Pressable
                     key={asset.id}
                     onPress={() =>
-                      setSelected((s) => ({ ...s, [asset.id]: !s[asset.id] }))
+                      // tap = view the group full screen from this photo
+                      setViewer({
+                        assets: rowAssets,
+                        index: ai,
+                        bestId: section.bestId,
+                      })
                     }
                     style={{ width: cell, height: cell }}
                   >
@@ -249,14 +257,19 @@ export default function BurstCleanScreen({ route, navigation }) {
                         <Ionicons name="star" size={11} color="#fff" />
                       </View>
                     )}
-                    <View
+                    {/* circle badge = (de)select */}
+                    <Pressable
+                      hitSlop={8}
+                      onPress={() =>
+                        setSelected((s) => ({ ...s, [asset.id]: !s[asset.id] }))
+                      }
                       style={[
                         styles.mark,
                         { backgroundColor: isSel ? colors.danger : 'rgba(0,0,0,0.35)' },
                       ]}
                     >
                       <Ionicons name={isSel ? 'trash' : 'checkmark'} size={12} color="#fff" />
-                    </View>
+                    </Pressable>
                   </Pressable>
                 );
               })}
@@ -275,6 +288,17 @@ export default function BurstCleanScreen({ route, navigation }) {
           </Text>
         </Pressable>
       )}
+
+      <PhotoViewer
+        visible={viewer !== null}
+        assets={viewer ? viewer.assets : []}
+        initialIndex={viewer ? viewer.index : 0}
+        bestId={viewer ? viewer.bestId : null}
+        onClose={() => setViewer(null)}
+        selected={selected}
+        onToggleSelect={(id) => setSelected((s) => ({ ...s, [id]: !s[id] }))}
+        thumbs={thumbs}
+      />
     </SafeAreaView>
   );
 }
