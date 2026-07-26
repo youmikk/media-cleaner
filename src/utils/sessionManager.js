@@ -110,6 +110,10 @@ export async function finishSession(session) {
   } catch (e) {
     // stats are best-effort
   }
-  await discardSession(session.type === 'video' ? 'video' : 'photo');
+  // Ephemeral (preset) sessions were never persisted — discarding here
+  // would wipe the REAL paused session + saved order of the same type.
+  if (!session.ephemeral) {
+    await discardSession(session.type === 'video' ? 'video' : 'photo');
+  }
   return saved;
 }

@@ -238,7 +238,9 @@ export default function CleaningScreen({ route, navigation }) {
           orderRef.current = allRef.current.map((a) => a.id);
           setGroups(makeGroups(allRef.current, groupSize));
         }
-        sessionManager.saveOrder(orderRef.current);
+        // Preset lists (Largest Files / Low Quality) must never overwrite
+        // the paused album session's saved order — the home cards follow it.
+        if (!assetIds) sessionManager.saveOrder(orderRef.current);
         // Whole album loaded (unscoped) — persist it as the local index so
         // the NEXT session opens with zero MediaStore scanning.
         if (
@@ -254,7 +256,7 @@ export default function CleaningScreen({ route, navigation }) {
         loadingMoreRef.current = false;
       }
     },
-    [albumId, groupSize, settings.order]
+    [albumId, groupSize, settings.order, assetIds]
   );
 
   // ---- Load: lazy segments for fresh sessions, full ordered for resume ----
@@ -270,6 +272,7 @@ export default function CleaningScreen({ route, navigation }) {
       const resuming =
         resume &&
         pending &&
+        !pending.assetIds && // stale preset sessions (pre-fix) are not resumable
         pending.albumId === albumId &&
         pending.type === 'photo';
       const range = resuming ? pending.timeRange || timeRange : timeRange;
@@ -420,6 +423,22 @@ export default function CleaningScreen({ route, navigation }) {
       // the scope is the whole album — no second full fetch).
       if (resuming) {
         sessionRef.current = pending;
+      } else if (assetIds) {
+        // Suggestion cleanings (Largest Files / Low Quality) are EPHEMERAL:
+        // an in-memory session only. Persisting one used to overwrite the
+        // paused album session + saved order, so the home cards suddenly
+        // showed the preset's photos and resume lost the real group.
+        const before = await getAlbumSnapshot(albumId, 'photo', fullAlbumList);
+        sessionRef.current = {
+          type: 'photo',
+          albumId,
+          albumTitle,
+          groupSize,
+          assetIds,
+          timeRange,
+          before,
+          ephemeral: true,
+        };
       } else {
         const before = await getAlbumSnapshot(albumId, 'photo', fullAlbumList);
         sessionRef.current = await sessionManager.startSession({
@@ -456,7 +475,9 @@ export default function CleaningScreen({ route, navigation }) {
   const piRef = useRef(pi);
   piRef.current = pi;
   useEffect(() => {
-    if (!sessionRef.current) return;
+    // Ephemeral (preset) sessions are never persisted — saveProgress would
+    // patch the PAUSED album session on disk and corrupt its resume state.
+    if (!sessionRef.current || sessionRef.current.ephemeral) return;
     sessionManager.saveProgress({
       groupIndex: gi,
       photoIndex: piRef.current,
