@@ -33,36 +33,40 @@ public class PhotoMoveModule: Module {
       }
       guard
         let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
-          as? [CFString: Any]
+          as? [String: Any]
       else {
         throw NSError(domain: "PhotoMove", code: 2, userInfo: nil)
       }
       var out: [String: Any] = [:]
-      if let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
-        if let v = tiff[kCGImagePropertyTIFFMake] as? String { out["Make"] = v }
-        if let v = tiff[kCGImagePropertyTIFFModel] as? String { out["Model"] = v }
+      if let tiff = props[kCGImagePropertyTIFFDictionary as String] as? [String: Any] {
+        if let v = tiff[kCGImagePropertyTIFFMake as String] as? String {
+          out["Make"] = v
+        }
+        if let v = tiff[kCGImagePropertyTIFFModel as String] as? String {
+          out["Model"] = v
+        }
       }
-      if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
-        if let v = exif[kCGImagePropertyExifLensModel] as? String {
+      if let exif = props[kCGImagePropertyExifDictionary as String] as? [String: Any] {
+        if let v = exif[kCGImagePropertyExifLensModel as String] as? String {
           out["LensModel"] = v
         }
-        if let v = exif[kCGImagePropertyExifDateTimeOriginal] as? String {
+        if let v = exif[kCGImagePropertyExifDateTimeOriginal as String] as? String {
           out["DateTimeOriginal"] = v
         }
-        if let v = exif[kCGImagePropertyExifFNumber] as? Double {
+        if let v = exif[kCGImagePropertyExifFNumber as String] as? Double {
           out["FNumber"] = v
         }
-        if let v = exif[kCGImagePropertyExifExposureTime] as? Double {
+        if let v = exif[kCGImagePropertyExifExposureTime as String] as? Double {
           out["ExposureTime"] = v
         }
-        if let arr = exif[kCGImagePropertyExifISOSpeedRatings] as? [Any],
+        if let arr = exif[kCGImagePropertyExifISOSpeedRatings as String] as? [Any],
           let v = arr.first {
           out["ISOSpeedRatings"] = v
         }
-        if let v = exif[kCGImagePropertyExifFocalLength] as? Double {
+        if let v = exif[kCGImagePropertyExifFocalLength as String] as? Double {
           out["FocalLength"] = v
         }
-        if let v = exif[kCGImagePropertyExifFocalLenIn35mmFilm] {
+        if let v = exif[kCGImagePropertyExifFocalLenIn35mmFilm as String] {
           out["FocalLengthIn35mmFilm"] = v
         }
       }

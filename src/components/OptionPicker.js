@@ -93,7 +93,10 @@ export default function OptionPicker({ label, value, options, onChange }) {
         title={label}
         onPressAction={({ nativeEvent }) => {
           const opt = options.find((o) => String(o.value) === nativeEvent.event);
-          if (opt) select(opt);
+          // Defer the settings update until the menu's close animation has
+          // finished — updating mid-dismiss re-renders the screen under the
+          // animation and makes nearby text flash.
+          if (opt) setTimeout(() => select(opt), 280);
         }}
         actions={options.map((o) => ({
           id: String(o.value),

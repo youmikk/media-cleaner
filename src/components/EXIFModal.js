@@ -114,23 +114,39 @@ export default function EXIFModal({ visible, asset, onClose }) {
         //    nothing" the same as missing), 2) native ExifInterface
         //    (Android, photoo-style — handles JPEG/HEIF/DNG), 3) the pure-JS
         //    file parser as the last resort.
+        const debug = [];
         let cameraRows = info.exif ? extractCameraRows(info.exif) : [];
+        debug.push(
+          `sys:${info.exif ? Object.keys(info.exif).length + 'k/' + cameraRows.length + 'r' : 'none'}`
+        );
         if (cameraRows.length === 0 && asset.mediaType !== 'video') {
           const fileUri = info.localUri || info.uri || asset.uri;
+          debug.push(`uri:${String(fileUri).slice(0, 10)}`);
           if (PhotoMove.isAvailable()) {
             try {
               const nativeExif = await PhotoMove.readExif(fileUri);
               if (nativeExif) cameraRows = extractCameraRows(nativeExif);
+              debug.push(
+                `native:${nativeExif ? Object.keys(nativeExif).length + 'k/' + cameraRows.length + 'r' : 'null'}`
+              );
             } catch (e) {
-              // fall through to the JS parser
+              debug.push(`native:ERR ${String(e.message || e).slice(0, 40)}`);
             }
+          } else {
+            debug.push('native:absent');
           }
           if (cameraRows.length === 0) {
             const parsed = await parseExif(fileUri);
             if (parsed) cameraRows = extractCameraRows(parsed);
+            debug.push(`js:${parsed ? Object.keys(parsed).length + 'k' : 'null'}`);
           }
         }
         out.push(...cameraRows);
+        // TEMP diagnostic: shows WHY camera info is missing. Remove once
+        // the iOS EXIF issue is confirmed fixed.
+        if (cameraRows.length === 0 && asset.mediaType !== 'video') {
+          out.push(['Debug', debug.join(' · ')]);
+        }
       } catch (e) {
         // fall through with whatever we collected
       }
