@@ -39,21 +39,29 @@ export default function EXIFModal({ visible, asset, onClose }) {
           out.push([t('exif_duration'), `${info.duration.toFixed(1)}s`]);
         const size = await getAssetSize(info);
         if (size) out.push([t('exif_size'), formatBytes(size)]);
-        if (info.location) {
-          const address = await reverseGeocode(
-            info.location.latitude,
-            info.location.longitude,
-            language
-          );
-          out.push([
-            t('exif_location'),
-            address ||
-              `${info.location.latitude.toFixed(5)}, ${info.location.longitude.toFixed(5)}`,
-          ]);
+        // Each section below is individually guarded — one failing step
+        // must never swallow the remaining rows.
+        try {
+          if (info.location) {
+            const address = await reverseGeocode(
+              info.location.latitude,
+              info.location.longitude,
+              language
+            );
+            out.push([
+              t('exif_location'),
+              address ||
+                `${info.location.latitude.toFixed(5)}, ${info.location.longitude.toFixed(5)}`,
+            ]);
+          }
+        } catch (e) {
+          // geocoding failed — skip the location row only
         }
-        // Camera rows from an exif object (system-shaped OR our parser's).
-        const extractCameraRows = (exif) => {
-          const rows2 = [];
+        // Camera FIELDS from an exif object (system-shaped OR our parser's).
+        // Field-based so multiple sources can be MERGED — e.g. iOS system
+        // exif often has aperture/ISO but strips {TIFF} (camera model);
+        // the native reader then fills exactly the missing fields.
+        const extractCameraFields = (exif) => {
           const get = (keys) => {
             for (const k of keys) {
               const v = k
@@ -63,18 +71,14 @@ export default function EXIFModal({ visible, asset, onClose }) {
             }
             return null;
           };
+          const f = {};
           const make = get(['{TIFF}.Make', 'TIFF.Make', 'Make']);
           const model = get(['{TIFF}.Model', 'TIFF.Model', 'Model']);
-          if (make || model)
-            rows2.push([t('exif_camera'), [make, model].filter(Boolean).join(' ')]);
+          if (make || model) f.camera = [make, model].filter(Boolean).join(' ');
           const lens = get(['{Exif}.LensModel', 'Exif.LensModel', 'LensModel']);
-          if (lens) rows2.push([t('exif_lens'), String(lens)]);
+          if (lens) f.lens = String(lens);
           const fnum = get(['{Exif}.FNumber', 'Exif.FNumber', 'FNumber']);
-          if (fnum)
-            rows2.push([
-              t('exif_aperture'),
-              `f/${Number(fnum).toFixed(1).replace(/\.0$/, '')}`,
-            ]);
+          if (fnum) f.aperture = `f/${Number(fnum).toFixed(1).replace(/\.0$/, '')}`;
           const exposure = get([
             '{Exif}.ExposureTime',
             'Exif.ExposureTime',
@@ -82,18 +86,14 @@ export default function EXIFModal({ visible, asset, onClose }) {
           ]);
           if (exposure) {
             const ex = Number(exposure);
-            rows2.push([
-              t('exif_shutter'),
-              ex >= 1 ? `${ex}s` : `1/${Math.round(1 / ex)}s`,
-            ]);
+            f.shutter = ex >= 1 ? `${ex}s` : `1/${Math.round(1 / ex)}s`;
           }
           const iso = get([
             '{Exif}.ISOSpeedRatings',
             'Exif.ISOSpeedRatings',
             'ISOSpeedRatings',
           ]);
-          if (iso)
-            rows2.push([t('exif_iso'), String(Array.isArray(iso) ? iso[0] : iso)]);
+          if (iso) f.iso = String(Array.isArray(iso) ? iso[0] : iso);
           const focal = get(['{Exif}.FocalLength', 'Exif.FocalLength', 'FocalLength']);
           const focal35 = get([
             '{Exif}.FocalLenIn35mmFilm',
@@ -101,54 +101,66 @@ export default function EXIFModal({ visible, asset, onClose }) {
             'FocalLengthIn35mmFilm',
           ]);
           if (focal) {
-            const f = Number(focal).toFixed(1).replace(/\.0$/, '');
-            rows2.push([
-              t('exif_focal'),
-              focal35 ? `${f}mm (≈${focal35}mm)` : `${f}mm`,
-            ]);
+            const fl = Number(focal).toFixed(1).replace(/\.0$/, '');
+            f.focal = focal35 ? `${fl}mm (≈${focal35}mm)` : `${fl}mm`;
           }
-          return rows2;
+          return f;
         };
 
         // 1) system exif (iOS sometimes returns it EMPTY — treat "extracted
         //    nothing" the same as missing), 2) native ExifInterface
         //    (Android, photoo-style — handles JPEG/HEIF/DNG), 3) the pure-JS
         //    file parser as the last resort.
-        const debug = [];
-        let cameraRows = info.exif ? extractCameraRows(info.exif) : [];
-        debug.push(
-          `sys:${info.exif ? Object.keys(info.exif).length + 'k/' + cameraRows.length + 'r' : 'none'}`
-        );
-        if (cameraRows.length === 0 && asset.mediaType !== 'video') {
-          const fileUri = info.localUri || info.uri || asset.uri;
-          debug.push(`uri:${String(fileUri).slice(0, 10)}`);
-          if (PhotoMove.isAvailable()) {
-            try {
-              const nativeExif = await PhotoMove.readExif(fileUri);
-              if (nativeExif) cameraRows = extractCameraRows(nativeExif);
-              debug.push(
-                `native:${nativeExif ? Object.keys(nativeExif).length + 'k/' + cameraRows.length + 'r' : 'null'}`
-              );
-            } catch (e) {
-              debug.push(`native:ERR ${String(e.message || e).slice(0, 40)}`);
+        // Camera info: MERGE system exif -> native (ExifInterface/ImageIO)
+        // -> pure-JS parser, per FIELD. Later sources only fill fields the
+        // earlier ones missed. Photos without shooting EXIF (screenshots,
+        // saved images) legitimately show nothing here.
+        try {
+          let fields = {};
+          try {
+            fields = info.exif ? extractCameraFields(info.exif) : {};
+          } catch (e) {
+            fields = {};
+          }
+          if (
+            asset.mediaType !== 'video' &&
+            (!fields.camera || Object.keys(fields).length === 0)
+          ) {
+            const fileUri = info.localUri || info.uri || asset.uri;
+            if (PhotoMove.isAvailable()) {
+              try {
+                const nativeExif = await PhotoMove.readExif(fileUri);
+                if (nativeExif) {
+                  fields = { ...extractCameraFields(nativeExif), ...fields };
+                }
+              } catch (e) {
+                // fall through to the JS parser
+              }
             }
-          } else {
-            debug.push('native:absent');
+            if (!fields.camera) {
+              try {
+                const parsed = await parseExif(fileUri);
+                if (parsed) {
+                  fields = { ...extractCameraFields(parsed), ...fields };
+                }
+              } catch (e) {
+                // parser failed — show what we have
+              }
+            }
           }
-          if (cameraRows.length === 0) {
-            const parsed = await parseExif(fileUri);
-            if (parsed) cameraRows = extractCameraRows(parsed);
-            debug.push(`js:${parsed ? Object.keys(parsed).length + 'k' : 'null'}`);
-          }
-        }
-        out.push(...cameraRows);
-        // TEMP diagnostic: shows WHY camera info is missing. Remove once
-        // the iOS EXIF issue is confirmed fixed.
-        if (cameraRows.length === 0 && asset.mediaType !== 'video') {
-          out.push(['Debug', debug.join(' · ')]);
+          if (fields.camera) out.push([t('exif_camera'), fields.camera]);
+          if (fields.lens) out.push([t('exif_lens'), fields.lens]);
+          if (fields.aperture) out.push([t('exif_aperture'), fields.aperture]);
+          if (fields.shutter) out.push([t('exif_shutter'), fields.shutter]);
+          if (fields.iso) out.push([t('exif_iso'), fields.iso]);
+          if (fields.focal) out.push([t('exif_focal'), fields.focal]);
+        } catch (e) {
+          // TEMP: surface the failure instead of silently losing the rows
+          out.push(['Debug', `camera:ERR ${String(e && e.message ? e.message : e).slice(0, 60)}`]);
         }
       } catch (e) {
-        // fall through with whatever we collected
+        // basic info failed — fall through with whatever we collected
+        out.push(['Debug', `basic:ERR ${String(e && e.message ? e.message : e).slice(0, 60)}`]);
       }
       setRows(out);
     })();

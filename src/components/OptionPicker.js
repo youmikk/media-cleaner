@@ -87,28 +87,32 @@ export default function OptionPicker({ label, value, options, onChange }) {
 
   // Builds WITH the native module: the row opens a real system menu
   // (UIMenu on iOS — exact native material, corners and anchoring).
+  // The visible row lives OUTSIDE the MenuView (its children get
+  // re-attached natively on every change, which flashes); the MenuView is
+  // an invisible tap layer whose child NEVER changes.
   if (MenuView) {
     return (
-      <MenuView
-        title={label}
-        onPressAction={({ nativeEvent }) => {
-          const opt = options.find((o) => String(o.value) === nativeEvent.event);
-          // Defer the settings update until the menu's close animation has
-          // finished — updating mid-dismiss re-renders the screen under the
-          // animation and makes nearby text flash.
-          if (opt) setTimeout(() => select(opt), 280);
-        }}
-        actions={options.map((o) => ({
-          id: String(o.value),
-          title: o.label,
-          state: o.value === value ? 'on' : 'off',
-        }))}
-        shouldOpenOnLongPress={false}
-      >
-        <View style={[styles.row, { borderColor: colors.border }]}>
-          {rowContent}
-        </View>
-      </MenuView>
+      <View style={[styles.row, { borderColor: colors.border }]}>
+        {rowContent}
+        <MenuView
+          style={StyleSheet.absoluteFill}
+          title={label}
+          onPressAction={({ nativeEvent }) => {
+            const opt = options.find(
+              (o) => String(o.value) === nativeEvent.event
+            );
+            if (opt) select(opt);
+          }}
+          actions={options.map((o) => ({
+            id: String(o.value),
+            title: o.label,
+            state: o.value === value ? 'on' : 'off',
+          }))}
+          shouldOpenOnLongPress={false}
+        >
+          <View style={StyleSheet.absoluteFill} />
+        </MenuView>
+      </View>
     );
   }
 
