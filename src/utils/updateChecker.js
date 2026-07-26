@@ -55,8 +55,45 @@ export async function checkOTA() {
   }
 }
 
+/**
+ * Apply the fetched update. Returns true when the reload was accepted.
+ * (On Android, reloadAsync silently fails if invoked while an Alert is
+ * still dismissing — callers should delay slightly and check the result.)
+ */
 export async function reloadWithUpdate() {
-  if (Updates && Updates.reloadAsync) await Updates.reloadAsync();
+  if (!Updates || !Updates.reloadAsync) return false;
+  try {
+    await Updates.reloadAsync();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Latest changelog entry from the repo (CHANGELOG.json). Tried via the
+ * jsDelivr CDN first (reachable in China), then GitHub raw. Returns
+ * { date, notes: [...] } or null — callers fall back to a generic message.
+ */
+const CHANGELOG_URLS = [
+  'https://cdn.jsdelivr.net/gh/youmikk/media-cleaner@main/CHANGELOG.json',
+  'https://raw.githubusercontent.com/youmikk/media-cleaner/main/CHANGELOG.json',
+];
+
+export async function fetchLatestChangelog() {
+  for (const url of CHANGELOG_URLS) {
+    try {
+      const res = await fetch(url, { headers: { 'Cache-Control': 'no-cache' } });
+      if (!res.ok) continue;
+      const list = await res.json();
+      if (Array.isArray(list) && list.length > 0 && list[0].notes) {
+        return list[0];
+      }
+    } catch (e) {
+      // try the next mirror
+    }
+  }
+  return null;
 }
 
 /**

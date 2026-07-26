@@ -10,7 +10,7 @@ import {
   Alert,
 } from 'react-native';
 import { Image } from 'expo-image';
-import * as VideoThumbnails from 'expo-video-thumbnails';
+import { getVideoThumbnail } from '../utils/thumbCache';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
@@ -72,14 +72,12 @@ export default function BurstCleanScreen({ route, navigation }) {
           if (alive) setProgress({ done, total });
           if (members.length < 2) continue;
           bestId = members[0].id; // keep the first copy
-          // Generate thumbnails for video members.
+          // Thumbnails for video members — persistently CACHED: generated
+          // once per video, instant on every later visit.
           for (const a of members) {
             if (a.mediaType === 'video') {
               try {
-                const { uri } = await VideoThumbnails.getThumbnailAsync(
-                  a.localUri || a.uri,
-                  { time: 500 }
-                );
+                const uri = await getVideoThumbnail(a);
                 if (alive) setThumbs((s) => ({ ...s, [a.id]: uri }));
               } catch (e) {
                 // no thumbnail — icon shows instead

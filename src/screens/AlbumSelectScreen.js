@@ -15,9 +15,11 @@ import AlbumPicker from '../components/AlbumPicker';
 import TimePicker from '../components/TimePicker';
 import AnalysisProgress from '../components/AnalysisProgress';
 import analyzer from '../utils/chunkedAnalyzer';
+import * as sessionManager from '../utils/sessionManager';
 import {
   getAlbums,
   getAssetsPage,
+  getAssetsByIds,
   getAlbumFingerprint,
   getAlbumSummary,
   saveAlbumSummary,
@@ -41,6 +43,9 @@ export default function AlbumSelectScreen({ navigation }) {
   const [summary, setSummary] = useState(null); // {count, thumbs, years}
   const [timeFilter, setTimeFilter] = useState(null);
   const [analysisState, setAnalysisState] = useState(null);
+  // When an unfinished photo session exists for this album, the three
+  // preview cards show the CURRENT GROUP's photos (and tapping resumes).
+  const [sessionPreview, setSessionPreview] = useState(null); // {thumbs} | null
 
   const albumTitle = useMemo(() => {
     const a = albums.find((x) => x.id === albumId);
@@ -59,14 +64,60 @@ export default function AlbumSelectScreen({ navigation }) {
     }, [t])
   );
 
+  // Follow the cleaning progress: show the current group's photos on the
+  // three cards whenever an unfinished session matches this album.
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      (async () => {
+        try {
+          const pending = await sessionManager.getPendingSession();
+          if (
+            !pending ||
+            pending.type !== 'photo' ||
+            pending.albumId !== albumId
+          ) {
+            if (alive) setSessionPreview(null);
+            return;
+          }
+          const order = (await sessionManager.getOrder()) || [];
+          const gs = pending.groupSize || 5;
+          const gi = pending.groupIndex || 0;
+          const ids = order.slice(gi * gs, gi * gs + 3);
+          if (ids.length === 0) {
+            if (alive) setSessionPreview(null);
+            return;
+          }
+          const assets = await getAssetsByIds(ids);
+          const byId = Object.fromEntries(assets.map((a) => [a.id, a]));
+          const thumbs = ids
+            .map((id) => byId[id])
+            .filter(Boolean)
+            .map((a) => ({ id: a.id, uri: a.uri }));
+          if (alive) setSessionPreview(thumbs.length ? { thumbs } : null);
+        } catch (e) {
+          if (alive) setSessionPreview(null);
+        }
+      })();
+      return () => {
+        alive = false;
+      };
+    }, [albumId])
+  );
+
   // Summary: cached-first, rescan ONLY when the album actually changed.
-  useEffect(() => {
+  // Runs on EVERY focus (not just album switches): coming back from a
+  // cleaning session re-checks the fingerprint, so the three preview
+  // thumbs always reflect the album's latest state. Unchanged album =
+  // zero scanning, still instant.
+  useFocusEffect(
+    useCallback(() => {
     let alive = true;
-    setSummary(null);
     (async () => {
       try {
         const cached = await getAlbumSummary(albumId);
         if (alive && cached) setSummary(cached.summary);
+        else if (alive && !cached) setSummary(null);
 
         const fp = await getAlbumFingerprint(albumId, 'photo');
         if (!alive) return;
@@ -114,7 +165,8 @@ export default function AlbumSelectScreen({ navigation }) {
     return () => {
       alive = false;
     };
-  }, [albumId]);
+    }, [albumId])
+  );
 
   useEffect(() => analyzer.subscribe(setAnalysisState), []);
 
@@ -159,10 +211,16 @@ export default function AlbumSelectScreen({ navigation }) {
       timeRange: timeFilter
         ? { start: timeFilter.start, end: timeFilter.end }
         : null,
+      // Cards show the current group -> tapping CONTINUES that session.
+      resume: !!sessionPreview && !timeFilter,
     });
   };
 
-  const thumbs = summary ? summary.thumbs : [];
+  const thumbs = sessionPreview
+    ? sessionPreview.thumbs
+    : summary
+    ? summary.thumbs
+    : [];
   const cardW = (width - 16 * 2 - 12 * 2) / 3;
   const cardHeights = [cardW * 1.5, cardW * 1.9, cardW * 1.5];
 
@@ -177,6 +235,7 @@ export default function AlbumSelectScreen({ navigation }) {
           albums={albums}
           selected={albumId}
           onSelect={(a) => {
+            if (a.id !== albumId) setSummary(null); // don't show stale thumbs
             setAlbumId(a.id);
             setTimeFilter(null);
           }}

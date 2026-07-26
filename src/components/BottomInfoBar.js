@@ -25,6 +25,7 @@ export default function BottomInfoBar({
   onUndo,
   hideFavorite = false,
   floating = false,
+  bottomOffset = 0, // extra lift (e.g. above the floating tab bar)
 }) {
   const { colors, language, t } = useSettings();
   const insets = useSafeAreaInsets();
@@ -32,7 +33,10 @@ export default function BottomInfoBar({
   if (floating) {
     return (
       <View
-        style={[styles.wrap, { bottom: Math.max(insets.bottom, 12) }]}
+        style={[
+          styles.wrap,
+          { bottom: Math.max(insets.bottom, 12) + bottomOffset },
+        ]}
         pointerEvents="box-none"
       >
         <Pressable onPress={onPressDate} hitSlop={8} style={styles.floatingCenter}>

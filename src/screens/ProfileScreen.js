@@ -38,6 +38,7 @@ import {
   checkOTA,
   reloadWithUpdate,
   checkGitHubRelease,
+  fetchLatestChangelog,
 } from '../utils/updateChecker';
 
 const GITHUB_URL = 'https://github.com/youmikk/media-cleaner';
@@ -208,9 +209,32 @@ export default function ProfileScreen({ navigation }) {
     try {
       const ota = await checkOTA();
       if (ota === 'applied') {
-        Alert.alert(t('check_update'), t('update_ota_ready'), [
+        // Show the changelog (from the repo) above the restart choice.
+        let body = t('update_ota_ready');
+        try {
+          const log = await fetchLatestChangelog();
+          if (log && Array.isArray(log.notes) && log.notes.length > 0) {
+            body = `${log.notes.map((n) => `• ${n}`).join('\n')}\n\n${t(
+              'update_ota_ready'
+            )}`;
+          }
+        } catch (e) {
+          // changelog unavailable — generic message
+        }
+        Alert.alert(t('check_update'), body, [
           { text: t('cancel'), style: 'cancel' },
-          { text: t('update_restart'), onPress: () => reloadWithUpdate() },
+          {
+            text: t('update_restart'),
+            // Delay past the Alert dismissal — reloadAsync races the
+            // closing dialog on Android and silently fails otherwise.
+            onPress: () =>
+              setTimeout(async () => {
+                const ok = await reloadWithUpdate();
+                if (!ok) {
+                  Alert.alert(t('check_update'), t('update_restart_manual'));
+                }
+              }, 400),
+          },
         ]);
         return;
       }

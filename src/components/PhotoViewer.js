@@ -218,7 +218,7 @@ export default function PhotoViewer({
               styles.markBtn,
               {
                 bottom: Math.max(insets.bottom, 16) + 12,
-                backgroundColor: isSel ? colors.danger : 'rgba(255,255,255,0.16)',
+                backgroundColor: isSel ? colors.danger : 'rgba(0,0,0,0.45)',
               },
             ]}
           >
@@ -254,7 +254,7 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
   roundBtn: {
-    backgroundColor: 'rgba(255,255,255,0.16)',
+    backgroundColor: 'rgba(0,0,0,0.45)', // readable over white photos too
     borderRadius: 18,
     padding: 8,
   },

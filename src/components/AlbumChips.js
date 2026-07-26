@@ -47,8 +47,11 @@ export default function AlbumChips({
     [albums, currentAlbumId, usage]
   );
 
-  const chipBg = dark ? 'rgba(0,0,0,0.45)' : colors.card;
-  const chipFg = dark ? '#fff' : colors.text;
+  // Scrim chips: the row floats OVER photos/videos, so theme colors can't
+  // guarantee contrast (white card on a white photo is invisible). A dark
+  // translucent scrim with white text reads on ANY background.
+  const chipBg = 'rgba(0,0,0,0.45)';
+  const chipFg = '#fff';
 
   return (
     <>
@@ -68,19 +71,12 @@ export default function AlbumChips({
           <Ionicons name="add" size={16} color={chipFg} />
         </Pressable>
 
-        {/* 2) current item's album (follows the item) */}
+        {/* 2) current item's album (follows the item) — solid accent so the
+            ✓ chip stands out from the scrim chips on any background */}
         {currentAlbum && (
-          <View
-            style={[
-              styles.chip,
-              { backgroundColor: dark ? 'rgba(255,255,255,0.22)' : colors.accentSoft },
-            ]}
-          >
-            <Ionicons name="checkmark" size={14} color={dark ? '#fff' : colors.accent} />
-            <Text
-              style={[styles.chipText, { color: dark ? '#fff' : colors.accent }]}
-              numberOfLines={1}
-            >
+          <View style={[styles.chip, { backgroundColor: colors.accent }]}>
+            <Ionicons name="checkmark" size={14} color="#fff" />
+            <Text style={[styles.chipText, { color: '#fff' }]} numberOfLines={1}>
               {currentAlbum.title}
             </Text>
           </View>

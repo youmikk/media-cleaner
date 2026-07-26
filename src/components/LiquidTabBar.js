@@ -10,9 +10,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
 import GlassSurface from './GlassSurface';
 
+// The video feed ('VideoCleaning') is NOT hidden: the tab bar stays on top
+// of the feed so switching tabs is instant — no need to exit first.
 const HIDDEN_ROUTES = [
   'Cleaning',
-  'VideoCleaning',
   'BurstClean',
   'RecycleBin',
   'Compress',
@@ -57,14 +58,7 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
       ? nestedState.routes[nestedState.index ?? nestedState.routes.length - 1]
           ?.name
       : null;
-  const nestedRoute =
-    nestedState && nestedState.routes
-      ? nestedState.routes[nestedState.index ?? nestedState.routes.length - 1]
-      : null;
-  const videosEmpty = !!(nestedRoute && nestedRoute.params && nestedRoute.params.empty);
-  const shouldHide =
-    focusedRoute.name === 'VideosTab' || HIDDEN_ROUTES.includes(nestedName);
-  if (shouldHide && !videosEmpty) return null;
+  if (HIDDEN_ROUTES.includes(nestedName)) return null;
 
   const labels = {
     PhotosTab: t('tab_photos'),

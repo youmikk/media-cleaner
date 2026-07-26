@@ -121,6 +121,7 @@ export default function PhotoCard({ asset, isFavorite, marked, sizeLabel }) {
           style={styles.fill}
           contentFit="contain"
           nativeControls
+          surfaceType={Platform.OS === 'android' ? 'textureView' : undefined}
         />
       ) : liveSource ? (
         <LivePhotoView
@@ -144,6 +145,7 @@ export default function PhotoCard({ asset, isFavorite, marked, sizeLabel }) {
           contentFit="contain"
           cachePolicy="memory-disk"
           recyclingKey={asset.id}
+          priority="high" // the on-screen photo beats any queued prefetch
           transition={60}
         />
       )}

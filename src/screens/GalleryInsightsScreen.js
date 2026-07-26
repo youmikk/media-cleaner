@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -6,6 +6,7 @@ import {
   ScrollView,
   StyleSheet,
   ActivityIndicator,
+  PanResponder,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -20,6 +21,25 @@ import { getAssets, ALL_ALBUM_ID } from '../utils/albumHelpers';
 export default function GalleryInsightsScreen({ navigation }) {
   const { colors, t, language } = useSettings();
   const [stats, setStats] = useState(null);
+
+  // Scrubbing the hour chart: drag a finger across the bars to read the
+  // exact value of each hour. null = show the busiest hour by default.
+  const [activeHour, setActiveHour] = useState(null);
+  const chartWidthRef = useRef(1);
+  const scrub = (x) => {
+    const w = chartWidthRef.current || 1;
+    const idx = Math.min(23, Math.max(0, Math.floor((x / w) * 24)));
+    setActiveHour(idx);
+  };
+  const panRef = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, g) =>
+        Math.abs(g.dx) > Math.abs(g.dy), // horizontal drags only — vertical stays with the ScrollView
+      onPanResponderGrant: (e) => scrub(e.nativeEvent.locationX),
+      onPanResponderMove: (e) => scrub(e.nativeEvent.locationX),
+    })
+  );
 
   useEffect(() => {
     let alive = true;
@@ -64,6 +84,7 @@ export default function GalleryInsightsScreen({ navigation }) {
           videoCount: videos.length,
           hours,
           maxHour: Math.max(...hours, 1),
+          total: all.length,
           bestHour,
           weekdayName,
           bestMonth,
@@ -147,31 +168,61 @@ export default function GalleryInsightsScreen({ navigation }) {
           <Text style={[styles.chartTitle, { color: colors.text }]}>
             {t('insights_hour_chart')}
           </Text>
-          <View style={[styles.chart, { backgroundColor: colors.card }]}>
-            <View style={styles.bars}>
-              {stats.hours.map((v, i) => (
-                <View key={i} style={styles.barWrap}>
-                  <View
-                    style={[
-                      styles.bar,
-                      {
-                        height: Math.max(3, (v / stats.maxHour) * 90),
-                        backgroundColor:
-                          i === stats.bestHour ? colors.accent : colors.chartTrack,
-                      },
-                    ]}
-                  />
+          {(() => {
+            const shown = activeHour !== null ? activeHour : stats.bestHour;
+            const count = stats.hours[shown] || 0;
+            const pct =
+              stats.total > 0 ? Math.round((count / stats.total) * 100) : 0;
+            return (
+              <View style={[styles.chart, { backgroundColor: colors.card }]}>
+                {/* Live readout — follows the finger while scrubbing */}
+                <View style={styles.tooltipRow}>
+                  <Text style={[styles.tooltipHour, { color: colors.accent }]}>
+                    {shown}:00–{shown + 1}:00
+                  </Text>
+                  <Text style={[styles.tooltipValue, { color: colors.text }]}>
+                    {t('insights_hour_items', { count })} · {pct}%
+                  </Text>
                 </View>
-              ))}
-            </View>
-            <View style={styles.axis}>
-              {[0, 6, 12, 18, 23].map((h) => (
-                <Text key={h} style={[styles.axisLabel, { color: colors.subtext }]}>
-                  {h}
-                </Text>
-              ))}
-            </View>
-          </View>
+                <View
+                  style={styles.bars}
+                  onLayout={(e) => {
+                    chartWidthRef.current = e.nativeEvent.layout.width;
+                  }}
+                  {...panRef.current.panHandlers}
+                >
+                  {stats.hours.map((v, i) => (
+                    <View key={i} style={styles.barWrap} pointerEvents="none">
+                      <View
+                        style={[
+                          styles.bar,
+                          {
+                            height: Math.max(3, (v / stats.maxHour) * 90),
+                            backgroundColor:
+                              i === shown
+                                ? colors.accent
+                                : i === stats.bestHour
+                                ? colors.accentSoft
+                                : colors.chartTrack,
+                          },
+                        ]}
+                      />
+                    </View>
+                  ))}
+                </View>
+                <View style={styles.axis}>
+                  {[0, 6, 12, 18, 23].map((h) => (
+                    <Text
+                      key={h}
+                      style={[styles.axisLabel, { color: colors.subtext }]}
+                    >
+                      {h}
+                    </Text>
+                  ))}
+                </View>
+              </View>
+            );
+          })()}
         </ScrollView>
       )}
     </SafeAreaView>
@@ -204,6 +255,14 @@ const styles = StyleSheet.create({
   cardLabel: { fontSize: 11 },
   chartTitle: { fontSize: 15, fontWeight: '700', marginTop: 22, marginBottom: 10 },
   chart: { borderRadius: 16, padding: 14 },
+  tooltipRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  tooltipHour: { fontSize: 15, fontWeight: '800' },
+  tooltipValue: { fontSize: 13, fontWeight: '600' },
   bars: {
     flexDirection: 'row',
     alignItems: 'flex-end',

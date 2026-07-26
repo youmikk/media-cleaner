@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { InteractionManager } from 'react-native';
+import { InteractionManager, Platform } from 'react-native';
 import { getAssets, getAssetSize, getAlbumFingerprint } from './albumHelpers';
 import { analyzePixels, hammingDistance } from './imageHashing';
 import { groupBursts } from './burstDetection';
@@ -14,7 +14,13 @@ const CACHE_PREFIX = 'analysis_v2_';
 const METRICS_KEY = 'analysis_metrics_v2'; // GLOBAL per-asset metric store
 const SIMILAR_THRESHOLD = 10;
 const MAX_HASHED = 3000;
-const CONCURRENCY = 6; // parallel decodes (I/O bound native work)
+// Each parallel decode holds a FULL-RESOLUTION bitmap natively while it is
+// downscaled — 6 concurrent 48MP photos ≈ >1GB peak and OOM-kills the app
+// on big libraries. Keep the spike bounded.
+const CONCURRENCY = Platform.OS === 'android' ? 3 : 4;
+// Cap the global metric store: Android's AsyncStorage rejects values >2MB,
+// which would silently lose the WHOLE cache. ~6000 entries stays well under.
+const MAX_METRIC_ENTRIES = 6000;
 
 // Low-quality thresholds
 const BLUR_THRESHOLD = 45;
@@ -79,6 +85,13 @@ class ChunkedAnalyzer {
 
   async _persistMetrics() {
     try {
+      // FIFO eviction: JS object keys keep insertion order, so the first
+      // keys are the oldest metrics.
+      const keys = Object.keys(this.metrics);
+      if (keys.length > MAX_METRIC_ENTRIES) {
+        const drop = keys.length - MAX_METRIC_ENTRIES;
+        for (let i = 0; i < drop; i++) delete this.metrics[keys[i]];
+      }
       await AsyncStorage.setItem(METRICS_KEY, JSON.stringify(this.metrics));
     } catch (e) {
       // best effort

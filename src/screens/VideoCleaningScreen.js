@@ -29,7 +29,7 @@ import AlbumChips from '../components/AlbumChips';
 import GroupConfirmSheet from '../components/GroupConfirmSheet';
 import { incrementUsage } from '../utils/albumUsage';
 import * as MediaLibrary from 'expo-media-library';
-import * as VideoThumbnails from 'expo-video-thumbnails';
+import { getVideoThumbnail } from '../utils/thumbCache';
 
 // expo-sharing (system share sheet for FILES) — guarded so the app still
 // runs before `npx expo install expo-sharing` has been executed.
@@ -46,6 +46,8 @@ import {
   getAlbums,
   getAssets,
   getAlbumSnapshot,
+  getCachedAssetList,
+  saveCachedAssetList,
   moveAssetsToAlbum,
   formatBytes,
   ALL_ALBUM_ID,
@@ -128,7 +130,12 @@ export default function VideoCleaningScreen({ navigation }) {
     markStackRef.current = [];
     finishedRef.current = false;
     (async () => {
-      const assets = await getAssets(albumId, 'video');
+      // Local index first: unchanged album = instant open, no scanning.
+      let assets = await getCachedAssetList(albumId, 'video');
+      if (!assets) {
+        assets = await getAssets(albumId, 'video');
+        saveCachedAssetList(albumId, 'video', assets);
+      }
       if (!alive) return;
       setTotalCount(assets.length);
       setRemaining(assets);
@@ -219,22 +226,29 @@ export default function VideoCleaningScreen({ navigation }) {
     if (listRef.current) listRef.current.scrollToOffset({ offset: 0, animated: false });
   }, [currentGroup]);
 
+  const deletingRef = useRef(false); // ignore extra taps while the system dialog is up
   const deleteMarkedNow = async () => {
-    const targets = currentGroup.filter((a) => markedIds.has(a.id));
-    if (targets.length > 0) {
-      try {
-        // SINGLE system deletion dialog for the whole group.
-        const { count, bytes } = await batchDelete(targets, {
-          useRecycleBin: recycleBinActive,
-        });
-        cleanedRef.current.count += count;
-        cleanedRef.current.bytes += bytes;
-        recordCleaned('video', count, bytes);
-      } catch (e) {
-        return; // user cancelled the system dialog — keep marks
+    if (deletingRef.current) return;
+    deletingRef.current = true;
+    try {
+      const targets = currentGroup.filter((a) => markedIds.has(a.id));
+      if (targets.length > 0) {
+        try {
+          // SINGLE system deletion dialog for the whole group.
+          const { count, bytes } = await batchDelete(targets, {
+            useRecycleBin: recycleBinActive,
+          });
+          cleanedRef.current.count += count;
+          cleanedRef.current.bytes += bytes;
+          recordCleaned('video', count, bytes);
+        } catch (e) {
+          return; // user cancelled the system dialog — keep marks
+        }
       }
+      advanceGroup();
+    } finally {
+      deletingRef.current = false;
     }
-    advanceGroup();
   };
 
   // End of group: confirm sheet ONLY if something is marked for deletion;
@@ -274,10 +288,7 @@ export default function VideoCleaningScreen({ navigation }) {
       );
       for (const v of targets) {
         try {
-          const { uri } = await VideoThumbnails.getThumbnailAsync(v.uri, {
-            time: 500,
-            quality: 0.4,
-          });
+          const uri = await getVideoThumbnail(v); // persistent cache
           if (!alive) return;
           setVideoThumbs((m) => ({ ...m, [v.id]: uri }));
         } catch (e) {
@@ -407,9 +418,6 @@ export default function VideoCleaningScreen({ navigation }) {
   }, [index, visibleGroup.length, showConfirm, endGroup]);
 
   const isEmpty = !loading && !completed && totalCount === 0;
-  useEffect(() => {
-    navigation.setParams({ empty: isEmpty });
-  }, [isEmpty, navigation]);
 
   if (loading) {
     return (
@@ -496,8 +504,8 @@ export default function VideoCleaningScreen({ navigation }) {
         </Pressable>
       </View>
 
-      {/* Right floating actions */}
-      <View style={[styles.actions, { bottom: insets.bottom + 170 }]}>
+      {/* Right floating actions (lifted above the tab bar) */}
+      <View style={[styles.actions, { bottom: insets.bottom + 205 }]}>
         <Pressable
           onPress={() => current && toggleFavorite(current.id)}
           style={styles.actionBtn}
@@ -518,7 +526,7 @@ export default function VideoCleaningScreen({ navigation }) {
 
       {/* Quick-categorize chips: [+] [✓current] [others by usage] */}
       <View
-        style={[styles.chipsWrap, { bottom: Math.max(insets.bottom, 12) + 88 }]}
+        style={[styles.chipsWrap, { bottom: Math.max(insets.bottom, 12) + 152 }]}
         pointerEvents="box-none"
       >
         <AlbumChips
@@ -530,11 +538,11 @@ export default function VideoCleaningScreen({ navigation }) {
         />
       </View>
 
-      {/* Playback progress bar (just above the info bar) */}
+      {/* Playback progress bar (just above the floating time) */}
       <View
         style={[
           styles.progressTrack,
-          { bottom: Math.max(insets.bottom, 12) + 74 },
+          { bottom: Math.max(insets.bottom, 12) + 138 },
         ]}
         pointerEvents="none"
       >
@@ -546,12 +554,13 @@ export default function VideoCleaningScreen({ navigation }) {
         />
       </View>
 
-      {/* Floating date + duration (no bar, nothing on either side) */}
+      {/* Floating date + duration (no bar), lifted above the tab bar */}
       <BottomInfoBar
         asset={current}
         subtitle={current ? formatDuration(current.duration) : null}
         onPressDate={() => current && setShowExif(true)}
         floating
+        bottomOffset={80}
       />
 
       <EXIFModal visible={showExif} asset={current} onClose={() => setShowExif(false)} />

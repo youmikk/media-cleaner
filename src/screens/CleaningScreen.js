@@ -12,6 +12,7 @@ import {
   StyleSheet,
   ActivityIndicator,
   useWindowDimensions,
+  Platform,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
@@ -49,6 +50,8 @@ import {
   getAssetsPage,
   getAssetsByIds,
   getAlbumSnapshot,
+  getCachedAssetList,
+  saveCachedAssetList,
   moveAssetsToAlbum,
   formatBytes,
   ALL_ALBUM_ID,
@@ -143,6 +146,8 @@ export default function CleaningScreen({ route, navigation }) {
   const loadingMoreRef = useRef(false);
   const aliveRef = useRef(true);
   const rangeRef = useRef(null);
+  const fetchedPagesRef = useRef(false); // did THIS session hit MediaStore?
+  const listSavedRef = useRef(false);
 
   // ---- Animation shared values ----
   const tx = useSharedValue(0);
@@ -182,6 +187,7 @@ export default function CleaningScreen({ route, navigation }) {
         ) {
           const page = await getAssetsPage(albumId, 'photo', cursorRef.current.after);
           if (!aliveRef.current) return;
+          fetchedPagesRef.current = true;
           const r = rangeRef.current;
           const scoped = page.assets.filter(
             (a) =>
@@ -196,6 +202,17 @@ export default function CleaningScreen({ route, navigation }) {
           setGroups(chunk(allRef.current, groupSize));
         }
         sessionManager.saveOrder(orderRef.current);
+        // Whole album loaded (unscoped) — persist it as the local index so
+        // the NEXT session opens with zero MediaStore scanning.
+        if (
+          fetchedPagesRef.current &&
+          !listSavedRef.current &&
+          !cursorRef.current.hasNext &&
+          !rangeRef.current
+        ) {
+          listSavedRef.current = true;
+          saveCachedAssetList(albumId, 'photo', allRef.current);
+        }
       } finally {
         loadingMoreRef.current = false;
       }
@@ -248,7 +265,10 @@ export default function CleaningScreen({ route, navigation }) {
           hasNext = page.hasNext;
           after = page.endCursor;
         }
-        if (!range) fullAlbumList = all;
+        if (!range) {
+          fullAlbumList = all;
+          saveCachedAssetList(albumId, 'photo', all); // refresh local index
+        }
         const savedOrder = (await sessionManager.getOrder()) || [];
         const byId = Object.fromEntries(all.map((a) => [a.id, a]));
         const ordered = savedOrder.map((id) => byId[id]).filter(Boolean);
@@ -266,12 +286,30 @@ export default function CleaningScreen({ route, navigation }) {
         markStackRef.current = [...savedMarks];
         setLoading(false);
       } else {
-        // Fresh session: SEGMENTED loading — just ~3 groups ahead. The rest
-        // loads only as the user confirms groups.
-        await ensureLoaded(groupSize * 3);
+        // Fresh session: try the persisted local index first (Fossify-style)
+        // — fingerprint unchanged means the FULL list loads instantly with
+        // zero MediaStore scanning.
+        const cachedList = await getCachedAssetList(albumId, 'photo');
         if (!alive) return;
-        setLoading(false);
-        if (!range && !cursorRef.current.hasNext) fullAlbumList = allRef.current;
+        if (cachedList) {
+          const scoped = cachedList.filter(inRange);
+          const ordered =
+            settings.order === 'random' ? shuffle(scoped) : scoped;
+          allRef.current = ordered;
+          cursorRef.current = { after: undefined, hasNext: false };
+          orderRef.current = ordered.map((a) => a.id);
+          setGroups(chunk(ordered, groupSize));
+          setLoading(false);
+          if (!range) fullAlbumList = cachedList;
+        } else {
+          // No/stale index: SEGMENTED loading — just ~3 groups ahead. The
+          // rest loads as the user confirms groups; the finished list is
+          // then saved as the new index.
+          await ensureLoaded(groupSize * 3);
+          if (!alive) return;
+          setLoading(false);
+          if (!range && !cursorRef.current.hasNext) fullAlbumList = allRef.current;
+        }
       }
 
       // Session bookkeeping (snapshot reuses the already-loaded list when
@@ -353,12 +391,14 @@ export default function CleaningScreen({ route, navigation }) {
     }
   }, [current]);
 
-  // Prefetch the NEXT photo so swiping feels instant.
+  // Prefetch the next TWO photos so swiping feels instant even while the
+  // decoder is still warm on slower devices.
   useEffect(() => {
-    const next = visible[pi + 1];
-    if (next && next.mediaType !== 'video') {
-      ExpoImage.prefetch(next.uri).catch(() => {});
-    }
+    [visible[pi + 1], visible[pi + 2]].forEach((next) => {
+      if (next && next.mediaType !== 'video') {
+        ExpoImage.prefetch(next.uri).catch(() => {});
+      }
+    });
   }, [pi, visible]);
 
   // Resolve the current photo's address (GPS -> reverse geocode, cached).
@@ -616,6 +656,11 @@ export default function CleaningScreen({ route, navigation }) {
     setPi(0);
     tx.value = 0;
     ty.value = 0;
+    // Android has no OS memory-warning event — proactively drop the decoded
+    // -bitmap cache every few groups so huge albums can't OOM the app.
+    if (Platform.OS === 'android' && (gi + 1) % 5 === 0) {
+      ExpoImage.clearMemoryCache().catch(() => {});
+    }
     if (gi < groups.length - 1) {
       setGi(gi + 1);
       return;
@@ -646,24 +691,31 @@ export default function CleaningScreen({ route, navigation }) {
     nextGroup();
   };
 
+  const deletingRef = useRef(false); // ignore extra taps while the system dialog is up
   const deleteMarkedNow = async () => {
-    const targets = group.filter((a) => markedIds.has(a.id));
-    if (targets.length > 0) {
-      try {
-        // SINGLE system deletion dialog for the whole group.
-        const { count, bytes } = await batchDelete(targets, {
-          useRecycleBin: recycleBinActive,
-        });
-        cleanedRef.current.count += count;
-        cleanedRef.current.bytes += bytes;
-        recordCleaned('photo', count, bytes);
-        clearGroupMarks();
-      } catch (e) {
-        // user cancelled the system dialog — keep marks, stay in the sheet
-        return;
+    if (deletingRef.current) return;
+    deletingRef.current = true;
+    try {
+      const targets = group.filter((a) => markedIds.has(a.id));
+      if (targets.length > 0) {
+        try {
+          // SINGLE system deletion dialog for the whole group.
+          const { count, bytes } = await batchDelete(targets, {
+            useRecycleBin: recycleBinActive,
+          });
+          cleanedRef.current.count += count;
+          cleanedRef.current.bytes += bytes;
+          recordCleaned('photo', count, bytes);
+          clearGroupMarks();
+        } catch (e) {
+          // user cancelled the system dialog — keep marks, stay in the sheet
+          return;
+        }
       }
+      nextGroup();
+    } finally {
+      deletingRef.current = false;
     }
-    nextGroup();
   };
 
   const closeConfirmOnly = () => {
@@ -785,7 +837,14 @@ export default function CleaningScreen({ route, navigation }) {
         <Pressable
           onPress={exit}
           hitSlop={10}
-          style={[styles.exitBtn, { backgroundColor: colors.card }]}
+          style={[
+            styles.exitBtn,
+            {
+              backgroundColor: colors.chartTrack,
+              borderWidth: StyleSheet.hairlineWidth,
+              borderColor: colors.border,
+            },
+          ]}
         >
           <Ionicons name="close" size={22} color={colors.text} />
         </Pressable>
@@ -841,8 +900,8 @@ export default function CleaningScreen({ route, navigation }) {
       </View>
 
       {toast && (
-        <View style={[styles.toast, { backgroundColor: colors.elevated }]}>
-          <Text style={{ color: colors.text, fontSize: 13, fontWeight: '600' }}>
+        <View style={styles.toast}>
+          <Text style={{ color: '#fff', fontSize: 13, fontWeight: '600' }}>
             {toast}
           </Text>
         </View>
@@ -930,6 +989,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     paddingHorizontal: 16,
     paddingVertical: 10,
+    backgroundColor: 'rgba(0,0,0,0.75)', // readable over any content
   },
   doneTitle: { fontSize: 24, fontWeight: '800', marginTop: 16 },
   doneSub: { fontSize: 14, marginTop: 6, textAlign: 'center' },

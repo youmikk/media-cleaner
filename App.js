@@ -11,6 +11,8 @@ import {
   createNavigationContainerRef,
 } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { Image as ExpoImage } from 'expo-image';
+import { subscribeMemoryWarning } from './src/utils/batteryUtils';
 import { SettingsProvider, useSettings } from './src/context/SettingsContext';
 import { AppProvider } from './src/context/AppContext';
 import RootNavigator from './src/navigation';
@@ -67,6 +69,16 @@ function AppInner() {
 
   // App init: purge expired recycle-bin items, drop stale soft-delete
   // bookkeeping, and decide whether the first-launch tutorial should show.
+  // Low-memory pressure valve: drop expo-image's decoded-bitmap cache the
+  // moment the OS warns, instead of letting it OOM-kill the app while the
+  // user swipes through a huge library.
+  useEffect(() => {
+    const unsub = subscribeMemoryWarning(() => {
+      ExpoImage.clearMemoryCache().catch(() => {});
+    });
+    return unsub;
+  }, []);
+
   useEffect(() => {
     trashManager.purgeExpired().catch(() => {});
     AsyncStorage.getItem(TUTORIAL_KEY)

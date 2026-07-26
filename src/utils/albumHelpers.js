@@ -182,6 +182,72 @@ export function buildYearHistogram(assets) {
     }));
 }
 
+// ---- Persistent asset-list cache (Fossify/photoo-style local index) ----
+// The full asset list of an album, keyed by fingerprint: when the album is
+// unchanged, cleaning screens open with ZERO MediaStore scanning.
+const LIST_PREFIX = 'asset_list_v1_';
+
+function slimAsset(a) {
+  return {
+    id: a.id,
+    uri: a.uri,
+    mediaType: a.mediaType,
+    mediaSubtypes: a.mediaSubtypes,
+    width: a.width,
+    height: a.height,
+    creationTime: a.creationTime,
+    modificationTime: a.modificationTime,
+    duration: a.duration,
+    albumId: a.albumId,
+    filename: a.filename,
+  };
+}
+
+/** Cached full asset list, or null when missing/stale. */
+export async function getCachedAssetList(albumId, mediaType) {
+  try {
+    const raw = await AsyncStorage.getItem(
+      `${LIST_PREFIX}${mediaType}_${albumId}`
+    );
+    if (!raw) return null;
+    const { fingerprint, assets } = JSON.parse(raw);
+    if (!fingerprint || !Array.isArray(assets) || assets.length === 0)
+      return null;
+    const fp = await getAlbumFingerprint(albumId, mediaType);
+    if (
+      fingerprint.assetCount !== fp.assetCount ||
+      fingerprint.latestModificationTime !== fp.latestModificationTime
+    ) {
+      return null; // album changed — caller rescans (and re-saves)
+    }
+    return assets;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** Persist an album's full asset list (newest-first, slimmed, capped). */
+export async function saveCachedAssetList(albumId, mediaType, assets) {
+  try {
+    if (!assets || assets.length === 0) return;
+    const fp = await getAlbumFingerprint(albumId, mediaType);
+    let slim = [...assets]
+      .sort((a, b) => (b.creationTime || 0) - (a.creationTime || 0))
+      .slice(0, MAX_ASSETS)
+      .map(slimAsset);
+    let payload = JSON.stringify({ fingerprint: fp, assets: slim });
+    // Android AsyncStorage rejects values >2MB — trim to fit if needed.
+    if (payload.length > 1800000) {
+      const keep = Math.floor((slim.length * 1800000) / payload.length);
+      slim = slim.slice(0, keep);
+      payload = JSON.stringify({ fingerprint: fp, assets: slim });
+    }
+    await AsyncStorage.setItem(`${LIST_PREFIX}${mediaType}_${albumId}`, payload);
+  } catch (e) {
+    // best effort
+  }
+}
+
 export async function getAlbumSummary(albumId) {
   try {
     const raw = await AsyncStorage.getItem(`${SUMMARY_PREFIX}${albumId}`);
