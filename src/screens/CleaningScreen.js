@@ -327,7 +327,24 @@ export default function CleaningScreen({ route, navigation }) {
         const rest = all.filter(
           (a) => !inOrder.has(a.id) && !reviewed.has(a.id)
         );
-        const finalList = [...ordered, ...rest];
+        // NEW photos taken since the session started: sorted per the
+        // user's order setting and inserted right AFTER the interrupted
+        // group — they show up as the very next group instead of hiding
+        // at the tail of a long paused session.
+        const restSorted =
+          settings.order === 'random'
+            ? shuffle(rest)
+            : [...rest].sort(
+                (a, b) => (b.creationTime || 0) - (a.creationTime || 0)
+              );
+        const finalList =
+          restSorted.length > 0 && ordered.length > groupSize
+            ? [
+                ...ordered.slice(0, groupSize),
+                ...restSorted,
+                ...ordered.slice(groupSize),
+              ]
+            : [...ordered, ...restSorted];
         log(
           'clean.resume',
           `order=${savedOrder.length} reviewed=${reviewed.size} kept=${ordered.length} rest=${rest.length}`

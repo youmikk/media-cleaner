@@ -43,7 +43,7 @@ import {
   fetchLatestChangelog,
 } from '../utils/updateChecker';
 
-import { getLogFileUri } from '../utils/logger';
+import { getLogFileUri, log as diagLog } from '../utils/logger';
 
 // expo-sharing (system share sheet for FILES) — guarded for Expo Go.
 let Sharing = null;
@@ -80,6 +80,10 @@ const SIZE_SCAN_CAP = 300;
 export default function ProfileScreen({ navigation }) {
   const { colors, t, settings, setSetting, isAndroid } = useSettings();
   const { stats, trash, refreshTrash } = useApp();
+
+  useEffect(() => {
+    diagLog('profile', 'mounted');
+  }, []);
 
   const [suggestions, setSuggestions] = useState({
     largest: [],
@@ -490,7 +494,11 @@ export default function ProfileScreen({ navigation }) {
               thumbnailUri={lowQuality.thumb}
               count={lowQuality.ids.length}
               onClean={() =>
-                cleanAssets(lowQuality.ids, t('suggestion_lowquality'))
+                // cap: huge lists made the cleaning screen appear stuck
+                cleanAssets(
+                  lowQuality.ids.slice(0, 500),
+                  t('suggestion_lowquality')
+                )
               }
             />
           </ScrollView>

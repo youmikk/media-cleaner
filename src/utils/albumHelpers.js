@@ -70,14 +70,25 @@ export async function getAssets(albumId, mediaType) {
 }
 
 export async function getAssetsByIds(ids) {
+  // Parallel (8-wide) and hard-capped: the old serial loop stalled for
+  // tens of seconds on large id lists (Low-Quality with hundreds of hits
+  // looked like "the screen won't open").
+  const capped = ids.slice(0, 600);
   const out = [];
-  for (const id of ids) {
-    try {
-      const info = await MediaLibrary.getAssetInfoAsync(id);
-      if (info) out.push(info);
-    } catch (e) {
-      // asset may have been deleted meanwhile
-    }
+  const CONC = 8;
+  for (let i = 0; i < capped.length; i += CONC) {
+    const batch = capped.slice(i, i + CONC);
+    // eslint-disable-next-line no-await-in-loop
+    const infos = await Promise.all(
+      batch.map(async (id) => {
+        try {
+          return await MediaLibrary.getAssetInfoAsync(id);
+        } catch (e) {
+          return null; // asset may have been deleted meanwhile
+        }
+      })
+    );
+    for (const info of infos) if (info) out.push(info);
   }
   return out;
 }

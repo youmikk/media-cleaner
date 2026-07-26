@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Pressable, StyleSheet, Platform } from 'react-native';
 import { useVideoPlayer, VideoView } from 'expo-video';
-import * as MediaLibrary from 'expo-media-library';
+import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 
 /**
@@ -15,23 +15,36 @@ import { Ionicons } from '@expo/vector-icons';
  * - Source fallback: if the file:// path fails under scoped storage, retry
  *   with the asset's localUri and then the MediaStore content:// uri.
  */
-export default function VideoCard({ asset, active, height, onProgress, onEnded }) {
+export default function VideoCard({
+  asset,
+  active,
+  height,
+  onProgress,
+  onEnded,
+  onLoadError, // load failed BEFORE first frame — parent remounts with an
+  // alternate uri. We never touch a live player (replace on a
+  // running/releasing player can crash natively).
+}) {
   const [paused, setPaused] = useState(false);
-  const fallbackStepRef = useRef(0);
   const hadPlayedRef = useRef(false); // reached readyToPlay at least once
-  const aliveRef = useRef(true);
+  const errorFiredRef = useRef(false);
   const player = useVideoPlayer(asset.uri, (p) => {
     p.loop = true;
     p.muted = false;
     p.timeUpdateEventInterval = 0.25;
+    // OOM guard (Android OutOfMemoryError in the feed): ExoPlayer's default
+    // load control pre-buffers ~50s of media — for high-bitrate videos that
+    // is tens of MB per player. Cap both duration and bytes.
+    try {
+      p.bufferOptions = {
+        preferredForwardBufferDuration: 6,
+        maxBufferBytes: 12 * 1024 * 1024, // Android only, 0 = automatic
+        prioritizeTimeOverSizeThresholds: false,
+      };
+    } catch (e) {
+      // older runtime without bufferOptions — keep defaults
+    }
   });
-
-  useEffect(() => {
-    aliveRef.current = true;
-    return () => {
-      aliveRef.current = false;
-    };
-  }, []);
 
   // A released player throws on any call during list unmounts — never let
   // that escape.
@@ -48,46 +61,20 @@ export default function VideoCard({ asset, active, height, onProgress, onEnded }
     if (!active) setPaused(false);
   }, [active]);
 
-  // Playback-error fallback chain: uri -> localUri -> content:// (Android).
-  // ONLY for load-time failures. If the video already played and THEN
-  // errors, the file was most likely just deleted — retrying against a
-  // dead file (or a released player) is what crashes, so we bail.
+  // Load-time failure -> report ONCE to the parent, which remounts this
+  // card with an alternate uri (or a can't-play placeholder). No player
+  // mutation from inside the error path.
   useEffect(() => {
     let sub;
     try {
       sub = player.addListener('statusChange', (e) => {
         if (e.status === 'readyToPlay') hadPlayedRef.current = true;
         if (e.status !== 'error') return;
-        if (hadPlayedRef.current) return; // deleted mid-session — no retry
-        const step = fallbackStepRef.current;
-        if (step >= 2) return; // out of options
-        fallbackStepRef.current = step + 1;
-        (async () => {
-          let alt = null;
-          if (step === 0) {
-            try {
-              const info = await MediaLibrary.getAssetInfoAsync(asset.id);
-              alt = info.localUri || info.uri;
-              if (alt === asset.uri) alt = null; // same thing — skip ahead
-            } catch (err) {
-              alt = null;
-            }
-          }
-          if (!alt && Platform.OS === 'android') {
-            const rawId = String(asset.id).split('/')[0];
-            if (/^\d+$/.test(rawId)) {
-              alt = `content://media/external/video/media/${rawId}`;
-            }
-          }
-          if (alt && aliveRef.current) {
-            try {
-              player.replace(alt);
-              if (active && !paused) player.play();
-            } catch (err) {
-              // give up quietly
-            }
-          }
-        })();
+        if (hadPlayedRef.current || errorFiredRef.current) return;
+        errorFiredRef.current = true;
+        if (onLoadError) {
+          setTimeout(() => onLoadError(), 0); // never re-enter the event
+        }
       });
     } catch (e) {
       sub = null;
@@ -128,6 +115,17 @@ export default function VideoCard({ asset, active, height, onProgress, onEnded }
 
   return (
     <Pressable style={[styles.cell, { height }]} onPress={() => setPaused((p) => !p)}>
+      {Platform.OS === 'android' && (
+        // Poster frame behind the TextureView (transparent until the first
+        // decoded frame) — hides the load gap now that neighbours no longer
+        // pre-mount players. Glide decodes video posters cheaply.
+        <Image
+          source={{ uri: asset.uri }}
+          style={StyleSheet.absoluteFill}
+          contentFit="contain"
+          transition={0}
+        />
+      )}
       <VideoView
         player={player}
         style={StyleSheet.absoluteFill}

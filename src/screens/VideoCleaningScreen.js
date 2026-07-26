@@ -19,6 +19,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { Image as ExpoImage } from 'expo-image';
 import { useSettings } from '../context/SettingsContext';
 import { useApp } from '../context/AppContext';
 import VideoCard from '../components/VideoCard';
@@ -182,9 +183,31 @@ export default function VideoCleaningScreen({ navigation }) {
   const current = visibleGroup[Math.min(index, Math.max(0, visibleGroup.length - 1))] || null;
 
   useEffect(() => {
-    if (current) viewedRef.current.add(current.id);
+    if (current) {
+      viewedRef.current.add(current.id);
+      // Crash forensics: if the app dies during playback, the last logged
+      // id identifies the toxic video.
+      log('video', `active id=${current.id}`);
+    }
     setVideoProgress(0);
   }, [current]);
+
+  // Load-failure fallback WITHOUT touching live players: remount the card
+  // with the MediaStore content:// uri; if that fails too, an unplayable
+  // placeholder is shown instead of a player.
+  const [altUris, setAltUris] = useState({}); // id -> alt uri | null(dead)
+  const handleLoadError = useCallback((item) => {
+    log('video', `loadError id=${item.id}`);
+    setAltUris((m) => {
+      if (m[item.id] !== undefined) return { ...m, [item.id]: null };
+      const rawId = String(item.id).split('/')[0];
+      const alt =
+        Platform.OS === 'android' && /^\d+$/.test(rawId)
+          ? `content://media/external/video/media/${rawId}`
+          : null;
+      return { ...m, [item.id]: alt };
+    });
+  }, []);
 
   useEffect(() => {
     if (sessionRef.current) {
@@ -475,22 +498,49 @@ export default function VideoCleaningScreen({ navigation }) {
         keyExtractor={(item) => item.id}
         extraData={[index, focused, showConfirm]}
         renderItem={({ item, index: i }) => {
-          // Android decoders are scarce and player init is expensive:
-          // only the CURRENT video ±1 gets a real player. Everything else
-          // (and the whole feed when the tab is blurred) is a black
-          // placeholder — leaving the tab RELEASES every player, so the
-          // photos tab stays smooth.
+          // OOM guard: ONLY the current video gets a real player — three
+          // live ExoPlayers each pre-buffering high-bitrate video was
+          // enough to OutOfMemoryError low-end devices. Neighbours (±1)
+          // render a poster frame so swipes still feel instant; everything
+          // else (and the whole feed when the tab is blurred) is a black
+          // placeholder — leaving the tab RELEASES the player.
           const near = focused && Math.abs(i - index) <= 1;
           if (!near) {
             return <View style={{ height, backgroundColor: '#000' }} />;
           }
+          const alt = altUris[item.id];
+          if (i !== index && alt !== null) {
+            return (
+              <View style={{ height, backgroundColor: '#000' }}>
+                {Platform.OS === 'android' ? (
+                  <ExpoImage
+                    source={{ uri: item.uri }}
+                    style={StyleSheet.absoluteFill}
+                    contentFit="contain"
+                    transition={0}
+                  />
+                ) : null}
+              </View>
+            );
+          }
+          if (alt === null) {
+            // Both sources failed — never mount a player for this one.
+            return (
+              <View style={[styles.center, { height, backgroundColor: '#000' }]}>
+                <Ionicons name="videocam-off-outline" size={44} color="rgba(255,255,255,0.5)" />
+              </View>
+            );
+          }
+          const playAsset = alt ? { ...item, uri: alt } : item;
           return (
             <VideoCard
-              asset={item}
+              key={`${item.id}${alt ? ':alt' : ''}`}
+              asset={playAsset}
               active={i === index && !showConfirm}
               height={height}
               onProgress={i === index ? setVideoProgress : undefined}
               onEnded={i === index ? onActiveEnded : undefined}
+              onLoadError={() => handleLoadError(item)}
             />
           );
         }}
