@@ -44,7 +44,9 @@ const QUALITIES = [
 const IMG_RATIO = { high: 0.7, medium: 0.45, low: 0.25 };
 const VID_RATIO = { high: 0.5, medium: 0.35, low: 0.2 };
 const SCAN_CAP = 200;
-const LIST_SIZE = 30;
+const LIST_MAX = 100; // hard cap on rendered rows
+const MB = 1024 * 1024;
+const MIN_SIZE_OPTIONS = [5, 10, 20, 50]; // "only show files over X MB"
 
 /**
  * 压缩工具 — pick the biggest photos/videos, re-encode them at a chosen
@@ -55,7 +57,8 @@ export default function CompressScreen({ navigation }) {
   const { colors, t, recycleBinActive } = useSettings();
   const { recordCleaned } = useApp();
 
-  const [items, setItems] = useState(null);
+  const [allSized, setAllSized] = useState(null); // every scanned file+size
+  const [minMB, setMinMB] = useState(10); // only show files over X MB
   const [selected, setSelected] = useState({});
   const [quality, setQuality] = useState('medium');
   const [deleteOriginal, setDeleteOriginal] = useState(false);
@@ -77,15 +80,25 @@ export default function CompressScreen({ navigation }) {
           if (size > 0) sized.push({ ...a, size });
         }
         if (!alive) return;
-        setItems(sized.sort((x, y) => y.size - x.size).slice(0, LIST_SIZE));
+        setAllSized(sized.sort((x, y) => y.size - x.size));
       } catch (e) {
-        if (alive) setItems([]);
+        if (alive) setAllSized([]);
       }
     })();
     return () => {
       alive = false;
     };
   }, []);
+
+  // Only files over the threshold reach the list — switching the threshold
+  // is instant (no rescan), and the list is hard-capped for smoothness.
+  const items = React.useMemo(
+    () =>
+      allSized === null
+        ? null
+        : allSized.filter((i) => i.size >= minMB * MB).slice(0, LIST_MAX),
+    [allSized, minMB]
+  );
 
   const selectedItems = (items || []).filter((i) => selected[i.id]);
   const q = QUALITIES.find((x) => x.key === quality).value;
@@ -209,6 +222,35 @@ export default function CompressScreen({ navigation }) {
           ))}
         </View>
       </View>
+      {/* Minimum-size filter: keep the list small and smooth */}
+      <View style={styles.controls}>
+        <Text style={[styles.label, { color: colors.text }]}>
+          {t('compress_min_size')}
+        </Text>
+        <View style={[styles.segmented, { backgroundColor: colors.chartTrack }]}>
+          {MIN_SIZE_OPTIONS.map((mb) => (
+            <Pressable
+              key={mb}
+              onPress={() => setMinMB(mb)}
+              style={[
+                styles.segment,
+                minMB === mb && { backgroundColor: colors.card },
+              ]}
+            >
+              <Text
+                style={{
+                  fontSize: 12,
+                  fontWeight: '600',
+                  color: minMB === mb ? colors.accent : colors.subtext,
+                }}
+              >
+                {mb}MB
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      </View>
+
       <View style={styles.controls}>
         <Text style={[styles.label, { color: colors.text }]}>
           {t('compress_delete_original')}
@@ -242,6 +284,10 @@ export default function CompressScreen({ navigation }) {
           data={items}
           keyExtractor={(item) => item.id}
           contentContainerStyle={{ paddingBottom: 160, paddingTop: 8 }}
+          initialNumToRender={10}
+          maxToRenderPerBatch={10}
+          windowSize={7}
+          removeClippedSubviews
           renderItem={({ item }) => {
             const isSel = !!selected[item.id];
             return (

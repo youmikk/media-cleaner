@@ -465,15 +465,27 @@ export default function VideoCleaningScreen({ navigation }) {
         ref={listRef}
         data={visibleGroup}
         keyExtractor={(item) => item.id}
-        renderItem={({ item, index: i }) => (
-          <VideoCard
-            asset={item}
-            active={focused && i === index && !showConfirm}
-            height={height}
-            onProgress={i === index ? setVideoProgress : undefined}
-            onEnded={i === index ? onActiveEnded : undefined}
-          />
-        )}
+        extraData={[index, focused, showConfirm]}
+        renderItem={({ item, index: i }) => {
+          // Android decoders are scarce and player init is expensive:
+          // only the CURRENT video ±1 gets a real player. Everything else
+          // (and the whole feed when the tab is blurred) is a black
+          // placeholder — leaving the tab RELEASES every player, so the
+          // photos tab stays smooth.
+          const near = focused && Math.abs(i - index) <= 1;
+          if (!near) {
+            return <View style={{ height, backgroundColor: '#000' }} />;
+          }
+          return (
+            <VideoCard
+              asset={item}
+              active={i === index && !showConfirm}
+              height={height}
+              onProgress={i === index ? setVideoProgress : undefined}
+              onEnded={i === index ? onActiveEnded : undefined}
+            />
+          );
+        }}
         pagingEnabled
         showsVerticalScrollIndicator={false}
         onViewableItemsChanged={onViewableItemsChanged}
@@ -481,8 +493,10 @@ export default function VideoCleaningScreen({ navigation }) {
         getItemLayout={(_, i) => ({ length: height, offset: height * i, index: i })}
         onScroll={onScroll}
         scrollEventThrottle={64}
-        windowSize={5}
-        maxToRenderPerBatch={3}
+        windowSize={3}
+        initialNumToRender={1}
+        maxToRenderPerBatch={2}
+        removeClippedSubviews
       />
 
       {/* Top bar: album filter · group progress (x / group size) · exit */}

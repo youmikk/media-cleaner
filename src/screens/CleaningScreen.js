@@ -44,6 +44,7 @@ import GroupConfirmSheet from '../components/GroupConfirmSheet';
 import { incrementUsage } from '../utils/albumUsage';
 import { batchDelete } from '../utils/deletionManager';
 import * as sessionManager from '../utils/sessionManager';
+import * as reviewedStore from '../utils/reviewedStore';
 import analyzer from '../utils/chunkedAnalyzer';
 import { reverseGeocode } from '../utils/geocode';
 import {
@@ -164,6 +165,9 @@ export default function CleaningScreen({ route, navigation }) {
   // raced the resume path, reshuffled and OVERWROTE the saved order —
   // "re-entering shows a different group".
   const initializedRef = useRef(false);
+  // Persistent "already reviewed" record: photos whose group was confirmed
+  // (kept OR deleted) never re-enter the random pool in later sessions.
+  const reviewedSetRef = useRef(new Set());
 
   // ---- Animation shared values ----
   const tx = useSharedValue(0);
@@ -205,11 +209,14 @@ export default function CleaningScreen({ route, navigation }) {
           if (!aliveRef.current) return;
           fetchedPagesRef.current = true;
           const r = rangeRef.current;
-          const scoped = page.assets.filter(
-            (a) =>
-              !r ||
-              (a.creationTime && a.creationTime >= r.start && a.creationTime < r.end)
-          );
+          const scoped = page.assets
+            .filter(
+              (a) =>
+                !r ||
+                (a.creationTime && a.creationTime >= r.start && a.creationTime < r.end)
+            )
+            // Already-reviewed photos never re-enter the pool.
+            .filter((a) => !reviewedSetRef.current.has(a.id));
           const pageAssets =
             settings.order === 'random' ? shuffle(scoped) : scoped;
           allRef.current = [...allRef.current, ...pageAssets];
@@ -306,15 +313,26 @@ export default function CleaningScreen({ route, navigation }) {
         initializedRef.current = true;
         setLoading(false);
       } else {
-        // Fresh session: try the persisted local index first (Fossify-style)
-        // — fingerprint unchanged means the FULL list loads instantly with
+        // Fresh session: reviewed photos are EXCLUDED from the pool — a
+        // group you confirmed (kept or deleted) never comes back until the
+        // whole album has been reviewed once (then the round resets).
+        reviewedSetRef.current = await reviewedStore.getReviewed(albumId);
+        if (!alive) return;
+        // Try the persisted local index first (Fossify-style) —
+        // fingerprint unchanged means the FULL list loads instantly with
         // zero MediaStore scanning.
         const cachedList = await getCachedAssetList(albumId, 'photo');
         if (!alive) return;
         if (cachedList) {
-          const scoped = cachedList.filter(inRange);
-          const ordered =
-            settings.order === 'random' ? shuffle(scoped) : scoped;
+          const inR = cachedList.filter(inRange);
+          let pool = inR.filter((a) => !reviewedSetRef.current.has(a.id));
+          if (pool.length === 0 && inR.length > 0) {
+            // Round complete: every photo reviewed once — start over.
+            await reviewedStore.clearReviewed(albumId);
+            reviewedSetRef.current = new Set();
+            pool = inR;
+          }
+          const ordered = settings.order === 'random' ? shuffle(pool) : pool;
           allRef.current = ordered;
           cursorRef.current = { after: undefined, hasNext: false };
           orderRef.current = ordered.map((a) => a.id);
@@ -329,6 +347,19 @@ export default function CleaningScreen({ route, navigation }) {
           initializedRef.current = true; // segmented loading may start now
           await ensureLoaded(groupSize * 3);
           if (!alive) return;
+          if (
+            allRef.current.length === 0 &&
+            !cursorRef.current.hasNext &&
+            reviewedSetRef.current.size > 0
+          ) {
+            // Round complete (everything filtered as reviewed) — reset
+            // and reload from scratch.
+            await reviewedStore.clearReviewed(albumId);
+            reviewedSetRef.current = new Set();
+            cursorRef.current = { after: undefined, hasNext: true };
+            await ensureLoaded(groupSize * 3);
+            if (!alive) return;
+          }
           setLoading(false);
           if (!range && !cursorRef.current.hasNext) fullAlbumList = allRef.current;
         }
@@ -733,6 +764,13 @@ export default function CleaningScreen({ route, navigation }) {
   const clearGroupMarks = () => clearMarks(markedAssets.map((a) => a.id));
 
   const nextGroup = async () => {
+    // Confirming a group (kept OR deleted) marks every photo in it as
+    // REVIEWED — they won't re-enter the pool in later sessions.
+    if (!assetIds && group.length > 0) {
+      const ids = group.map((a) => a.id);
+      ids.forEach((id) => reviewedSetRef.current.add(id));
+      reviewedStore.addReviewed(albumId, ids); // fire & forget
+    }
     setShowConfirm(false);
     setPi(0);
     tx.value = 0;

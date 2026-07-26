@@ -63,7 +63,8 @@
         {
           "color": "#0A84FF"
         }
-      ]
+      ],
+      "react-native-bottom-tabs"
     ]
   }
 }
