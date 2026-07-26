@@ -16,6 +16,7 @@ import TimePicker from '../components/TimePicker';
 import AnalysisProgress from '../components/AnalysisProgress';
 import analyzer from '../utils/chunkedAnalyzer';
 import * as sessionManager from '../utils/sessionManager';
+import * as reviewedStore from '../utils/reviewedStore';
 import {
   getAlbums,
   getAssetsPage,
@@ -82,11 +83,11 @@ export default function AlbumSelectScreen({ navigation }) {
           }
           const order = (await sessionManager.getOrder()) || [];
           const gs = pending.groupSize || 5;
-          const gi = pending.groupIndex || 0;
-          // Whole group, then the SAME within-group ordering the cleaning
-          // screen uses (newest first) — the cards show exactly the
-          // group's first three photos.
-          const ids = order.slice(gi * gs, (gi + 1) * gs);
+          // SAME rule as resume: confirmed (reviewed) ids are dropped, the
+          // interrupted group is the first gs unreviewed ids — the cards
+          // show exactly what re-entering will show.
+          const reviewed = await reviewedStore.getReviewed(pending.albumId);
+          const ids = order.filter((id) => !reviewed.has(id)).slice(0, gs);
           if (ids.length === 0) {
             if (alive) setSessionPreview(null);
             return;

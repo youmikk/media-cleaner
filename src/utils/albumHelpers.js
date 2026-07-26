@@ -86,10 +86,24 @@ export async function getAssetsByIds(ids) {
  * Best-effort file size for an asset, in bytes.
  */
 export async function getAssetSize(asset) {
+  const id = asset && asset.id ? asset.id : asset;
+  // MediaStore size first (native module): under Android scoped storage,
+  // stat-ing another app's media file often reports 0/not-found.
+  try {
+    // eslint-disable-next-line global-require
+    const PhotoMove = require('../../modules/photo-move');
+    if (PhotoMove.isAvailable()) {
+      const sizes = await PhotoMove.getSizes([String(id)]);
+      const s = sizes[String(id).split('/')[0]];
+      if (s > 0) return s;
+    }
+  } catch (e) {
+    // fall through to file stats
+  }
   try {
     const info = asset.localUri
       ? asset
-      : await MediaLibrary.getAssetInfoAsync(asset.id ? asset.id : asset);
+      : await MediaLibrary.getAssetInfoAsync(id);
     const uri = info.localUri || info.uri;
     if (!uri) return 0;
     const stat = await FileSystem.getInfoAsync(uri, { size: true });
@@ -137,13 +151,31 @@ export async function getAssetSizes(assets) {
  */
 export async function getAlbumSnapshot(albumId, mediaType, precomputedAssets) {
   const assets = precomputedAssets || (await getAssets(albumId, mediaType));
-  // Small sample, parallel batches — keeps cleaning-screen entry snappy.
+  // Small sample — ONE MediaStore query via the native module when
+  // available, parallel per-file stats otherwise.
   const sample = assets.slice(0, SNAPSHOT_SAMPLE);
   let sampleBytes = 0;
-  for (let i = 0; i < sample.length; i += SNAPSHOT_CONCURRENCY) {
-    const batch = sample.slice(i, i + SNAPSHOT_CONCURRENCY);
-    const sizes = await Promise.all(batch.map((a) => getAssetSize(a)));
-    for (const s of sizes) sampleBytes += s;
+  let batched = false;
+  try {
+    // eslint-disable-next-line global-require
+    const PhotoMove = require('../../modules/photo-move');
+    if (PhotoMove.isAvailable() && sample.length > 0) {
+      const sizes = await PhotoMove.getSizes(sample.map((a) => String(a.id)));
+      for (const a of sample) {
+        sampleBytes += sizes[String(a.id).split('/')[0]] || 0;
+      }
+      batched = sampleBytes > 0;
+    }
+  } catch (e) {
+    batched = false;
+  }
+  if (!batched) {
+    sampleBytes = 0;
+    for (let i = 0; i < sample.length; i += SNAPSHOT_CONCURRENCY) {
+      const batch = sample.slice(i, i + SNAPSHOT_CONCURRENCY);
+      const sizes = await Promise.all(batch.map((a) => getAssetSize(a)));
+      for (const s of sizes) sampleBytes += s;
+    }
   }
   const bytes =
     sample.length > 0

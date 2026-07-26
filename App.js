@@ -142,7 +142,7 @@ function AppInner() {
   const checkPendingSession = async () => {
     if (resumeChecked.current) return;
     resumeChecked.current = true;
-    const session = await sessionManager.getPendingSession();
+    const session = await sessionManager.getPendingSession('video');
     if (!session) return;
     // Paused PHOTO sessions are normal now (exit = pause): the home cards
     // show the current group and resume silently — no launch prompt.
@@ -151,7 +151,7 @@ function AppInner() {
       {
         text: t('discard'),
         style: 'destructive',
-        onPress: () => sessionManager.discardSession(),
+        onPress: () => sessionManager.discardSession('video'),
       },
       {
         text: t('resume'),

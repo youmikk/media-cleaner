@@ -30,6 +30,7 @@ import GroupConfirmSheet from '../components/GroupConfirmSheet';
 import { incrementUsage } from '../utils/albumUsage';
 import * as MediaLibrary from 'expo-media-library';
 import { getVideoThumbnail } from '../utils/thumbCache';
+import { log, logSync } from '../utils/logger';
 
 // expo-sharing (system share sheet for FILES) — guarded so the app still
 // runs before `npx expo install expo-sharing` has been executed.
@@ -130,6 +131,9 @@ export default function VideoCleaningScreen({ navigation }) {
     markStackRef.current = [];
     finishedRef.current = false;
     (async () => {
+      // CRASH-BISECT MARKERS: each step is written to DISK before running,
+      // so a native crash's last log line identifies the killing step.
+      await logSync('video', 'step1:load-list');
       // Local index first: unchanged album = instant open, no scanning.
       let assets = await getCachedAssetList(albumId, 'video');
       if (!assets) {
@@ -137,13 +141,17 @@ export default function VideoCleaningScreen({ navigation }) {
         saveCachedAssetList(albumId, 'video', assets);
       }
       if (!alive) return;
+      await logSync('video', `step2:list-ok n=${assets.length}`);
       setTotalCount(assets.length);
       setRemaining(assets);
       setMarkedIds(new Set());
+      await logSync('video', 'step3:render-feed'); // players mount after this
       setLoading(false);
 
+      await logSync('video', 'step4:snapshot'); // native getSizes inside
       const before = await getAlbumSnapshot(albumId, 'video', assets);
-      const pending = await sessionManager.getPendingSession();
+      await logSync('video', 'step5:snapshot-ok');
+      const pending = await sessionManager.getPendingSession('video');
       if (pending && pending.albumId === albumId && pending.type === 'video') {
         sessionRef.current = pending;
       } else {
@@ -180,7 +188,7 @@ export default function VideoCleaningScreen({ navigation }) {
 
   useEffect(() => {
     if (sessionRef.current) {
-      sessionManager.saveProgress({ groupIndex: processedGroups });
+      sessionManager.saveProgress({ groupIndex: processedGroups }, 'video');
     }
   }, [processedGroups]);
 

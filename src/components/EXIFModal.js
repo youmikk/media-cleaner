@@ -15,6 +15,7 @@ import { formatBytes, formatDate, getAssetSize } from '../utils/albumHelpers';
 import { reverseGeocode } from '../utils/geocode';
 import { parseExif } from '../utils/exifParser';
 import * as PhotoMove from '../../modules/photo-move';
+import { log, logError } from '../utils/logger';
 
 /**
  * Modal with full, LOCALIZED EXIF / metadata details for an asset.
@@ -165,11 +166,12 @@ export default function EXIFModal({ visible, asset, onClose }) {
           if (fields.iso) out.push([t('exif_iso'), fields.iso]);
           if (fields.focal) out.push([t('exif_focal'), fields.focal]);
         } catch (e) {
-          // TEMP: surface the failure instead of silently losing the rows
+          logError('exif.camera', e);
           out.push(['Debug', `camera:ERR ${String(e && e.message ? e.message : e).slice(0, 60)}`]);
         }
       } catch (e) {
         // basic info failed — fall through with whatever we collected
+        logError('exif.basic', e);
         out.push(['Debug', `basic:ERR ${String(e && e.message ? e.message : e).slice(0, 60)}`]);
       }
       if (alive) setRows([...out]);

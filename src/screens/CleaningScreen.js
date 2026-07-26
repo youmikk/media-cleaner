@@ -47,6 +47,7 @@ import { batchDelete } from '../utils/deletionManager';
 import * as sessionManager from '../utils/sessionManager';
 import * as reviewedStore from '../utils/reviewedStore';
 import * as PhotoMove from '../../modules/photo-move';
+import { log } from '../utils/logger';
 import analyzer from '../utils/chunkedAnalyzer';
 import { reverseGeocode } from '../utils/geocode';
 import {
@@ -262,6 +263,10 @@ export default function CleaningScreen({ route, navigation }) {
     aliveRef.current = true;
     (async () => {
       const pending = await sessionManager.getPendingSession();
+      log(
+        'clean.load',
+        `resume=${resume} pending=${pending ? pending.type + '/' + pending.albumId + '/g' + (pending.groupIndex || 0) : 'none'} album=${albumId}`
+      );
       const resuming =
         resume &&
         pending &&
@@ -306,18 +311,34 @@ export default function CleaningScreen({ route, navigation }) {
           fullAlbumList = all;
           saveCachedAssetList(albumId, 'photo', all); // refresh local index
         }
+        // CONFIRMED groups (recorded in reviewedStore) are dropped from the
+        // order entirely — deletions in earlier groups then can't shift the
+        // remaining group boundaries. The group you left mid-way is always
+        // the FIRST group after resume, photo-for-photo identical.
         const savedOrder = (await sessionManager.getOrder()) || [];
+        const reviewed = await reviewedStore.getReviewed(albumId);
+        reviewedSetRef.current = reviewed;
         const byId = Object.fromEntries(all.map((a) => [a.id, a]));
-        const ordered = savedOrder.map((id) => byId[id]).filter(Boolean);
-        const rest = all.filter((a) => !savedOrder.includes(a.id));
+        const ordered = savedOrder
+          .filter((id) => !reviewed.has(id))
+          .map((id) => byId[id])
+          .filter(Boolean);
+        const inOrder = new Set(savedOrder);
+        const rest = all.filter(
+          (a) => !inOrder.has(a.id) && !reviewed.has(a.id)
+        );
         const finalList = [...ordered, ...rest];
+        log(
+          'clean.resume',
+          `order=${savedOrder.length} reviewed=${reviewed.size} kept=${ordered.length} rest=${rest.length}`
+        );
         allRef.current = finalList;
         cursorRef.current = { after: undefined, hasNext: false };
         orderRef.current = finalList.map((a) => a.id);
         if (!alive) return;
         setGroups(makeGroups(finalList, groupSize));
-        setGi(Math.min(pending.groupIndex || 0, Math.max(0, Math.ceil(finalList.length / groupSize) - 1)));
-        setPi(pending.photoIndex || 0);
+        setGi(0); // the interrupted group is always first now
+        setPi(Math.min(pending.photoIndex || 0, Math.max(0, groupSize - 1)));
         const savedMarks = new Set(pending.markedIds || []);
         setMarkedIds(savedMarks);
         markStackRef.current = [...savedMarks];

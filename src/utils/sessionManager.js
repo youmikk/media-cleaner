@@ -2,7 +2,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getAlbumSnapshot } from './albumHelpers';
 import * as statsManager from './statsManager';
 
-const SESSION_KEY = '@mediacleaner/active_session';
+// Sessions are stored PER TYPE — a video session must never overwrite a
+// paused photo session (that wiped the saved random order and caused
+// "re-entering shows a different group").
+const SESSION_KEY = (type) => `@mediacleaner/active_session_${type}`;
 const ORDER_KEY = '@mediacleaner/session_order';
 
 /**
@@ -32,14 +35,16 @@ export async function startSession({
     markedIds: [],
     createdAt: new Date().getTime(),
   };
-  await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(session));
-  await AsyncStorage.removeItem(ORDER_KEY);
+  await AsyncStorage.setItem(SESSION_KEY(type), JSON.stringify(session));
+  // The saved random ORDER belongs to photo sessions only — starting a
+  // VIDEO session must not touch it.
+  if (type === 'photo') await AsyncStorage.removeItem(ORDER_KEY);
   return session;
 }
 
-export async function getPendingSession() {
+export async function getPendingSession(type = 'photo') {
   try {
-    const raw = await AsyncStorage.getItem(SESSION_KEY);
+    const raw = await AsyncStorage.getItem(SESSION_KEY(type));
     return raw ? JSON.parse(raw) : null;
   } catch (e) {
     return null;
@@ -67,18 +72,18 @@ export async function getOrder() {
   }
 }
 
-export async function saveProgress(patch) {
-  const session = await getPendingSession();
+export async function saveProgress(patch, type = 'photo') {
+  const session = await getPendingSession(type);
   if (!session) return;
   await AsyncStorage.setItem(
-    SESSION_KEY,
+    SESSION_KEY(type),
     JSON.stringify({ ...session, ...patch })
   );
 }
 
-export async function discardSession() {
-  await AsyncStorage.removeItem(SESSION_KEY);
-  await AsyncStorage.removeItem(ORDER_KEY);
+export async function discardSession(type = 'photo') {
+  await AsyncStorage.removeItem(SESSION_KEY(type));
+  if (type === 'photo') await AsyncStorage.removeItem(ORDER_KEY);
 }
 
 /**
@@ -105,6 +110,6 @@ export async function finishSession(session) {
   } catch (e) {
     // stats are best-effort
   }
-  await discardSession();
+  await discardSession(session.type === 'video' ? 'video' : 'photo');
   return saved;
 }

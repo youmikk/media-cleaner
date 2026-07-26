@@ -27,7 +27,7 @@ function scheduleFlush() {
   flushTimer = setTimeout(() => {
     flushTimer = null;
     flushNow().catch(() => {});
-  }, 4000);
+  }, 1500);
 }
 
 export function log(tag, msg) {
@@ -46,6 +46,18 @@ export function logError(tag, e) {
   const message = e && e.message ? e.message : String(e);
   const stack = e && e.stack ? `\n${String(e.stack).slice(0, 1200)}` : '';
   log(tag, `ERROR ${message}${stack}`);
+}
+
+/**
+ * Log AND write to disk before returning. Place these BEFORE dangerous
+ * native calls: a native crash kills the process instantly, but the marker
+ * is already on disk — the next exported log's last line pinpoints the
+ * killing step.
+ */
+export async function logSync(tag, msg) {
+  log(tag, msg);
+  dirty = true;
+  await flushNow();
 }
 
 export async function flushNow() {
@@ -92,7 +104,7 @@ export function installLogger(appVersion) {
     }
     log(
       'app',
-      `==== SESSION START ${Platform.OS} v${appVersion || '?'} ====`
+      `==== SESSION START ${Platform.OS} ${Platform.Version} v${appVersion || '?'} ====`
     );
   })();
 
