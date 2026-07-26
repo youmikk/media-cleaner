@@ -1,5 +1,5 @@
-import React, { useEffect } from 'react';
-import { View, Pressable, Text, StyleSheet } from 'react-native';
+import React, { useEffect, useRef } from 'react';
+import { View, Pressable, Text, StyleSheet, PanResponder } from 'react-native';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -51,6 +51,57 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
     transform: [{ translateX: pillX.value }],
   }));
 
+  // iOS 26 tab-bar slide interaction: drag a finger ACROSS the capsule —
+  // the pill follows live, and releasing switches to the hovered tab.
+  const barStateRef = useRef({});
+  barStateRef.current = { index: state.index, routes: state.routes, navigation };
+  const dragIndexRef = useRef(null);
+  const slidePan = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) =>
+        Math.abs(g.dx) > 10 && Math.abs(g.dx) > Math.abs(g.dy),
+      onPanResponderMove: (e) => {
+        const { routes } = barStateRef.current;
+        const x = e.nativeEvent.locationX - 10; // row's horizontal padding
+        const idx = Math.min(
+          routes.length - 1,
+          Math.max(0, Math.floor(x / TAB_W))
+        );
+        if (dragIndexRef.current !== idx) {
+          dragIndexRef.current = idx;
+          pillX.value = withSpring(idx * TAB_W, {
+            damping: 28,
+            stiffness: 320,
+            overshootClamping: true,
+          });
+        }
+      },
+      onPanResponderRelease: () => {
+        const { index, routes, navigation: nav } = barStateRef.current;
+        const idx = dragIndexRef.current;
+        dragIndexRef.current = null;
+        if (idx !== null && idx !== index && routes[idx]) {
+          nav.navigate(routes[idx].name);
+        } else {
+          pillX.value = withSpring(index * TAB_W, {
+            damping: 28,
+            stiffness: 260,
+            overshootClamping: true,
+          });
+        }
+      },
+      onPanResponderTerminate: () => {
+        const { index } = barStateRef.current;
+        dragIndexRef.current = null;
+        pillX.value = withSpring(index * TAB_W, {
+          damping: 28,
+          stiffness: 260,
+          overshootClamping: true,
+        });
+      },
+    })
+  ).current;
+
   const focusedRoute = state.routes[state.index];
   const nestedState = focusedRoute.state;
   const nestedName =
@@ -71,8 +122,11 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
       pointerEvents="box-none"
       style={[styles.wrap, { bottom: Math.max(insets.bottom, 12) }]}
     >
-      <GlassSurface style={[styles.capsule, { borderColor: colors.border }]}>
-        <View style={styles.row}>
+      <GlassSurface
+        style={[styles.capsule, { borderColor: colors.border }]}
+        interactive // iOS 26: press / long-press glass response
+      >
+        <View style={styles.row} {...slidePan.panHandlers}>
           {/* Sliding selection pill (under the icons) */}
           <Animated.View
             pointerEvents="none"

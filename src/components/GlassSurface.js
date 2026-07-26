@@ -36,6 +36,7 @@ export default function GlassSurface({
   overlayColor,
   glassEffectStyle = 'regular',
   tintColor,
+  interactive = false, // iOS 26: press/long-press glass response
 }) {
   const { colors } = useSettings();
 
@@ -45,7 +46,7 @@ export default function GlassSurface({
         style={style}
         glassEffectStyle={glassEffectStyle}
         tintColor={tintColor}
-        isInteractive={false}
+        isInteractive={interactive}
       >
         {children}
       </GlassView>

@@ -71,6 +71,16 @@ function chunk(list, size) {
   return out;
 }
 
+/** WITHIN a group the order is always FIXED (newest first) — random mode
+ *  only randomizes which photos land in a group, not their order. */
+function sortGroup(g) {
+  return [...g].sort((a, b) => (b.creationTime || 0) - (a.creationTime || 0));
+}
+
+function makeGroups(list, size) {
+  return chunk(list, size).map(sortGroup);
+}
+
 function shuffle(list) {
   const a = [...list];
   for (let i = a.length - 1; i > 0; i--) {
@@ -205,7 +215,7 @@ export default function CleaningScreen({ route, navigation }) {
           allRef.current = [...allRef.current, ...pageAssets];
           cursorRef.current = { after: page.endCursor, hasNext: page.hasNext };
           orderRef.current = allRef.current.map((a) => a.id);
-          setGroups(chunk(allRef.current, groupSize));
+          setGroups(makeGroups(allRef.current, groupSize));
         }
         sessionManager.saveOrder(orderRef.current);
         // Whole album loaded (unscoped) — persist it as the local index so
@@ -257,7 +267,7 @@ export default function CleaningScreen({ route, navigation }) {
         allRef.current = ordered;
         cursorRef.current = { after: undefined, hasNext: false };
         orderRef.current = ordered.map((a) => a.id);
-        setGroups(chunk(ordered, groupSize));
+        setGroups(makeGroups(ordered, groupSize));
         initializedRef.current = true;
         setLoading(false);
       } else if (resuming) {
@@ -285,7 +295,7 @@ export default function CleaningScreen({ route, navigation }) {
         cursorRef.current = { after: undefined, hasNext: false };
         orderRef.current = finalList.map((a) => a.id);
         if (!alive) return;
-        setGroups(chunk(finalList, groupSize));
+        setGroups(makeGroups(finalList, groupSize));
         setGi(Math.min(pending.groupIndex || 0, Math.max(0, Math.ceil(finalList.length / groupSize) - 1)));
         setPi(pending.photoIndex || 0);
         const savedMarks = new Set(pending.markedIds || []);
@@ -308,7 +318,7 @@ export default function CleaningScreen({ route, navigation }) {
           allRef.current = ordered;
           cursorRef.current = { after: undefined, hasNext: false };
           orderRef.current = ordered.map((a) => a.id);
-          setGroups(chunk(ordered, groupSize));
+          setGroups(makeGroups(ordered, groupSize));
           initializedRef.current = true;
           setLoading(false);
           if (!range) fullAlbumList = cachedList;
@@ -375,14 +385,32 @@ export default function CleaningScreen({ route, navigation }) {
 
   // ---- Derived state ----
   const group = groups[gi] || [];
+  // Assets selected in the Similar modal can live OUTSIDE the current
+  // group — keep their full objects so the confirm sheet can show and
+  // delete them together with the group's marks.
+  const extraAssetsRef = useRef({}); // id -> asset
+  const deletedIdsRef = useRef(new Set()); // already deleted this session
   const visible = useMemo(
-    () => group.filter((a) => !markedIds.has(a.id)),
+    () =>
+      group.filter(
+        (a) => !markedIds.has(a.id) && !deletedIdsRef.current.has(a.id)
+      ),
     [group, markedIds]
   );
-  const markedInGroup = useMemo(
-    () => group.filter((a) => markedIds.has(a.id)),
-    [group, markedIds]
-  );
+  // EVERYTHING marked for deletion (this group + similar picks elsewhere).
+  const markedAssets = useMemo(() => {
+    const inGroup = group.filter((a) => markedIds.has(a.id));
+    const seen = new Set(inGroup.map((a) => a.id));
+    const others = [];
+    for (const id of markedIds) {
+      if (seen.has(id) || deletedIdsRef.current.has(id)) continue;
+      const a =
+        extraAssetsRef.current[id] ||
+        allRef.current.find((x) => x.id === id);
+      if (a) others.push(a);
+    }
+    return [...inGroup, ...others];
+  }, [group, markedIds]);
   const current = visible[Math.min(pi, Math.max(0, visible.length - 1))] || null;
 
   // Freeze the background photo while the confirm sheet is open.
@@ -690,17 +718,19 @@ export default function CleaningScreen({ route, navigation }) {
     setMarkedIds((s) => new Set(s).add(id));
   };
 
-  const clearGroupMarks = () => {
-    const groupIdSet = new Set(group.map((a) => a.id));
+  /** Clear a set of marks (group marks + similar picks alike). */
+  const clearMarks = (ids) => {
+    const drop = new Set(ids);
     setMarkedIds((s) => {
       const next = new Set(s);
-      group.forEach((a) => next.delete(a.id));
+      drop.forEach((id) => next.delete(id));
       return next;
     });
-    markStackRef.current = markStackRef.current.filter(
-      (id) => !groupIdSet.has(id)
-    );
+    markStackRef.current = markStackRef.current.filter((id) => !drop.has(id));
+    drop.forEach((id) => delete extraAssetsRef.current[id]);
   };
+
+  const clearGroupMarks = () => clearMarks(markedAssets.map((a) => a.id));
 
   const nextGroup = async () => {
     setShowConfirm(false);
@@ -728,12 +758,12 @@ export default function CleaningScreen({ route, navigation }) {
     finishAll();
   };
 
-  // Fresh closure every render: open the sheet only if this group has marks
-  // (markStackRef is updated synchronously, so a just-marked last photo is
-  // seen immediately). No marks → straight to the next group, no sheet.
+  // Fresh closure every render: open the sheet if ANYTHING is marked —
+  // group marks or similar-modal picks (markStackRef updates synchronously,
+  // so a just-marked last photo is seen immediately). Nothing marked →
+  // straight to the next group, no sheet.
   endOfGroupRef.current = () => {
-    const stack = new Set(markStackRef.current);
-    if (group.some((a) => stack.has(a.id))) setShowConfirm(true);
+    if (markStackRef.current.length > 0) setShowConfirm(true);
     else nextGroup();
   };
 
@@ -747,17 +777,19 @@ export default function CleaningScreen({ route, navigation }) {
     if (deletingRef.current) return;
     deletingRef.current = true;
     try {
-      const targets = group.filter((a) => markedIds.has(a.id));
+      // Group marks AND similar-modal picks — deleted together, ONE dialog.
+      const targets = markedAssets;
       if (targets.length > 0) {
         try {
-          // SINGLE system deletion dialog for the whole group.
           const { count, bytes } = await batchDelete(targets, {
             useRecycleBin: recycleBinActive,
           });
           cleanedRef.current.count += count;
           cleanedRef.current.bytes += bytes;
           recordCleaned('photo', count, bytes);
-          clearGroupMarks();
+          // Remember deletions so later groups don't show ghosts.
+          targets.forEach((a) => deletedIdsRef.current.add(a.id));
+          clearMarks(targets.map((a) => a.id));
         } catch (e) {
           // user cancelled the system dialog — keep marks, stay in the sheet
           return;
@@ -990,7 +1022,12 @@ export default function CleaningScreen({ route, navigation }) {
         onClose={() => setShowSimilar(false)}
         onDeleteSelected={(assets) => {
           setShowSimilar(false);
-          assets.forEach((a) => mark(a));
+          // Keep full objects — cluster photos may be outside this group;
+          // they'll appear in (and be deleted by) the group confirm sheet.
+          assets.forEach((a) => {
+            extraAssetsRef.current[a.id] = a;
+            mark(a);
+          });
           afterRemovalAdvance(
             visible.filter((v) => !assets.some((a) => a.id === v.id)).length
           );
@@ -1006,7 +1043,7 @@ export default function CleaningScreen({ route, navigation }) {
 
       <GroupConfirmSheet
         visible={showConfirm}
-        assets={markedInGroup}
+        assets={markedAssets}
         onUnmark={unmark}
         onRemark={remark}
         onClose={closeConfirmOnly}
@@ -1030,7 +1067,8 @@ const styles = StyleSheet.create({
   topSub: { fontSize: 12, marginTop: 2 },
   exitBtn: { borderRadius: 18, padding: 8 },
   photoArea: { flex: 1, marginBottom: 8 },
-  indicatorWrap: { paddingVertical: 8, marginBottom: 120 },
+  // Sits ABOVE the album-chip row (chips: bottom+80, ~36 tall) — no overlap.
+  indicatorWrap: { paddingVertical: 8, marginBottom: 158 },
   chipsWrap: { position: 'absolute', left: 0, right: 0 },
   similarPill: {
     position: 'absolute',

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   Modal,
   View,
@@ -6,46 +6,23 @@ import {
   Pressable,
   StyleSheet,
 } from 'react-native';
-import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withTiming,
-  Easing,
-} from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
 import GlassSurface from './GlassSurface';
-
-const APPEAR = { duration: 180, easing: Easing.out(Easing.cubic) };
 
 /**
  * Settings row that opens an iOS 26-style MENU:
  * - Liquid Glass surface (real glass on iOS 26, frosted blur elsewhere)
  * - centered popup with 26pt corners and hairline separators
  * - leading checkmark on the selected row (SF menu layout)
- * - quick scale-in appearance + selection haptic
+ * NOTE: real Liquid Glass views must NOT be transform-animated (borders
+ * drop and the surface "flies") — the Modal's own fade is the appearance.
  */
 export default function OptionPicker({ label, value, options, onChange }) {
   const { colors } = useSettings();
   const [open, setOpen] = useState(false);
   const current = options.find((o) => o.value === value);
-
-  // iOS menu appearance: fade + subtle zoom from 92%.
-  const scale = useSharedValue(0.92);
-  const fade = useSharedValue(0);
-  useEffect(() => {
-    if (open) {
-      scale.value = 0.92;
-      fade.value = 0;
-      scale.value = withTiming(1, APPEAR);
-      fade.value = withTiming(1, { duration: 140 });
-    }
-  }, [open, scale, fade]);
-  const menuStyle = useAnimatedStyle(() => ({
-    opacity: fade.value,
-    transform: [{ scale: scale.value }],
-  }));
 
   const select = (opt) => {
     setOpen(false);
@@ -81,12 +58,10 @@ export default function OptionPicker({ label, value, options, onChange }) {
         onRequestClose={() => setOpen(false)}
       >
         <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>
-          <Animated.View style={[styles.menuWrap, menuStyle]}>
+          {/* Border + clipping live on a PLAIN view — stable around glass */}
+          <View style={[styles.menuWrap, { borderColor: colors.border }]}>
             <Pressable onPress={() => {}}>
-              <GlassSurface
-                style={[styles.menu, { borderColor: colors.border }]}
-                intensity={70}
-              >
+              <GlassSurface style={styles.menu} intensity={70}>
                 {/* Small gray header, like an SF menu section title */}
                 <View
                   style={[styles.headerRow, { borderBottomColor: colors.border }]}
@@ -141,7 +116,7 @@ export default function OptionPicker({ label, value, options, onChange }) {
                 })}
               </GlassSurface>
             </Pressable>
-          </Animated.View>
+          </View>
         </Pressable>
       </Modal>
     </>
@@ -167,12 +142,14 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: 40,
   },
-  menuWrap: { width: 270, maxWidth: '100%' },
-  menu: {
+  menuWrap: {
+    width: 270,
+    maxWidth: '100%',
     borderRadius: 26, // iOS 26 menu corner radius
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
   },
+  menu: {},
   headerRow: {
     paddingHorizontal: 16,
     paddingTop: 12,
