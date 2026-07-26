@@ -5,7 +5,7 @@ on:
 
 jobs:
   build-ios:
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -14,15 +14,18 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
-      - name: Select Xcode 15 (SDK 51 compatible)
+      - name: Select newest Xcode (need >= 16.1; 26.x enables Liquid Glass)
         run: |
-          ls /Applications | grep Xcode || true
-          if [ -d "/Applications/Xcode_15.4.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_15.4.app
-          elif [ -d "/Applications/Xcode_15.3.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_15.3.app
+          echo "Available Xcodes:"
+          ls -d /Applications/Xcode*.app || true
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then
+            XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          fi
+          if [ -n "$XCODE" ]; then
+            sudo xcode-select -s "$XCODE"
           fi
           xcodebuild -version
 
