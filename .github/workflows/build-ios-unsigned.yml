@@ -1,0 +1,64 @@
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Select Xcode 15 (SDK 51 compatible)
+        run: |
+          ls /Applications | grep Xcode || true
+          if [ -d "/Applications/Xcode_15.4.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_15.4.app
+          elif [ -d "/Applications/Xcode_15.3.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_15.3.app
+          fi
+          xcodebuild -version
+
+      - name: Install JS dependencies
+        run: npm install
+
+      - name: Expo prebuild (generate ios project)
+        run: npx expo prebuild -p ios --no-install
+
+      - name: Install CocoaPods
+        run: |
+          cd ios
+          pod install
+
+      - name: Build (unsigned)
+        run: |
+          cd ios
+          xcodebuild \
+            -workspace MediaCleaner.xcworkspace \
+            -scheme MediaCleaner \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R ios/build/Build/Products/Release-iphoneos/MediaCleaner.app Payload/
+          zip -qry MediaCleaner-unsigned.ipa Payload
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MediaCleaner-unsigned-ipa
+          path: MediaCleaner-unsigned.ipa
+          retention-days: 14
