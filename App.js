@@ -1,5 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, Pressable, StyleSheet, Alert, Linking } from 'react-native';
+import {
+  View,
+  Text,
+  Pressable,
+  StyleSheet,
+  Alert,
+  Linking,
+  Platform,
+} from 'react-native';
+import * as PhotoMove from './modules/photo-move';
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -24,6 +33,7 @@ import { autoCheckDaily } from './src/utils/updateChecker';
 
 const navigationRef = createNavigationContainerRef();
 const TUTORIAL_KEY = '@mediacleaner/tutorial_seen';
+const ALLFILES_PROMPTED_KEY = '@mediacleaner/allfiles_prompted';
 
 /**
  * Blocks the app behind the media-library permission with a retry prompt.
@@ -86,6 +96,28 @@ function AppInner() {
         if (!seen) setShowTutorial(true);
       })
       .catch(() => {});
+    // FIRST LAUNCH (Android, native build): ask for "All files access" up
+    // front — categorizing moves photos in place and needs it. Delayed so
+    // it never fights the media-permission dialog; asked only once.
+    if (Platform.OS === 'android' && PhotoMove.isAvailable()) {
+      setTimeout(async () => {
+        try {
+          if (PhotoMove.hasAllFilesPermission()) return;
+          const prompted = await AsyncStorage.getItem(ALLFILES_PROMPTED_KEY);
+          if (prompted) return;
+          await AsyncStorage.setItem(ALLFILES_PROMPTED_KEY, '1');
+          Alert.alert(t('native_move_title'), t('native_move_message'), [
+            { text: t('cancel'), style: 'cancel' },
+            {
+              text: t('native_move_enable'),
+              onPress: () => PhotoMove.requestAllFilesPermission(),
+            },
+          ]);
+        } catch (e) {
+          // best effort
+        }
+      }, 3000);
+    }
     // Silent once-a-day new-APK check against GitHub Releases.
     autoCheckDaily((info) => {
       Alert.alert(t('update_available', { version: info.version }), '', [

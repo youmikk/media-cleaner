@@ -13,6 +13,7 @@ import {
   ActivityIndicator,
   useWindowDimensions,
   Platform,
+  Alert,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
@@ -45,6 +46,7 @@ import { incrementUsage } from '../utils/albumUsage';
 import { batchDelete } from '../utils/deletionManager';
 import * as sessionManager from '../utils/sessionManager';
 import * as reviewedStore from '../utils/reviewedStore';
+import * as PhotoMove from '../../modules/photo-move';
 import analyzer from '../utils/chunkedAnalyzer';
 import { reverseGeocode } from '../utils/geocode';
 import {
@@ -428,9 +430,11 @@ export default function CleaningScreen({ route, navigation }) {
       ),
     [group, markedIds]
   );
-  // EVERYTHING marked for deletion (this group + similar picks elsewhere).
+  // EVERYTHING queued for deletion: swipe marks + similar picks.
   const markedAssets = useMemo(() => {
-    const inGroup = group.filter((a) => markedIds.has(a.id));
+    const inGroup = group.filter(
+      (a) => markedIds.has(a.id) && !deletedIdsRef.current.has(a.id)
+    );
     const seen = new Set(inGroup.map((a) => a.id));
     const others = [];
     for (const id of markedIds) {
@@ -654,14 +658,53 @@ export default function CleaningScreen({ route, navigation }) {
   // to the next photo automatically; tapping the ✓ chip again UNDOES it.
   const overrideHistoryRef = useRef({}); // assetId -> {fromAlbumId, toAlbumId}
 
+  // Categorizing on Android REQUIRES the in-place move permission — no
+  // permission means the tap prompts for it instead of moving anything.
+  const maybeOfferNativeMove = () => {
+    Alert.alert(t('native_move_title'), t('native_move_message'), [
+      { text: t('cancel'), style: 'cancel' },
+      {
+        text: t('native_move_enable'),
+        onPress: () => PhotoMove.requestAllFilesPermission(),
+      },
+    ]);
+  };
+
   const moveCurrentTo = async (album) => {
     if (!current) return;
     const id = current.id;
+    const asset = current;
     const fromAlbumId = albumOverrides[id] || current.albumId || null;
     try {
-      await moveAssetsToAlbum([current], album);
+      if (
+        Platform.OS === 'android' &&
+        PhotoMove.isAvailable() &&
+        PhotoMove.hasAllFilesPermission()
+      ) {
+        // photoo-style TRUE in-place move: bytes, EXIF and mtime all
+        // untouched — no copy, no pending deletion.
+        const [res] = await PhotoMove.moveToAlbum([id], album.title);
+        if (!res || !res.ok) throw new Error(res && res.error);
+        asset.uri = 'file://' + res.newPath; // keep displaying the photo
+        overrideHistoryRef.current[id] = {
+          fromAlbumId,
+          toAlbumId: album.id,
+          native: true,
+          fromAlbumTitle:
+            (realAlbums.find((a) => a.id === fromAlbumId) || {}).title || null,
+        };
+      } else if (Platform.OS === 'android' && PhotoMove.isAvailable()) {
+        // Native module present but "All files access" not granted yet:
+        // prompt once and do nothing — categorizing only ever uses the
+        // info-preserving in-place move.
+        maybeOfferNativeMove();
+        return;
+      } else {
+        // iOS (collections — file untouched) or Expo Go dev fallback.
+        await moveAssetsToAlbum([current], album);
+        overrideHistoryRef.current[id] = { fromAlbumId, toAlbumId: album.id };
+      }
       incrementUsage(album.id);
-      overrideHistoryRef.current[id] = { fromAlbumId, toAlbumId: album.id };
       setAlbumOverrides((m) => ({ ...m, [id]: album.id }));
       showToast(t('moved_to', { album: album.title }));
       callNext(); // categorized -> straight to the next photo
@@ -679,17 +722,46 @@ export default function CleaningScreen({ route, navigation }) {
   const createAlbumWithCurrent = async (name) => {
     if (!current || !name) return;
     const id = current.id;
+    const asset = current;
     const fromAlbumId = albumOverrides[id] || current.albumId || null;
     try {
-      const album = await MediaLibrary.createAlbumAsync(name, current, false);
-      if (album) {
-        incrementUsage(album.id);
-        overrideHistoryRef.current[id] = { fromAlbumId, toAlbumId: album.id };
-        setAlbumOverrides((m) => ({ ...m, [id]: album.id }));
+      if (
+        Platform.OS === 'android' &&
+        PhotoMove.isAvailable() &&
+        PhotoMove.hasAllFilesPermission()
+      ) {
+        // In-place move — the target folder is created automatically.
+        const [res] = await PhotoMove.moveToAlbum([id], name);
+        if (!res || !res.ok) throw new Error(res && res.error);
+        asset.uri = 'file://' + res.newPath;
+        const list = await MediaLibrary.getAlbumsAsync();
+        setRealAlbums(list.filter((a) => a.assetCount > 0));
+        const album = list.find((a) => a.title === name);
+        if (album) incrementUsage(album.id);
+        overrideHistoryRef.current[id] = {
+          fromAlbumId,
+          toAlbumId: album ? album.id : name,
+          native: true,
+          fromAlbumTitle:
+            (realAlbums.find((a) => a.id === fromAlbumId) || {}).title || null,
+        };
+        setAlbumOverrides((m) => ({ ...m, [id]: album ? album.id : name }));
+      } else if (Platform.OS === 'android' && PhotoMove.isAvailable()) {
+        // Needs "All files access" — prompt once, do nothing this time.
+        maybeOfferNativeMove();
+        return;
+      } else {
+        // iOS (collections) or Expo Go dev fallback.
+        const album = await MediaLibrary.createAlbumAsync(name, current, false);
+        if (album) {
+          incrementUsage(album.id);
+          overrideHistoryRef.current[id] = { fromAlbumId, toAlbumId: album.id };
+          setAlbumOverrides((m) => ({ ...m, [id]: album.id }));
+        }
+        const list = await MediaLibrary.getAlbumsAsync();
+        setRealAlbums(list.filter((a) => a.assetCount > 0));
       }
       showToast(t('moved_to', { album: name }));
-      const list = await MediaLibrary.getAlbumsAsync();
-      setRealAlbums(list.filter((a) => a.assetCount > 0));
       callNext(); // categorized -> straight to the next photo
     } catch (e) {
       // creation failed — photo stays
@@ -704,14 +776,22 @@ export default function CleaningScreen({ route, navigation }) {
     const rec = overrideHistoryRef.current[id];
     if (!rec) return;
     try {
-      const backAlbum = rec.fromAlbumId
-        ? realAlbums.find((a) => a.id === rec.fromAlbumId)
-        : null;
-      const toAlbum = realAlbums.find((a) => a.id === rec.toAlbumId);
-      if (backAlbum) {
-        await moveAssetsToAlbum([displayAsset], backAlbum);
-      } else if (toAlbum) {
-        await removeAssetsFromAlbum([displayAsset], toAlbum);
+      if (rec.native) {
+        // In-place move: move the file straight back to its old folder.
+        const backTitle = rec.fromAlbumTitle || 'Camera';
+        const [res] = await PhotoMove.moveToAlbum([id], backTitle);
+        if (res && res.ok) displayAsset.uri = 'file://' + res.newPath;
+      } else {
+        // iOS: pull the photo back out of the collection.
+        const backAlbum = rec.fromAlbumId
+          ? realAlbums.find((a) => a.id === rec.fromAlbumId)
+          : null;
+        const toAlbum = realAlbums.find((a) => a.id === rec.toAlbumId);
+        if (backAlbum) {
+          await moveAssetsToAlbum([displayAsset], backAlbum);
+        } else if (toAlbum) {
+          await removeAssetsFromAlbum([displayAsset], toAlbum);
+        }
       }
       delete overrideHistoryRef.current[id];
       setAlbumOverrides((m) => {

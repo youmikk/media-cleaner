@@ -21,7 +21,7 @@ import OptionPicker from '../components/OptionPicker';
 import { LANGUAGES } from '../i18n';
 import {
   getAssets,
-  getAssetSize,
+  getAssetSizes,
   getAssetsByIds,
   findAlbumByTitle,
   formatBytes,
@@ -152,15 +152,16 @@ export default function ProfileScreen({ navigation }) {
           getAssets(ALL_ALBUM_ID, 'video'),
         ]);
         const pool = [...photos.slice(0, SIZE_SCAN_CAP), ...videos.slice(0, SIZE_SCAN_CAP)];
-        const sized = [];
-        let n = 0;
-        for (const a of pool) {
-          if (!alive) return;
-          const size = await getAssetSize(a);
-          sized.push({ id: a.id, uri: a.uri, size, mediaType: a.mediaType });
-          // Yield to the UI thread every 20 stats — no long JS stalls.
-          if (++n % 20 === 0) await new Promise((r) => setTimeout(r, 0));
-        }
+        // ONE batched size query (native module) when available — replaces
+        // hundreds of per-file stat calls.
+        const sizeMap = await getAssetSizes(pool);
+        if (!alive) return;
+        const sized = pool.map((a) => ({
+          id: a.id,
+          uri: a.uri,
+          size: sizeMap[a.id] || 0,
+          mediaType: a.mediaType,
+        }));
         const largest = sized.sort((x, y) => y.size - x.size).slice(0, 10);
 
         // 2) Burst groups (timestamp clustering — cheap, no pixel work here).
@@ -191,15 +192,19 @@ export default function ProfileScreen({ navigation }) {
           if (!vBuckets.has(key)) vBuckets.set(key, []);
           vBuckets.get(key).push(v);
         }
+        const dupeCandidates = [];
+        for (const members of vBuckets.values()) {
+          if (members.length >= 2) dupeCandidates.push(...members);
+        }
+        const dupeSizes = await getAssetSizes(dupeCandidates);
+        if (!alive) return;
         for (const members of vBuckets.values()) {
           if (members.length < 2) continue;
           const bySize = new Map();
           for (const v of members) {
-            if (!alive) return;
-            const size = await getAssetSize(v);
+            const size = dupeSizes[v.id] || 0;
             if (!bySize.has(size)) bySize.set(size, []);
             bySize.get(size).push(v.id);
-            if (++n % 20 === 0) await new Promise((r) => setTimeout(r, 0));
           }
           for (const [size, ids] of bySize.entries()) {
             if (size > 0 && ids.length >= 2) videoDupes.push({ ids });

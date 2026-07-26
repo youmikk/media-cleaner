@@ -14,6 +14,7 @@ import { useSettings } from '../context/SettingsContext';
 import { formatBytes, formatDate, getAssetSize } from '../utils/albumHelpers';
 import { reverseGeocode } from '../utils/geocode';
 import { parseExif } from '../utils/exifParser';
+import * as PhotoMove from '../../modules/photo-move';
 
 /**
  * Modal with full, LOCALIZED EXIF / metadata details for an asset.
@@ -110,11 +111,24 @@ export default function EXIFModal({ visible, asset, onClose }) {
         };
 
         // 1) system exif (iOS sometimes returns it EMPTY — treat "extracted
-        //    nothing" the same as missing), 2) parse the file ourselves.
+        //    nothing" the same as missing), 2) native ExifInterface
+        //    (Android, photoo-style — handles JPEG/HEIF/DNG), 3) the pure-JS
+        //    file parser as the last resort.
         let cameraRows = info.exif ? extractCameraRows(info.exif) : [];
         if (cameraRows.length === 0 && asset.mediaType !== 'video') {
-          const parsed = await parseExif(info.localUri || info.uri || asset.uri);
-          if (parsed) cameraRows = extractCameraRows(parsed);
+          const fileUri = info.localUri || info.uri || asset.uri;
+          if (PhotoMove.isAvailable()) {
+            try {
+              const nativeExif = await PhotoMove.readExif(fileUri);
+              if (nativeExif) cameraRows = extractCameraRows(nativeExif);
+            } catch (e) {
+              // fall through to the JS parser
+            }
+          }
+          if (cameraRows.length === 0) {
+            const parsed = await parseExif(fileUri);
+            if (parsed) cameraRows = extractCameraRows(parsed);
+          }
         }
         out.push(...cameraRows);
       } catch (e) {

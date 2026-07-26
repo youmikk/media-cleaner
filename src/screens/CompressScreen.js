@@ -20,7 +20,7 @@ import { useApp } from '../context/AppContext';
 import { batchDelete } from '../utils/deletionManager';
 import {
   getAssets,
-  getAssetSize,
+  getAssetSizes,
   formatBytes,
   ALL_ALBUM_ID,
 } from '../utils/albumHelpers';
@@ -73,13 +73,12 @@ export default function CompressScreen({ navigation }) {
           getAssets(ALL_ALBUM_ID, 'video'),
         ]);
         const pool = [...photos.slice(0, SCAN_CAP), ...videos.slice(0, SCAN_CAP)];
-        const sized = [];
-        for (const a of pool) {
-          if (!alive) return;
-          const size = await getAssetSize(a);
-          if (size > 0) sized.push({ ...a, size });
-        }
+        // ONE batched size query (native) instead of hundreds of stats.
+        const sizeMap = await getAssetSizes(pool);
         if (!alive) return;
+        const sized = pool
+          .map((a) => ({ ...a, size: sizeMap[a.id] || 0 }))
+          .filter((i) => i.size > 0);
         setAllSized(sized.sort((x, y) => y.size - x.size));
       } catch (e) {
         if (alive) setAllSized([]);

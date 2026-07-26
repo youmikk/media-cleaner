@@ -1,6 +1,7 @@
 import * as ImageManipulator from 'expo-image-manipulator';
 import jpeg from 'jpeg-js';
 import * as base64js from 'base64-js';
+import * as PhotoMove from '../../modules/photo-move';
 
 /**
  * Decode an image at `uri` downscaled to (w x h) into raw RGBA pixels.
@@ -41,8 +42,29 @@ const ANALYZE_SIZE = 64;
  *   blank/pocket-shot detection
  */
 export async function analyzePixels(uri) {
-  const decoded = await decodePixels(uri, ANALYZE_SIZE, ANALYZE_SIZE);
-  const { gray, width, height } = toGrayscale(decoded);
+  let gray;
+  let width = ANALYZE_SIZE;
+  let height = ANALYZE_SIZE;
+  // Native SUBSAMPLED decode (photoo-style) when the module is present:
+  // the image is decoded small from the start instead of full-res-then-
+  // shrink — several times faster, a fraction of the memory.
+  if (PhotoMove.isAvailable()) {
+    try {
+      const b64 = await PhotoMove.decodeGray(uri, ANALYZE_SIZE);
+      const bytes = base64js.toByteArray(b64);
+      gray = new Float32Array(bytes.length);
+      for (let i = 0; i < bytes.length; i++) gray[i] = bytes[i];
+    } catch (e) {
+      gray = null; // fall through to the JS pipeline
+    }
+  }
+  if (!gray) {
+    const decoded = await decodePixels(uri, ANALYZE_SIZE, ANALYZE_SIZE);
+    const g = toGrayscale(decoded);
+    gray = g.gray;
+    width = g.width;
+    height = g.height;
+  }
 
   // --- dHash: 8 rows × 9 columns of block means, compare neighbours ---
   const ROWS = 8;

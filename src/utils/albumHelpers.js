@@ -100,6 +100,37 @@ export async function getAssetSize(asset) {
 }
 
 /**
+ * Batch sizes for many assets: ONE MediaStore query via the native module
+ * (photoo-style) when available, per-file stats otherwise.
+ * Returns {assetId: bytes}.
+ */
+export async function getAssetSizes(assets) {
+  const out = {};
+  // eslint-disable-next-line global-require
+  const PhotoMove = require('../../modules/photo-move');
+  if (PhotoMove.isAvailable()) {
+    try {
+      const sizes = await PhotoMove.getSizes(assets.map((a) => a.id));
+      let missing = 0;
+      for (const a of assets) {
+        const s = sizes[String(a.id).split('/')[0]];
+        if (s > 0) out[a.id] = s;
+        else missing++;
+      }
+      if (missing === 0) return out;
+    } catch (e) {
+      // fall through to per-file stats
+    }
+  }
+  for (const a of assets) {
+    if (out[a.id] > 0) continue;
+    // eslint-disable-next-line no-await-in-loop
+    out[a.id] = await getAssetSize(a);
+  }
+  return out;
+}
+
+/**
  * Compute a storage snapshot {count, bytes} for an album.
  * Sizes are sampled (first SNAPSHOT_SAMPLE assets) and extrapolated for
  * very large albums to keep this fast.
@@ -150,9 +181,11 @@ export async function findAlbumByTitle(title) {
 /**
  * Move assets to a target album (adds to album; may copy on iOS).
  */
-export async function moveAssetsToAlbum(assets, album) {
+export async function moveAssetsToAlbum(assets, album, copy = false) {
   const ids = assets.map((a) => (typeof a === 'string' ? a : a.id));
-  await MediaLibrary.addAssetsToAlbumAsync(ids, album.id, false);
+  // copy=true: file is DUPLICATED into the album — the original keeps every
+  // bit of its metadata untouched (used by Android categorize-then-delete).
+  await MediaLibrary.addAssetsToAlbumAsync(ids, album.id, copy);
 }
 
 /** Undo an add: take the assets back OUT of the album (iOS collections). */

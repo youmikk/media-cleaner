@@ -9,15 +9,30 @@ import {
   chunkSizeFor,
 } from './batteryUtils';
 
-// v2: dHash replaced aHash — bump both stores so stale aHash data is ignored.
-const CACHE_PREFIX = 'analysis_v2_';
+// v3: time-windowed clustering (metrics store stays v2 — hashes unchanged,
+// so the rebuild is pure math over cached hashes, no pixel work).
+const CACHE_PREFIX = 'analysis_v3_';
 const METRICS_KEY = 'analysis_metrics_v2'; // GLOBAL per-asset metric store
-const SIMILAR_THRESHOLD = 10;
+const SIMILAR_THRESHOLD = 8; // photoo uses 7; +1 for our decode variance
+const SIMILAR_TIME_WINDOW_MS = 120 * 1000; // only compare shots ≤2min apart
 const MAX_HASHED = 3000;
 // Each parallel decode holds a FULL-RESOLUTION bitmap natively while it is
 // downscaled — 6 concurrent 48MP photos ≈ >1GB peak and OOM-kills the app
-// on big libraries. Keep the spike bounded.
-const CONCURRENCY = Platform.OS === 'android' ? 3 : 4;
+// on big libraries. Keep the spike bounded. photoo-style adaptive value:
+// half the CPU cores, clamped 1..3 (native core count when available).
+let CONCURRENCY = Platform.OS === 'android' ? 3 : 4;
+try {
+  // eslint-disable-next-line global-require
+  const PhotoMove = require('../../modules/photo-move');
+  if (PhotoMove.isAvailable()) {
+    const cores = PhotoMove.cpuCores();
+    if (cores > 0) {
+      CONCURRENCY = Math.min(3, Math.max(1, Math.floor(cores / 2)));
+    }
+  }
+} catch (e) {
+  // keep the static default
+}
 // Cap the global metric store: Android's AsyncStorage rejects values >2MB,
 // which would silently lose the WHOLE cache. ~6000 entries stays well under.
 const MAX_METRIC_ENTRIES = 6000;
@@ -387,23 +402,48 @@ class ChunkedAnalyzer {
     }
   }
 
+  /**
+   * photoo-style clustering: only photos taken within TIME_WINDOW of each
+   * other are compared (fewer false positives, orders of magnitude fewer
+   * comparisons), and a Live Photo next to its same-moment still frame is
+   * NOT a duplicate.
+   */
   _cluster(assets, store) {
-    const entries = assets.filter((a) => store[a.id] && store[a.id].hash);
+    const isLive = (a) =>
+      Array.isArray(a.mediaSubtypes) &&
+      a.mediaSubtypes.some((s) => String(s).toLowerCase().includes('live'));
+    const entries = assets
+      .filter((a) => store[a.id] && store[a.id].hash)
+      .sort((x, y) => (y.creationTime || 0) - (x.creationTime || 0));
     const used = new Set();
     const clusters = [];
     for (let i = 0; i < entries.length; i++) {
       const a = entries[i];
       if (used.has(a.id)) continue;
       const cluster = [a.id];
+      let lastTime = a.creationTime || 0;
       for (let j = i + 1; j < entries.length; j++) {
         const b = entries[j];
         if (used.has(b.id)) continue;
+        const bt = b.creationTime || 0;
+        // Sorted desc: once past the window from the cluster's newest
+        // accepted member, nothing further can match — stop early.
+        if (lastTime - bt > SIMILAR_TIME_WINDOW_MS) break;
+        // A Live Photo and a plain still captured the same instant are
+        // two forms of the SAME shot — not duplicates to clean.
+        if (
+          isLive(a) !== isLive(b) &&
+          Math.abs((a.creationTime || 0) - bt) <= 2000
+        ) {
+          continue;
+        }
         if (
           hammingDistance(store[a.id].hash, store[b.id].hash) <=
           SIMILAR_THRESHOLD
         ) {
           cluster.push(b.id);
           used.add(b.id);
+          lastTime = bt; // window chains from the newest accepted member
         }
       }
       if (cluster.length > 1) {
