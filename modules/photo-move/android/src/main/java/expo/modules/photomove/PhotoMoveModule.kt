@@ -44,22 +44,25 @@ class PhotoMoveModule : Module() {
 
     Function("requestAllFilesPermission") {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-        val context = appContext.reactContext ?: return@Function
-        try {
-          val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-          intent.data = Uri.parse("package:" + context.packageName)
-          intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-          context.startActivity(intent)
-        } catch (e: Exception) {
+        val context = appContext.reactContext
+        if (context != null) {
           try {
-            val fallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-            fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(fallback)
-          } catch (e2: Exception) {
-            // settings screen unavailable — nothing else to do
+            val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+            intent.data = Uri.parse("package:" + context.packageName)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+          } catch (e: Exception) {
+            try {
+              val fallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+              fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+              context.startActivity(fallback)
+            } catch (e2: Exception) {
+              // settings screen unavailable — nothing else to do
+            }
           }
         }
       }
+      null
     }
 
     AsyncFunction("moveToAlbum") { assetIds: List<String>, albumName: String ->
