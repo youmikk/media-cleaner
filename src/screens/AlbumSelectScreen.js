@@ -241,7 +241,7 @@ export default function AlbumSelectScreen({ navigation }) {
   const cardHeights = [cardW * 1.5, cardW * 1.9, cardW * 1.5];
 
   return (
-    <SafeAreaView style={[styles.screen, { backgroundColor: colors.background }]}>
+    <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
       <Text style={[styles.header, { color: colors.text }]}>
         {t('clean_photos')}
       </Text>

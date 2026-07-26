@@ -41,6 +41,17 @@ import {
   fetchLatestChangelog,
 } from '../utils/updateChecker';
 
+// useUpdates reports a DOWNLOADED-but-not-applied update (the launch-time
+// auto-check downloads silently; only a restart applies it). Guarded so
+// Expo Go keeps working.
+let useUpdatesHook = null;
+try {
+  // eslint-disable-next-line global-require
+  useUpdatesHook = require('expo-updates').useUpdates;
+} catch (e) {
+  useUpdatesHook = null;
+}
+
 const GITHUB_URL = 'https://github.com/youmikk/media-cleaner';
 const SUPPORT_EMAIL = 'support@example.com';
 const VERSION = `v${APP_VERSION}`;
@@ -202,12 +213,16 @@ export default function ProfileScreen({ navigation }) {
   }, []);
 
   // ---- Update check: OTA first (silent hot update), then GitHub APK ----
+  const updatesState = useUpdatesHook ? useUpdatesHook() : {};
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const onCheckUpdate = async () => {
     if (checkingUpdate) return;
     setCheckingUpdate(true);
     try {
-      const ota = await checkOTA();
+      let ota = await checkOTA();
+      // Launch auto-check already downloaded it? Then the server says
+      // "nothing newer" but a restart IS pending — treat as ready.
+      if (ota !== 'applied' && updatesState.isUpdatePending) ota = 'applied';
       if (ota === 'applied') {
         // Show the changelog (from the repo) above the restart choice.
         let body = t('update_ota_ready');
@@ -329,7 +344,7 @@ export default function ProfileScreen({ navigation }) {
   ];
 
   return (
-    <SafeAreaView style={[styles.screen, { backgroundColor: colors.background }]}>
+    <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
       <ScrollView
         contentContainerStyle={{ paddingBottom: 120 }}
         showsVerticalScrollIndicator={false}

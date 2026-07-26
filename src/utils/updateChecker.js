@@ -49,6 +49,15 @@ export async function checkOTA() {
       await Updates.fetchUpdateAsync();
       return 'applied';
     }
+    // The launch-time auto-check may have ALREADY downloaded the newest
+    // update — the server then reports "nothing newer", but a restart is
+    // still needed. Surface that as ready-to-apply instead of "latest".
+    try {
+      const fetched = await Updates.fetchUpdateAsync();
+      if (fetched && fetched.isNew) return 'applied';
+    } catch (e) {
+      // nothing pending
+    }
     return 'none';
   } catch (e) {
     return 'unavailable';

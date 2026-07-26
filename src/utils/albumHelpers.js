@@ -155,6 +155,12 @@ export async function moveAssetsToAlbum(assets, album) {
   await MediaLibrary.addAssetsToAlbumAsync(ids, album.id, false);
 }
 
+/** Undo an add: take the assets back OUT of the album (iOS collections). */
+export async function removeAssetsFromAlbum(assets, album) {
+  const ids = assets.map((a) => (typeof a === 'string' ? a : a.id));
+  await MediaLibrary.removeAssetsFromAlbumAsync(ids, album.id);
+}
+
 // ---- Album summary cache: the home screen renders INSTANTLY from this and
 // skips scanning entirely while the album's fingerprint is unchanged. ----
 

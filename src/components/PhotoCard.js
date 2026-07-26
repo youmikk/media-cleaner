@@ -141,12 +141,15 @@ export default function PhotoCard({ asset, isFavorite, marked, sizeLabel }) {
       ) : (
         <Image
           source={{ uri: asset.uri }}
-          style={[styles.image, { aspectRatio }]}
+          // FIXED full-size container + contain: the layout never resizes
+          // between aspect ratios, so switching photos can't flash. No
+          // recyclingKey — the previous photo stays visible until the next
+          // one has decoded, then cross-fades.
+          style={styles.fillImage}
           contentFit="contain"
           cachePolicy="memory-disk"
-          recyclingKey={asset.id}
           priority="high" // the on-screen photo beats any queued prefetch
-          transition={60}
+          transition={120}
         />
       )}
       {isVideo && (
@@ -196,6 +199,7 @@ const styles = StyleSheet.create({
     maxHeight: '100%',
     borderRadius: 14,
   },
+  fillImage: { width: '100%', height: '100%' },
   liveBadge: {
     position: 'absolute',
     top: 14,

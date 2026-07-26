@@ -178,7 +178,7 @@ export default function BurstCleanScreen({ route, navigation }) {
 
   if (sections === null || working) {
     return (
-      <SafeAreaView style={[styles.center, { backgroundColor: colors.background }]}>
+      <SafeAreaView edges={['top', 'left', 'right']} style={[styles.center, { backgroundColor: colors.background }]}>
         <ActivityIndicator size="large" color={colors.accent} />
         {!working && progress.total > 0 && (
           <Text style={[styles.progress, { color: colors.subtext }]}>
@@ -190,7 +190,7 @@ export default function BurstCleanScreen({ route, navigation }) {
   }
 
   return (
-    <SafeAreaView style={[styles.screen, { backgroundColor: colors.background }]}>
+    <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
       <View style={styles.topBar}>
         <Pressable onPress={() => navigation.goBack()} hitSlop={10}>
           <Ionicons name="chevron-back" size={26} color={colors.text} />

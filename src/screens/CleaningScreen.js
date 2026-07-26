@@ -53,6 +53,7 @@ import {
   getCachedAssetList,
   saveCachedAssetList,
   moveAssetsToAlbum,
+  removeAssetsFromAlbum,
   formatBytes,
   ALL_ALBUM_ID,
 } from '../utils/albumHelpers';
@@ -148,6 +149,11 @@ export default function CleaningScreen({ route, navigation }) {
   const rangeRef = useRef(null);
   const fetchedPagesRef = useRef(false); // did THIS session hit MediaStore?
   const listSavedRef = useRef(false);
+  // Blocks the look-ahead loader until the initial load (fresh, cached OR
+  // RESUME) has fully set up state. Without this, the mount-time effect
+  // raced the resume path, reshuffled and OVERWROTE the saved order —
+  // "re-entering shows a different group".
+  const initializedRef = useRef(false);
 
   // ---- Animation shared values ----
   const tx = useSharedValue(0);
@@ -177,7 +183,7 @@ export default function CleaningScreen({ route, navigation }) {
   /** Pull pages until at least `minCount` scoped photos are loaded. */
   const ensureLoaded = useCallback(
     async (minCount) => {
-      if (loadingMoreRef.current) return;
+      if (!initializedRef.current || loadingMoreRef.current) return;
       loadingMoreRef.current = true;
       try {
         while (
@@ -252,6 +258,7 @@ export default function CleaningScreen({ route, navigation }) {
         cursorRef.current = { after: undefined, hasNext: false };
         orderRef.current = ordered.map((a) => a.id);
         setGroups(chunk(ordered, groupSize));
+        initializedRef.current = true;
         setLoading(false);
       } else if (resuming) {
         // Resume needs the full list to rebuild the EXACT saved order.
@@ -284,6 +291,9 @@ export default function CleaningScreen({ route, navigation }) {
         const savedMarks = new Set(pending.markedIds || []);
         setMarkedIds(savedMarks);
         markStackRef.current = [...savedMarks];
+        // Re-save the restored order: guards against any earlier writer.
+        sessionManager.saveOrder(orderRef.current);
+        initializedRef.current = true;
         setLoading(false);
       } else {
         // Fresh session: try the persisted local index first (Fossify-style)
@@ -299,12 +309,14 @@ export default function CleaningScreen({ route, navigation }) {
           cursorRef.current = { after: undefined, hasNext: false };
           orderRef.current = ordered.map((a) => a.id);
           setGroups(chunk(ordered, groupSize));
+          initializedRef.current = true;
           setLoading(false);
           if (!range) fullAlbumList = cachedList;
         } else {
           // No/stale index: SEGMENTED loading — just ~3 groups ahead. The
           // rest loads as the user confirms groups; the finished list is
           // then saved as the new index.
+          initializedRef.current = true; // segmented loading may start now
           await ensureLoaded(groupSize * 3);
           if (!alive) return;
           setLoading(false);
@@ -579,15 +591,21 @@ export default function CleaningScreen({ route, navigation }) {
 
   // ---- Move flow (shared by swipe-down sheet AND the quick chips) ----
   // Categorizing ≠ deleting: the photo STAYS in the cleaning flow; only the
-  // ✓ chip switches to the new album.
+  // ✓ chip switches to the new album. After categorizing, the flow ADVANCES
+  // to the next photo automatically; tapping the ✓ chip again UNDOES it.
+  const overrideHistoryRef = useRef({}); // assetId -> {fromAlbumId, toAlbumId}
+
   const moveCurrentTo = async (album) => {
     if (!current) return;
     const id = current.id;
+    const fromAlbumId = albumOverrides[id] || current.albumId || null;
     try {
       await moveAssetsToAlbum([current], album);
       incrementUsage(album.id);
+      overrideHistoryRef.current[id] = { fromAlbumId, toAlbumId: album.id };
       setAlbumOverrides((m) => ({ ...m, [id]: album.id }));
       showToast(t('moved_to', { album: album.title }));
+      callNext(); // categorized -> straight to the next photo
     } catch (e) {
       // move failed — nothing changes
     }
@@ -602,17 +620,50 @@ export default function CleaningScreen({ route, navigation }) {
   const createAlbumWithCurrent = async (name) => {
     if (!current || !name) return;
     const id = current.id;
+    const fromAlbumId = albumOverrides[id] || current.albumId || null;
     try {
       const album = await MediaLibrary.createAlbumAsync(name, current, false);
       if (album) {
         incrementUsage(album.id);
+        overrideHistoryRef.current[id] = { fromAlbumId, toAlbumId: album.id };
         setAlbumOverrides((m) => ({ ...m, [id]: album.id }));
       }
       showToast(t('moved_to', { album: name }));
       const list = await MediaLibrary.getAlbumsAsync();
       setRealAlbums(list.filter((a) => a.assetCount > 0));
+      callNext(); // categorized -> straight to the next photo
     } catch (e) {
       // creation failed — photo stays
+    }
+  };
+
+  // Second tap on the ✓ chip: undo THIS SESSION's categorization — move the
+  // photo back to its previous album (or just remove it on iOS).
+  const cancelCurrentCategory = async () => {
+    if (!displayAsset) return;
+    const id = displayAsset.id;
+    const rec = overrideHistoryRef.current[id];
+    if (!rec) return;
+    try {
+      const backAlbum = rec.fromAlbumId
+        ? realAlbums.find((a) => a.id === rec.fromAlbumId)
+        : null;
+      const toAlbum = realAlbums.find((a) => a.id === rec.toAlbumId);
+      if (backAlbum) {
+        await moveAssetsToAlbum([displayAsset], backAlbum);
+      } else if (toAlbum) {
+        await removeAssetsFromAlbum([displayAsset], toAlbum);
+      }
+      delete overrideHistoryRef.current[id];
+      setAlbumOverrides((m) => {
+        const next = { ...m };
+        if (rec.fromAlbumId) next[id] = rec.fromAlbumId;
+        else delete next[id];
+        return next;
+      });
+      showToast(t('category_cancelled'));
+    } catch (e) {
+      // undo failed — keep the current category
     }
   };
 
@@ -770,7 +821,7 @@ export default function CleaningScreen({ route, navigation }) {
   // ---- Render ----
   if (loading) {
     return (
-      <SafeAreaView style={[styles.center, { backgroundColor: colors.background }]}>
+      <SafeAreaView edges={['top', 'left', 'right']} style={[styles.center, { backgroundColor: colors.background }]}>
         <ActivityIndicator size="large" color={colors.accent} />
       </SafeAreaView>
     );
@@ -778,7 +829,7 @@ export default function CleaningScreen({ route, navigation }) {
 
   if (completed) {
     return (
-      <SafeAreaView style={[styles.center, { backgroundColor: colors.background }]}>
+      <SafeAreaView edges={['top', 'left', 'right']} style={[styles.center, { backgroundColor: colors.background }]}>
         <Ionicons name="sparkles" size={54} color={colors.accent} />
         <Text style={[styles.doneTitle, { color: colors.text }]}>
           {t('completion_title')}
@@ -802,7 +853,7 @@ export default function CleaningScreen({ route, navigation }) {
 
   if (groups.length === 0) {
     return (
-      <SafeAreaView style={[styles.center, { backgroundColor: colors.background }]}>
+      <SafeAreaView edges={['top', 'left', 'right']} style={[styles.center, { backgroundColor: colors.background }]}>
         <Ionicons name="images-outline" size={48} color={colors.subtext} />
         <Text style={[styles.doneSub, { color: colors.subtext, marginTop: 12 }]}>
           {t('no_photos')}
@@ -823,7 +874,7 @@ export default function CleaningScreen({ route, navigation }) {
       : null;
 
   return (
-    <SafeAreaView style={[styles.screen, { backgroundColor: colors.background }]}>
+    <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
       <GlowingTrashBar progress={deleteProgress} />
 
       <View style={styles.topBar}>
@@ -901,6 +952,11 @@ export default function CleaningScreen({ route, navigation }) {
           currentAlbumId={currentAssetAlbumId}
           onSelect={moveCurrentTo}
           onCreate={createAlbumWithCurrent}
+          onCurrentPress={
+            displayAsset && overrideHistoryRef.current[displayAsset.id]
+              ? cancelCurrentCategory
+              : null
+          }
         />
       </View>
 

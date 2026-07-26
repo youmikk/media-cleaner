@@ -23,6 +23,7 @@ export default function AlbumChips({
   currentAlbumId,
   onSelect,
   onCreate,
+  onCurrentPress = null, // tap the ✓ chip to UNDO this session's move
   dark = false,
 }) {
   const { colors, t } = useSettings();
@@ -72,14 +73,24 @@ export default function AlbumChips({
         </Pressable>
 
         {/* 2) current item's album (follows the item) — solid accent so the
-            ✓ chip stands out from the scrim chips on any background */}
+            ✓ chip stands out from the scrim chips on any background.
+            When this session moved the item here, tapping the chip UNDOES
+            the move (small × shows the affordance). */}
         {currentAlbum && (
-          <View style={[styles.chip, { backgroundColor: colors.accent }]}>
-            <Ionicons name="checkmark" size={14} color="#fff" />
+          <Pressable
+            disabled={!onCurrentPress}
+            onPress={onCurrentPress || undefined}
+            style={[styles.chip, { backgroundColor: colors.accent }]}
+          >
+            <Ionicons
+              name={onCurrentPress ? 'close-circle' : 'checkmark'}
+              size={14}
+              color="#fff"
+            />
             <Text style={[styles.chipText, { color: '#fff' }]} numberOfLines={1}>
               {currentAlbum.title}
             </Text>
-          </View>
+          </Pressable>
         )}
 
         {/* 3) the rest, by usage frequency */}
