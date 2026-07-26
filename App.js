@@ -108,6 +108,9 @@ function AppInner() {
     resumeChecked.current = true;
     const session = await sessionManager.getPendingSession();
     if (!session) return;
+    // Paused PHOTO sessions are normal now (exit = pause): the home cards
+    // show the current group and resume silently — no launch prompt.
+    if (session.type === 'photo') return;
     Alert.alert(t('resume_title'), t('resume_message'), [
       {
         text: t('discard'),

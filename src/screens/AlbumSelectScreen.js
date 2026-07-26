@@ -135,7 +135,7 @@ export default function AlbumSelectScreen({ navigation }) {
         let after;
         let hasNext = true;
         let first = true;
-        while (hasNext && all.length < 5000) {
+        while (hasNext && all.length < 20000) {
           const page = await getAssetsPage(albumId, 'photo', after);
           if (!alive) return;
           all = [...all, ...page.assets];
@@ -151,7 +151,8 @@ export default function AlbumSelectScreen({ navigation }) {
           }
         }
         const fresh = {
-          count: all.length,
+          // REAL total from the media store — never the scan cap.
+          count: fp.assetCount || all.length,
           thumbs: all.slice(0, 3).map((a) => ({ id: a.id, uri: a.uri })),
           years: buildYearHistogram(all),
         };
@@ -203,16 +204,31 @@ export default function AlbumSelectScreen({ navigation }) {
     return m ? m[1] : 0;
   }, [summary, timeFilter]);
 
-  const startCleaning = () => {
+  const startCleaning = async () => {
     if (filteredCount === 0) return;
+    // Check the pending session DIRECTLY (not via sessionPreview state) so
+    // a quick tap right after opening the app still resumes the same group
+    // with the same random order.
+    let resume = false;
+    if (!timeFilter) {
+      try {
+        const pending = await sessionManager.getPendingSession();
+        resume = !!(
+          pending &&
+          pending.type === 'photo' &&
+          pending.albumId === albumId
+        );
+      } catch (e) {
+        resume = false;
+      }
+    }
     navigation.navigate('Cleaning', {
       albumId,
       albumTitle: timeFilter ? `${albumTitle} · ${timeFilter.label}` : albumTitle,
       timeRange: timeFilter
         ? { start: timeFilter.start, end: timeFilter.end }
         : null,
-      // Cards show the current group -> tapping CONTINUES that session.
-      resume: !!sessionPreview && !timeFilter,
+      resume,
     });
   };
 

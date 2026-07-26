@@ -5,7 +5,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export const ALL_ALBUM_ID = 'all';
 const PAGE_SIZE = 200;
-const MAX_ASSETS = 5000; // safety cap for very large libraries
+const MAX_ASSETS = 20000; // safety cap for very large libraries
 const SNAPSHOT_SAMPLE = 60; // size sampling cap for storage snapshots
 const SNAPSHOT_CONCURRENCY = 6;
 
@@ -231,17 +231,15 @@ export async function saveCachedAssetList(albumId, mediaType, assets) {
   try {
     if (!assets || assets.length === 0) return;
     const fp = await getAlbumFingerprint(albumId, mediaType);
-    let slim = [...assets]
+    // Only COMPLETE lists may be cached: a partial index would silently
+    // hide the rest of the album from the cleaning flow.
+    if (fp.assetCount && assets.length < fp.assetCount) return;
+    const slim = [...assets]
       .sort((a, b) => (b.creationTime || 0) - (a.creationTime || 0))
-      .slice(0, MAX_ASSETS)
       .map(slimAsset);
-    let payload = JSON.stringify({ fingerprint: fp, assets: slim });
-    // Android AsyncStorage rejects values >2MB — trim to fit if needed.
-    if (payload.length > 1800000) {
-      const keep = Math.floor((slim.length * 1800000) / payload.length);
-      slim = slim.slice(0, keep);
-      payload = JSON.stringify({ fingerprint: fp, assets: slim });
-    }
+    const payload = JSON.stringify({ fingerprint: fp, assets: slim });
+    // Android AsyncStorage rejects values >2MB — skip (don't truncate).
+    if (payload.length > 1800000) return;
     await AsyncStorage.setItem(`${LIST_PREFIX}${mediaType}_${albumId}`, payload);
   } catch (e) {
     // best effort

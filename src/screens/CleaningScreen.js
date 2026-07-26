@@ -183,7 +183,7 @@ export default function CleaningScreen({ route, navigation }) {
         while (
           aliveRef.current &&
           cursorRef.current.hasNext &&
-          allRef.current.length < Math.min(minCount, 5000)
+          allRef.current.length < Math.min(minCount, 20000)
         ) {
           const page = await getAssetsPage(albumId, 'photo', cursorRef.current.after);
           if (!aliveRef.current) return;
@@ -258,7 +258,7 @@ export default function CleaningScreen({ route, navigation }) {
         let all = [];
         let after;
         let hasNext = true;
-        while (hasNext && all.length < 5000) {
+        while (hasNext && all.length < 20000) {
           const page = await getAssetsPage(albumId, 'photo', after);
           if (!alive) return;
           all = [...all, ...page.assets.filter(inRange)];
@@ -732,17 +732,22 @@ export default function CleaningScreen({ route, navigation }) {
     ty.value = 0;
   };
 
-  // ---- Completion / exit (marks are discarded — deletion only happens
-  // through the explicit batched group action) ----
-  /** Session bookkeeping runs in the BACKGROUND — never blocks the UI. */
-  const settleSession = () => {
+  // ---- Completion / exit ----
+  /**
+   * Session bookkeeping runs in the BACKGROUND — never blocks the UI.
+   * `finish=false` (plain exit) PAUSES the session: the shuffled order,
+   * group, position and marks all persist, so the home cards keep showing
+   * THIS group and re-entering resumes it exactly. Only completing the
+   * whole album (finish=true) ends the session.
+   */
+  const settleSession = (finish) => {
     const viewed = viewedRef.current.size;
     const session = sessionRef.current;
     sessionRef.current = null;
     (async () => {
       try {
         if (viewed > 0) await recordViewed('photo', viewed);
-        if (session) await sessionManager.finishSession(session);
+        if (session && finish) await sessionManager.finishSession(session);
       } catch (e) {
         // stats are best-effort
       }
@@ -752,14 +757,14 @@ export default function CleaningScreen({ route, navigation }) {
   const finishAll = () => {
     setFinalStats({ ...cleanedRef.current });
     setCompleted(true);
-    settleSession();
+    settleSession(true);
   };
 
-  // X = leave, no confirmation needed: deletion only ever happens through
-  // the explicit per-group batch action, so exiting loses nothing.
+  // X = pause & leave. Nothing is deleted and nothing is lost: the same
+  // group (same random order) is waiting on the home screen.
   const exit = () => {
     navigation.goBack(); // leave IMMEDIATELY
-    settleSession();
+    settleSession(false);
   };
 
   // ---- Render ----
