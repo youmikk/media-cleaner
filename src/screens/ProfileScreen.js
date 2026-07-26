@@ -32,10 +32,16 @@ import {
   enableDailyReminder,
   disableDailyReminder,
 } from '../utils/notificationScheduler';
+import {
+  APP_VERSION,
+  checkOTA,
+  reloadWithUpdate,
+  checkGitHubRelease,
+} from '../utils/updateChecker';
 
 const GITHUB_URL = 'https://github.com/youmikk/media-cleaner';
 const SUPPORT_EMAIL = 'support@example.com';
-const VERSION = 'v1.0.0';
+const VERSION = `v${APP_VERSION}`;
 const SUGGESTIONS_KEY = 'analysis_suggestions_v2';
 const SUGGESTIONS_TTL = 24 * 60 * 60 * 1000; // refresh daily
 const NINETY_DAYS = 90 * 24 * 60 * 60 * 1000;
@@ -192,6 +198,39 @@ export default function ProfileScreen({ navigation }) {
       alive = false;
     };
   }, []);
+
+  // ---- Update check: OTA first (silent hot update), then GitHub APK ----
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const onCheckUpdate = async () => {
+    if (checkingUpdate) return;
+    setCheckingUpdate(true);
+    try {
+      const ota = await checkOTA();
+      if (ota === 'applied') {
+        Alert.alert(t('check_update'), t('update_ota_ready'), [
+          { text: t('cancel'), style: 'cancel' },
+          { text: t('update_restart'), onPress: () => reloadWithUpdate() },
+        ]);
+        return;
+      }
+      const info = await checkGitHubRelease();
+      if (info.hasUpdate) {
+        Alert.alert(t('update_available', { version: info.version }), '', [
+          { text: t('cancel'), style: 'cancel' },
+          {
+            text: t('update_download'),
+            onPress: () => Linking.openURL(info.url),
+          },
+        ]);
+      } else {
+        Alert.alert(t('check_update'), t('update_latest'));
+      }
+    } catch (e) {
+      Alert.alert(t('check_update'), t('update_latest'));
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
 
   // ---- Settings handlers ----
   const onToggleReminder = async (value) => {
@@ -411,7 +450,7 @@ export default function ProfileScreen({ navigation }) {
             <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
           </Pressable>
           <Pressable
-            style={[styles.binRow, { backgroundColor: colors.card }]}
+            style={[styles.binRow, { backgroundColor: colors.card, marginBottom: 10 }]}
             onPress={() => navigation.navigate('Compress')}
           >
             <Ionicons name="archive-outline" size={22} color={colors.accent} />
@@ -421,6 +460,21 @@ export default function ProfileScreen({ navigation }) {
               </Text>
               <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
                 {t('compress_desc')}
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
+          </Pressable>
+          <Pressable
+            style={[styles.binRow, { backgroundColor: colors.card }]}
+            onPress={onCheckUpdate}
+          >
+            <Ionicons name="refresh-circle-outline" size={22} color={colors.accent} />
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowLabel, { color: colors.text }]}>
+                {checkingUpdate ? t('update_checking') : t('check_update')}
+              </Text>
+              <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
+                {VERSION}
               </Text>
             </View>
             <Ionicons name="chevron-forward" size={18} color={colors.subtext} />

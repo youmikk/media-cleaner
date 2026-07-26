@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, Pressable, StyleSheet, Alert } from 'react-native';
+import { View, Text, Pressable, StyleSheet, Alert, Linking } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -18,6 +18,7 @@ import TutorialOverlay from './src/components/TutorialOverlay';
 import { ensureMediaPermission } from './src/utils/permissions';
 import * as trashManager from './src/utils/trashManager';
 import * as sessionManager from './src/utils/sessionManager';
+import { autoCheckDaily } from './src/utils/updateChecker';
 
 const navigationRef = createNavigationContainerRef();
 const TUTORIAL_KEY = '@mediacleaner/tutorial_seen';
@@ -73,6 +74,14 @@ function AppInner() {
         if (!seen) setShowTutorial(true);
       })
       .catch(() => {});
+    // Silent once-a-day new-APK check against GitHub Releases.
+    autoCheckDaily((info) => {
+      Alert.alert(t('update_available', { version: info.version }), '', [
+        { text: t('cancel'), style: 'cancel' },
+        { text: t('update_download'), onPress: () => Linking.openURL(info.url) },
+      ]);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const dismissTutorial = () => {
