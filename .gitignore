@@ -1,0 +1,14 @@
+node_modules/
+.expo/
+dist/
+web-build/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+.DS_Store
+npm-debug.*
+yarn-debug.*
+yarn-error.*

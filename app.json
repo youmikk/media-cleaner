@@ -1,0 +1,44 @@
+{
+  "expo": {
+    "name": "MediaCleaner",
+    "slug": "media-cleaner",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": false,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.mediacleaner.app",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "MediaCleaner needs access to your photo library to help you review and clean up photos and videos.",
+        "NSPhotoLibraryAddUsageDescription": "MediaCleaner needs write access to move, restore and delete photos on your behalf."
+      }
+    },
+    "android": {
+      "package": "com.mediacleaner.app",
+      "permissions": [
+        "READ_MEDIA_IMAGES",
+        "READ_MEDIA_VIDEO",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "ACCESS_MEDIA_LOCATION"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow MediaCleaner to access your photos to help you clean them up.",
+          "savePhotosPermission": "Allow MediaCleaner to save and restore photos.",
+          "isAccessMediaLocationEnabled": true
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#0A84FF"
+        }
+      ]
+    ]
+  }
+}
