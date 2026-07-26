@@ -1,12 +1,21 @@
-const BURST_WINDOW_MS = 2000;
+const BURST_WINDOW_MS = 1500; // consecutive shots must be ≤1.5s apart
+const MAX_SPAN_MS = 8000; // a whole burst can span at most 8s
 const MIN_GROUP = 3;
+
+function sameShape(a, b) {
+  // Real bursts share the camera's resolution & orientation.
+  if (!a.width || !b.width) return true;
+  return a.width === b.width && a.height === b.height;
+}
 
 /**
  * Group burst shots. Prefers an explicit burst identifier (iOS EXIF
  * `burstIdentifier`, exposed on asset info when available); falls back to
- * consecutive shots taken within 2 seconds of each other.
+ * conservative timestamp clustering: consecutive shots ≤1.5s apart, same
+ * dimensions, total span ≤8s. (The visual-similarity filter runs later in
+ * BurstCleanScreen with real pixel hashes.)
  *
- * @param {Array} assets MediaLibrary assets (need id, creationTime)
+ * @param {Array} assets MediaLibrary assets (need id, creationTime, width, height)
  * @param {Object} exifById optional map id -> exif (may contain BurstUUID)
  * @returns {Array<{ids: string[], startTime: number}>}
  */
@@ -36,7 +45,7 @@ export function groupBursts(assets, exifById = {}) {
     }
   }
 
-  // 2) Timestamp clustering fallback
+  // 2) Conservative timestamp clustering fallback
   const sorted = [...remaining].sort(
     (x, y) => (x.creationTime || 0) - (y.creationTime || 0)
   );
@@ -51,12 +60,17 @@ export function groupBursts(assets, exifById = {}) {
     current = [];
   };
   for (const a of sorted) {
-    if (
-      current.length === 0 ||
-      (a.creationTime || 0) -
-        (current[current.length - 1].creationTime || 0) <=
-        BURST_WINDOW_MS
-    ) {
+    if (current.length === 0) {
+      current = [a];
+      continue;
+    }
+    const prev = current[current.length - 1];
+    const first = current[0];
+    const closeInTime =
+      (a.creationTime || 0) - (prev.creationTime || 0) <= BURST_WINDOW_MS;
+    const withinSpan =
+      (a.creationTime || 0) - (first.creationTime || 0) <= MAX_SPAN_MS;
+    if (closeInTime && withinSpan && sameShape(prev, a)) {
       current.push(a);
     } else {
       flush();

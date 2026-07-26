@@ -1,4 +1,6 @@
-import * as FileSystem from 'expo-file-system';
+// SDK 54: the modern expo-file-system API changed; we use the stable legacy
+// API which remains available at this import path.
+import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 

@@ -1,9 +1,9 @@
 import React from 'react';
-import { View, Pressable, Text, StyleSheet, Platform } from 'react-native';
-import { BlurView } from 'expo-blur';
+import { View, Pressable, Text, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
+import GlassSurface from './GlassSurface';
 
 const HIDDEN_ROUTES = ['Cleaning', 'VideoCleaning', 'BurstClean', 'RecycleBin'];
 
@@ -14,8 +14,9 @@ const ICONS = {
 };
 
 /**
- * Floating "liquid glass" capsule tab bar. Hides itself while a cleaning
- * screen (which shows its own floating info bar) is focused.
+ * Floating capsule tab bar. On iOS 26 this is REAL Liquid Glass
+ * (expo-glass-effect); elsewhere it falls back to an expo-blur frosted
+ * capsule. Hides itself while a cleaning screen is focused.
  */
 export default function LiquidTabBar({ state, descriptors, navigation }) {
   const { colors, t } = useSettings();
@@ -28,7 +29,10 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
       ? nestedState.routes[nestedState.index ?? nestedState.routes.length - 1]
           ?.name
       : null;
-  if (HIDDEN_ROUTES.includes(nestedName)) return null;
+  // The Videos tab IS a cleaning screen (direct access) — hide the tab bar
+  // there too; its own floating info bar takes over.
+  if (focusedRoute.name === 'VideosTab' || HIDDEN_ROUTES.includes(nestedName))
+    return null;
 
   const labels = {
     PhotosTab: t('tab_photos'),
@@ -41,51 +45,46 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
       pointerEvents="box-none"
       style={[styles.wrap, { bottom: Math.max(insets.bottom, 12) }]}
     >
-      <BlurView
-        intensity={Platform.OS === 'ios' ? 60 : 100}
-        tint={colors.glassTint}
-        style={[styles.capsule, { borderColor: colors.border }]}
-      >
-        <View
-          style={[StyleSheet.absoluteFill, { backgroundColor: colors.glassOverlay }]}
-        />
-        {state.routes.map((route, index) => {
-          const focused = state.index === index;
-          const [outline, filled] = ICONS[route.name] || ICONS.PhotosTab;
-          return (
-            <Pressable
-              key={route.key}
-              onPress={() => {
-                const event = navigation.emit({
-                  type: 'tabPress',
-                  target: route.key,
-                  canPreventDefault: true,
-                });
-                if (!focused && !event.defaultPrevented) {
-                  navigation.navigate(route.name);
-                }
-              }}
-              style={styles.tab}
-              accessibilityRole="button"
-              accessibilityState={focused ? { selected: true } : {}}
-            >
-              <Ionicons
-                name={focused ? filled : outline}
-                size={24}
-                color={focused ? colors.accent : colors.subtext}
-              />
-              <Text
-                style={[
-                  styles.label,
-                  { color: focused ? colors.accent : colors.subtext },
-                ]}
+      <GlassSurface style={[styles.capsule, { borderColor: colors.border }]}>
+        <View style={styles.row}>
+          {state.routes.map((route, index) => {
+            const focused = state.index === index;
+            const [outline, filled] = ICONS[route.name] || ICONS.PhotosTab;
+            return (
+              <Pressable
+                key={route.key}
+                onPress={() => {
+                  const event = navigation.emit({
+                    type: 'tabPress',
+                    target: route.key,
+                    canPreventDefault: true,
+                  });
+                  if (!focused && !event.defaultPrevented) {
+                    navigation.navigate(route.name);
+                  }
+                }}
+                style={styles.tab}
+                accessibilityRole="button"
+                accessibilityState={focused ? { selected: true } : {}}
               >
-                {labels[route.name]}
-              </Text>
-            </Pressable>
-          );
-        })}
-      </BlurView>
+                <Ionicons
+                  name={focused ? filled : outline}
+                  size={24}
+                  color={focused ? colors.accent : colors.subtext}
+                />
+                <Text
+                  style={[
+                    styles.label,
+                    { color: focused ? colors.accent : colors.subtext },
+                  ]}
+                >
+                  {labels[route.name]}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </GlassSurface>
     </View>
   );
 }
@@ -98,10 +97,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   capsule: {
-    flexDirection: 'row',
     borderRadius: 32,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
+  },
+  row: {
+    flexDirection: 'row',
     paddingHorizontal: 10,
     paddingVertical: 8,
   },

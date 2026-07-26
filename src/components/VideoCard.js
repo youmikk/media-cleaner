@@ -1,46 +1,40 @@
-import React, { useRef, useState } from 'react';
-import { View, Pressable, StyleSheet, ActivityIndicator } from 'react-native';
-import { Video, ResizeMode } from 'expo-av';
+import React, { useEffect, useState } from 'react';
+import { View, Pressable, StyleSheet } from 'react-native';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
 
 /**
- * Full-screen video cell for the vertical cleaning feed.
+ * Full-screen video cell for the vertical cleaning feed (expo-video).
  * Auto-plays when `active`, tap toggles pause.
  */
 export default function VideoCard({ asset, active, height }) {
-  const ref = useRef(null);
   const [paused, setPaused] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const player = useVideoPlayer(asset.uri, (p) => {
+    p.loop = true;
+    p.muted = false;
+  });
 
-  const toggle = async () => {
-    if (!ref.current) return;
-    if (paused) {
-      await ref.current.playAsync();
-      setPaused(false);
+  useEffect(() => {
+    if (active && !paused) {
+      player.play();
     } else {
-      await ref.current.pauseAsync();
-      setPaused(true);
+      player.pause();
     }
-  };
+  }, [active, paused, player]);
+
+  // Reset pause state when the cell scrolls out.
+  useEffect(() => {
+    if (!active) setPaused(false);
+  }, [active]);
 
   return (
-    <Pressable style={[styles.cell, { height }]} onPress={toggle}>
-      <Video
-        ref={ref}
-        source={{ uri: asset.uri }}
+    <Pressable style={[styles.cell, { height }]} onPress={() => setPaused((p) => !p)}>
+      <VideoView
+        player={player}
         style={StyleSheet.absoluteFill}
-        resizeMode={ResizeMode.CONTAIN}
-        shouldPlay={active && !paused}
-        isLooping
-        onLoadStart={() => setLoading(true)}
-        onReadyForDisplay={() => setLoading(false)}
-        useNativeControls={false}
+        contentFit="contain"
+        nativeControls={false}
       />
-      {loading && active && (
-        <View style={styles.overlay}>
-          <ActivityIndicator color="#fff" />
-        </View>
-      )}
       {paused && (
         <View style={styles.overlay}>
           <Ionicons name="play" size={56} color="rgba(255,255,255,0.85)" />

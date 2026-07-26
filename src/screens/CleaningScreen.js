@@ -10,34 +10,50 @@ import {
   Text,
   Pressable,
   StyleSheet,
-  PanResponder,
   ActivityIndicator,
   Alert,
+  useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  useDerivedValue,
+  withSpring,
+  withTiming,
+  runOnJS,
+  interpolate,
+} from 'react-native-reanimated';
+import * as Haptics from 'expo-haptics';
+import { Image as ExpoImage } from 'expo-image';
+import * as MediaLibrary from 'expo-media-library';
 import { useSettings } from '../context/SettingsContext';
 import { useApp } from '../context/AppContext';
 import PhotoCard from '../components/PhotoCard';
 import PageIndicator from '../components/PageIndicator';
 import BottomInfoBar from '../components/BottomInfoBar';
+import GlowingTrashBar from '../components/GlowingTrashBar';
 import EXIFModal from '../components/EXIFModal';
 import SimilarModal from '../components/SimilarModal';
 import MoveSheet from '../components/MoveSheet';
 import GroupConfirmSheet from '../components/GroupConfirmSheet';
-import { SoftDeleteManager } from '../utils/deletionManager';
+import { batchDelete } from '../utils/deletionManager';
 import * as sessionManager from '../utils/sessionManager';
 import analyzer from '../utils/chunkedAnalyzer';
+import { reverseGeocode } from '../utils/geocode';
 import {
-  getAssets,
+  getAssetsPage,
   getAssetsByIds,
   getAlbumSnapshot,
   moveAssetsToAlbum,
   formatBytes,
 } from '../utils/albumHelpers';
 
-const SWIPE_X = 60;
-const SWIPE_Y = 80;
+const SWIPE_X = 80;
+const MOVE_THRESHOLD = 120;
+const SPRING = { damping: 18, stiffness: 180 };
 
 function chunk(list, size) {
   const out = [];
@@ -56,31 +72,38 @@ function shuffle(list) {
 
 /**
  * Swipe-based photo cleaning flow.
- * left/right: navigate group · up: soft delete · down: move to album.
+ * - Swiping up MARKS a photo; the actual media-library deletion happens ONCE
+ *   per group ("Delete All Marked") — a single system dialog per batch.
+ * - First page of the album shows immediately; the rest streams in.
+ * - Sessions resume exactly: shuffled order, group, position and marks.
  */
 export default function CleaningScreen({ route, navigation }) {
   const {
     albumId,
     albumTitle,
-    groupSize,
     assetIds = null,
-    resumeGroupIndex = 0,
+    resume = false,
+    sizesById = null,
+    timeRange = null, // {start, end} — year / year-month scope
   } = route.params;
-  const { colors, t, settings, recycleBinActive } = useSettings();
+  const { colors, t, settings, recycleBinActive, language } = useSettings();
   const { recordCleaned, recordViewed, toggleFavorite, isFavorite } = useApp();
+  const { width: SCREEN_W, height: SCREEN_H } = useWindowDimensions();
+  const groupSize = route.params.groupSize || settings.groupSize || 5;
+  const DELETE_THRESHOLD = SCREEN_H * 0.4;
 
   const [loading, setLoading] = useState(true);
   const [groups, setGroups] = useState([]);
-  const [gi, setGi] = useState(resumeGroupIndex);
+  const [gi, setGi] = useState(0);
   const [pi, setPi] = useState(0);
-  const [softDeletedIds, setSoftDeletedIds] = useState(new Set());
+  const [markedIds, setMarkedIds] = useState(new Set());
   const [movedIds, setMovedIds] = useState(new Set());
-  const [undoCount, setUndoCount] = useState(0);
   const [clusters, setClusters] = useState([]);
   const [showExif, setShowExif] = useState(false);
   const [showSimilar, setShowSimilar] = useState(false);
   const [showMove, setShowMove] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [moveMarkedMode, setMoveMarkedMode] = useState(false);
   const [completed, setCompleted] = useState(false);
   const [finalStats, setFinalStats] = useState({ count: 0, bytes: 0 });
   const [toast, setToast] = useState(null);
@@ -88,51 +111,111 @@ export default function CleaningScreen({ route, navigation }) {
   const sessionRef = useRef(null);
   const cleanedRef = useRef({ count: 0, bytes: 0 });
   const viewedRef = useRef(new Set());
-  const managerRef = useRef(null);
+  const markStackRef = useRef([]); // mark order, for undo
+  const frozenAssetRef = useRef(null);
+  const orderRef = useRef([]); // asset ids in cleaning order
 
-  if (!managerRef.current) {
-    managerRef.current = new SoftDeleteManager({
-      useRecycleBin: recycleBinActive,
-      onFinalized: (asset, bytes) => {
-        cleanedRef.current.count += 1;
-        cleanedRef.current.bytes += bytes || 0;
-        recordCleaned('photo', 1, bytes);
-      },
-      onChange: (count) => setUndoCount(count),
-    });
-  }
-  managerRef.current.setOptions({ useRecycleBin: recycleBinActive });
+  // ---- Animation shared values ----
+  const tx = useSharedValue(0);
+  const ty = useSharedValue(0);
+  const deleteProgress = useDerivedValue(() =>
+    Math.min(1, Math.max(0, -ty.value / DELETE_THRESHOLD))
+  );
+
+  const cardStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: tx.value }, { translateY: ty.value }],
+    opacity: interpolate(Math.abs(tx.value), [0, SCREEN_W], [1, 0.4]),
+  }));
 
   const showToast = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(null), 1800);
   };
 
-  // ---- Load assets, groups, analysis cache and start the session ----
+  // ---- Load: progressive for fresh sessions, ordered for resume ----
   useEffect(() => {
     let alive = true;
     (async () => {
-      let assets = assetIds
-        ? await getAssetsByIds(assetIds)
-        : await getAssets(albumId, 'photo');
-      if (settings.order === 'random') assets = shuffle(assets);
-      if (!alive) return;
-      setGroups(chunk(assets, groupSize));
-      setLoading(false);
-
-      const before = await getAlbumSnapshot(albumId, 'photo', assets);
       const pending = await sessionManager.getPendingSession();
-      if (pending && pending.albumId === albumId && pending.type === 'photo') {
-        sessionRef.current = pending; // resuming
+      const resuming =
+        resume &&
+        pending &&
+        pending.albumId === albumId &&
+        pending.type === 'photo';
+      const range = resuming ? pending.timeRange || timeRange : timeRange;
+      const inRange = (a) =>
+        !range ||
+        (a.creationTime &&
+          a.creationTime >= range.start &&
+          a.creationTime < range.end);
+
+      if (assetIds) {
+        // Explicit subset (suggestions) — small, load directly.
+        const assets = await getAssetsByIds(assetIds);
+        if (!alive) return;
+        const ordered =
+          settings.order === 'random' && !resuming ? shuffle(assets) : assets;
+        orderRef.current = ordered.map((a) => a.id);
+        setGroups(chunk(ordered, groupSize));
+        setLoading(false);
       } else {
+        // Stream pages: first page starts the session instantly.
+        let all = [];
+        let after;
+        let hasNext = true;
+        let first = true;
+        while (hasNext && all.length < 5000) {
+          const page = await getAssetsPage(albumId, 'photo', after);
+          if (!alive) return;
+          const scoped = page.assets.filter(inRange);
+          const pageAssets =
+            settings.order === 'random' && !resuming ? shuffle(scoped) : scoped;
+          all = [...all, ...pageAssets];
+          hasNext = page.hasNext;
+          after = page.endCursor;
+          if (!resuming) {
+            orderRef.current = all.map((a) => a.id);
+            setGroups(chunk(all, groupSize));
+            if (first) setLoading(false);
+          }
+          first = false;
+        }
+        if (resuming) {
+          // Rebuild the EXACT saved order (dropping deleted assets).
+          const savedOrder = (await sessionManager.getOrder()) || [];
+          const byId = Object.fromEntries(all.map((a) => [a.id, a]));
+          const ordered = savedOrder.map((id) => byId[id]).filter(Boolean);
+          const rest = all.filter((a) => !savedOrder.includes(a.id));
+          const finalList = [...ordered, ...rest];
+          orderRef.current = finalList.map((a) => a.id);
+          if (!alive) return;
+          setGroups(chunk(finalList, groupSize));
+          setGi(Math.min(pending.groupIndex || 0, Math.max(0, Math.ceil(finalList.length / groupSize) - 1)));
+          setPi(pending.photoIndex || 0);
+          const savedMarks = new Set(pending.markedIds || []);
+          setMarkedIds(savedMarks);
+          markStackRef.current = [...savedMarks];
+          setLoading(false);
+        } else {
+          sessionManager.saveOrder(orderRef.current);
+        }
+      }
+
+      // Session bookkeeping
+      if (resuming) {
+        sessionRef.current = pending;
+      } else {
+        const before = await getAlbumSnapshot(albumId, 'photo');
         sessionRef.current = await sessionManager.startSession({
           type: 'photo',
           albumId,
           albumTitle,
           groupSize,
           assetIds,
+          timeRange,
           before,
         });
+        sessionManager.saveOrder(orderRef.current);
       }
 
       if (settings.similarDetection) {
@@ -146,25 +229,90 @@ export default function CleaningScreen({ route, navigation }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Persist group progress for resume.
+  // Persist progress (group, position, marks) for exact resume.
+  const persistProgress = useCallback((patch = {}) => {
+    if (!sessionRef.current) return;
+    sessionManager.saveProgress({
+      groupIndex: gi,
+      photoIndex: pi,
+      markedIds: [...markedIds],
+      ...patch,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gi, pi, markedIds]);
+
   useEffect(() => {
-    if (sessionRef.current) sessionManager.saveProgress({ groupIndex: gi });
-  }, [gi]);
+    persistProgress();
+  }, [gi, markedIds, persistProgress]);
 
   // ---- Derived state ----
   const group = groups[gi] || [];
   const visible = useMemo(
-    () => group.filter((a) => !softDeletedIds.has(a.id) && !movedIds.has(a.id)),
-    [group, softDeletedIds, movedIds]
+    () => group.filter((a) => !markedIds.has(a.id) && !movedIds.has(a.id)),
+    [group, markedIds, movedIds]
   );
   const current = visible[Math.min(pi, Math.max(0, visible.length - 1))] || null;
 
-  // Track viewed photos (batched into stats at the end).
+  // Freeze the background photo while the confirm sheet is open.
+  useEffect(() => {
+    if (showConfirm) {
+      if (!frozenAssetRef.current) frozenAssetRef.current = current;
+    } else {
+      frozenAssetRef.current = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showConfirm]);
+  const displayAsset =
+    showConfirm && frozenAssetRef.current ? frozenAssetRef.current : current;
+
   useEffect(() => {
     if (current && !viewedRef.current.has(current.id)) {
       viewedRef.current.add(current.id);
     }
   }, [current]);
+
+  // Prefetch the NEXT photo so swiping feels instant.
+  useEffect(() => {
+    const next = visible[pi + 1];
+    if (next && next.mediaType !== 'video') {
+      ExpoImage.prefetch(next.uri).catch(() => {});
+    }
+  }, [pi, visible]);
+
+  // Resolve the current photo's address (GPS -> reverse geocode, cached).
+  const [address, setAddress] = useState(null);
+  const addressCacheRef = useRef({});
+  useEffect(() => {
+    let alive = true;
+    setAddress(null);
+    if (!displayAsset) return undefined;
+    const cached = addressCacheRef.current[displayAsset.id];
+    if (cached !== undefined) {
+      setAddress(cached);
+      return undefined;
+    }
+    (async () => {
+      try {
+        const info = await MediaLibrary.getAssetInfoAsync(displayAsset.id);
+        let addr = null;
+        if (info.location) {
+          addr = await reverseGeocode(
+            info.location.latitude,
+            info.location.longitude,
+            language
+          );
+        }
+        addressCacheRef.current[displayAsset.id] = addr;
+        if (alive) setAddress(addr);
+      } catch (e) {
+        addressCacheRef.current[displayAsset.id] = null;
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayAsset?.id, language]);
 
   const currentCluster = useMemo(() => {
     if (!current || clusters.length === 0) return null;
@@ -172,37 +320,24 @@ export default function CleaningScreen({ route, navigation }) {
     return c && c.length > 1 ? c : null;
   }, [current, clusters]);
 
-  // ---- Actions ----
-  const softDelete = useCallback(
-    (asset) => {
-      if (!asset) return;
-      managerRef.current.softDelete(asset);
-      setSoftDeletedIds((s) => new Set(s).add(asset.id));
-    },
-    []
-  );
+  // ---- Mark / undo (no deletion yet — deletion is batched per group) ----
+  const mark = useCallback((asset) => {
+    if (!asset) return;
+    markStackRef.current.push(asset.id);
+    setMarkedIds((s) => new Set(s).add(asset.id));
+  }, []);
 
   const undo = useCallback(() => {
-    const asset = managerRef.current.undoLast();
-    if (!asset) return;
-    setSoftDeletedIds((s) => {
+    const id = markStackRef.current.pop();
+    if (!id) return;
+    setMarkedIds((s) => {
       const next = new Set(s);
-      next.delete(asset.id);
+      next.delete(id);
       return next;
     });
   }, []);
 
-  const goNext = useCallback(() => {
-    if (pi < visible.length - 1) {
-      setPi(pi + 1);
-    } else {
-      setShowConfirm(true); // end of group
-    }
-  }, [pi, visible.length]);
-
-  const goPrev = useCallback(() => {
-    if (pi > 0) setPi(pi - 1);
-  }, [pi]);
+  const undoCount = markStackRef.current.length; // fresh on every re-render
 
   const afterRemovalAdvance = useCallback(
     (remainingCount) => {
@@ -212,36 +347,105 @@ export default function CleaningScreen({ route, navigation }) {
     [pi]
   );
 
-  const handleSwipeUp = useCallback(() => {
-    if (!current) return;
-    softDelete(current);
-    afterRemovalAdvance(visible.length - 1);
-  }, [current, softDelete, visible.length, afterRemovalAdvance]);
+  // ---- Gesture callbacks ----
+  const slideInFrom = useCallback(
+    (fromX) => {
+      tx.value = fromX;
+      ty.value = 0;
+      tx.value = withSpring(0, SPRING);
+    },
+    [tx, ty]
+  );
 
-  const pan = useRef(
-    PanResponder.create({
-      onMoveShouldSetPanResponder: (_, g) =>
-        Math.abs(g.dx) > 12 || Math.abs(g.dy) > 12,
-      onPanResponderRelease: (_, g) => {
-        if (Math.abs(g.dy) > Math.abs(g.dx)) {
-          if (g.dy < -SWIPE_Y) handlersRef.current.up();
-          else if (g.dy > SWIPE_Y) handlersRef.current.down();
-        } else {
-          if (g.dx < -SWIPE_X) handlersRef.current.next();
-          else if (g.dx > SWIPE_X) handlersRef.current.prev();
-        }
-      },
-    })
-  ).current;
+  const onSwipeNext = useCallback(() => {
+    if (pi < visible.length - 1) {
+      setPi(pi + 1);
+      slideInFrom(SCREEN_W);
+    } else {
+      tx.value = withSpring(0, SPRING);
+      setShowConfirm(true);
+    }
+  }, [pi, visible.length, slideInFrom, SCREEN_W, tx]);
+
+  const onSwipePrev = useCallback(() => {
+    if (pi > 0) {
+      setPi(pi - 1);
+      slideInFrom(-SCREEN_W);
+    } else {
+      tx.value = withSpring(0, SPRING);
+    }
+  }, [pi, slideInFrom, SCREEN_W, tx]);
+
+  const onSwipeDelete = useCallback(() => {
+    if (!current) return;
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    } catch (e) {
+      // haptics unavailable
+    }
+    mark(current);
+    ty.value = SCREEN_H * 0.12;
+    tx.value = 0;
+    ty.value = withSpring(0, SPRING);
+    afterRemovalAdvance(visible.length - 1);
+  }, [current, mark, visible.length, afterRemovalAdvance, ty, tx, SCREEN_H]);
+
+  const onSwipeDown = useCallback(() => {
+    if (current) setShowMove(true);
+  }, [current]);
 
   const handlersRef = useRef({});
   handlersRef.current = {
-    up: handleSwipeUp,
-    down: () => current && setShowMove(true),
-    next: goNext,
-    prev: goPrev,
+    next: onSwipeNext,
+    prev: onSwipePrev,
+    del: onSwipeDelete,
+    down: onSwipeDown,
   };
+  const callNext = useCallback(() => handlersRef.current.next(), []);
+  const callPrev = useCallback(() => handlersRef.current.prev(), []);
+  const callDel = useCallback(() => handlersRef.current.del(), []);
+  const callDown = useCallback(() => handlersRef.current.down(), []);
 
+  const pan = Gesture.Pan()
+    .enabled(!showConfirm && !showMove && !showSimilar && !showExif)
+    .onUpdate((e) => {
+      'worklet';
+      if (Math.abs(e.translationX) > Math.abs(e.translationY)) {
+        tx.value = e.translationX;
+        ty.value = 0;
+      } else {
+        ty.value = e.translationY;
+        tx.value = 0;
+      }
+    })
+    .onEnd((e) => {
+      'worklet';
+      const horizontal = Math.abs(e.translationX) > Math.abs(e.translationY);
+      if (horizontal) {
+        if (e.translationX < -SWIPE_X) {
+          tx.value = withTiming(-SCREEN_W, { duration: 150 }, (finished) => {
+            if (finished) runOnJS(callNext)();
+          });
+        } else if (e.translationX > SWIPE_X) {
+          tx.value = withTiming(SCREEN_W, { duration: 150 }, (finished) => {
+            if (finished) runOnJS(callPrev)();
+          });
+        } else {
+          tx.value = withSpring(0, SPRING);
+        }
+      } else if (e.translationY < -DELETE_THRESHOLD) {
+        ty.value = withTiming(-SCREEN_H, { duration: 180 }, (finished) => {
+          if (finished) runOnJS(callDel)();
+        });
+      } else if (e.translationY > MOVE_THRESHOLD) {
+        ty.value = withSpring(0, SPRING);
+        runOnJS(callDown)();
+      } else {
+        ty.value = withSpring(0, SPRING);
+      }
+    });
+
+  // ---- Move flow ----
   const handleMove = async (album) => {
     setShowMove(false);
     if (!current) return;
@@ -251,50 +455,74 @@ export default function CleaningScreen({ route, navigation }) {
       showToast(t('moved_to', { album: album.title }));
       afterRemovalAdvance(visible.length - 1);
     } catch (e) {
-      // move failed (permission?) — keep photo in place
+      // move failed — keep photo in place
     }
   };
 
-  // ---- Group confirmation ----
-  const markedIds = softDeletedIds;
+  // ---- Group confirmation (ONE batched delete per group) ----
   const toggleMark = (id) => {
-    setSoftDeletedIds((s) => {
+    setMarkedIds((s) => {
       const next = new Set(s);
       if (next.has(id)) {
         next.delete(id);
-        managerRef.current.undoById(id);
+        markStackRef.current = markStackRef.current.filter((x) => x !== id);
       } else {
         next.add(id);
-        const asset = group.find((a) => a.id === id);
-        if (asset) managerRef.current.softDelete(asset);
+        markStackRef.current.push(id);
       }
       return next;
     });
   };
 
+  const clearGroupMarks = () => {
+    const groupIdSet = new Set(group.map((a) => a.id));
+    setMarkedIds((s) => {
+      const next = new Set(s);
+      group.forEach((a) => next.delete(a.id));
+      return next;
+    });
+    markStackRef.current = markStackRef.current.filter(
+      (id) => !groupIdSet.has(id)
+    );
+  };
+
   const nextGroup = () => {
     setShowConfirm(false);
     setPi(0);
+    tx.value = 0;
+    ty.value = 0;
     if (gi < groups.length - 1) setGi(gi + 1);
     else finishAll();
   };
 
+  const skipGroup = () => {
+    clearGroupMarks(); // skip = keep everything in this group
+    nextGroup();
+  };
+
   const deleteMarkedNow = async () => {
-    for (const asset of group) {
-      if (markedIds.has(asset.id)) {
-        await managerRef.current.finalizeById(asset.id);
+    const targets = group.filter((a) => markedIds.has(a.id));
+    if (targets.length > 0) {
+      try {
+        // SINGLE system deletion dialog for the whole group.
+        const { count, bytes } = await batchDelete(targets, {
+          useRecycleBin: recycleBinActive,
+        });
+        cleanedRef.current.count += count;
+        cleanedRef.current.bytes += bytes;
+        recordCleaned('photo', count, bytes);
+        clearGroupMarks();
+      } catch (e) {
+        // user cancelled the system dialog — keep marks, stay in the sheet
+        return;
       }
     }
     nextGroup();
   };
 
-  const [moveMarkedMode, setMoveMarkedMode] = useState(false);
   const moveMarked = async (album) => {
     setMoveMarkedMode(false);
     const targets = group.filter((a) => markedIds.has(a.id));
-    for (const asset of targets) {
-      managerRef.current.undoById(asset.id);
-    }
     try {
       await moveAssetsToAlbum(targets, album);
       setMovedIds((s) => {
@@ -302,11 +530,7 @@ export default function CleaningScreen({ route, navigation }) {
         targets.forEach((a) => next.add(a.id));
         return next;
       });
-      setSoftDeletedIds((s) => {
-        const next = new Set(s);
-        targets.forEach((a) => next.delete(a.id));
-        return next;
-      });
+      clearGroupMarks();
       showToast(t('moved_to', { album: album.title }));
     } catch (e) {
       // ignore
@@ -314,9 +538,20 @@ export default function CleaningScreen({ route, navigation }) {
     nextGroup();
   };
 
-  // ---- Completion / exit ----
+  const closeConfirmOnly = () => {
+    if (visible.length === 0) {
+      nextGroup();
+      return;
+    }
+    setShowConfirm(false);
+    if (pi >= visible.length) setPi(visible.length - 1);
+    tx.value = 0;
+    ty.value = 0;
+  };
+
+  // ---- Completion / exit (marks are discarded — deletion only happens
+  // through the explicit batched group action) ----
   const finishAll = async () => {
-    await managerRef.current.flushAll();
     const viewed = viewedRef.current.size;
     if (viewed > 0) recordViewed('photo', viewed);
     if (sessionRef.current) await sessionManager.finishSession(sessionRef.current);
@@ -331,7 +566,6 @@ export default function CleaningScreen({ route, navigation }) {
         text: t('exit'),
         style: 'destructive',
         onPress: async () => {
-          await managerRef.current.flushAll();
           const viewed = viewedRef.current.size;
           if (viewed > 0) recordViewed('photo', viewed);
           if (sessionRef.current)
@@ -392,9 +626,15 @@ export default function CleaningScreen({ route, navigation }) {
     );
   }
 
+  const sizeLabel =
+    sizesById && displayAsset && sizesById[displayAsset.id]
+      ? formatBytes(sizesById[displayAsset.id])
+      : null;
+
   return (
     <SafeAreaView style={[styles.screen, { backgroundColor: colors.background }]}>
-      {/* Top bar */}
+      <GlowingTrashBar progress={deleteProgress} />
+
       <View style={styles.topBar}>
         <View>
           <Text style={[styles.topTitle, { color: colors.text }]} numberOfLines={1}>
@@ -408,25 +648,33 @@ export default function CleaningScreen({ route, navigation }) {
             })}
           </Text>
         </View>
-        <Pressable onPress={exit} hitSlop={10} style={[styles.exitBtn, { backgroundColor: colors.card }]}>
+        <Pressable
+          onPress={exit}
+          hitSlop={10}
+          style={[styles.exitBtn, { backgroundColor: colors.card }]}
+        >
           <Ionicons name="close" size={22} color={colors.text} />
         </Pressable>
       </View>
 
-      {/* Photo area with gestures */}
-      <View style={styles.photoArea} {...pan.panHandlers}>
-        <PhotoCard
-          asset={current}
-          isFavorite={current ? isFavorite(current.id) : false}
-          marked={current ? softDeletedIds.has(current.id) : false}
+      <GestureDetector gesture={pan}>
+        <Animated.View style={[styles.photoArea, cardStyle]}>
+          <PhotoCard
+            asset={displayAsset}
+            isFavorite={displayAsset ? isFavorite(displayAsset.id) : false}
+            marked={displayAsset ? markedIds.has(displayAsset.id) : false}
+            sizeLabel={sizeLabel}
+          />
+        </Animated.View>
+      </GestureDetector>
+
+      <View style={styles.indicatorWrap}>
+        <PageIndicator
+          total={visible.length}
+          index={Math.min(pi, visible.length - 1)}
         />
       </View>
 
-      <View style={styles.indicatorWrap}>
-        <PageIndicator total={visible.length} index={Math.min(pi, visible.length - 1)} />
-      </View>
-
-      {/* Similar pill */}
       {currentCluster && (
         <Pressable
           style={[styles.similarPill, { backgroundColor: colors.accent }]}
@@ -448,15 +696,20 @@ export default function CleaningScreen({ route, navigation }) {
       )}
 
       <BottomInfoBar
-        asset={current}
-        isFavorite={current ? isFavorite(current.id) : false}
-        onToggleFavorite={() => current && toggleFavorite(current.id)}
-        onPressDate={() => current && setShowExif(true)}
-        undoCount={undoCount}
+        asset={displayAsset}
+        address={address}
+        isFavorite={displayAsset ? isFavorite(displayAsset.id) : false}
+        onToggleFavorite={() => displayAsset && toggleFavorite(displayAsset.id)}
+        onPressDate={() => displayAsset && setShowExif(true)}
+        undoCount={undoCount || 0}
         onUndo={undo}
       />
 
-      <EXIFModal visible={showExif} asset={current} onClose={() => setShowExif(false)} />
+      <EXIFModal
+        visible={showExif}
+        asset={displayAsset}
+        onClose={() => setShowExif(false)}
+      />
 
       <SimilarModal
         visible={showSimilar}
@@ -464,7 +717,7 @@ export default function CleaningScreen({ route, navigation }) {
         onClose={() => setShowSimilar(false)}
         onDeleteSelected={(assets) => {
           setShowSimilar(false);
-          assets.forEach((a) => softDelete(a));
+          assets.forEach((a) => mark(a));
           afterRemovalAdvance(
             visible.filter((v) => !assets.some((a) => a.id === v.id)).length
           );
@@ -490,7 +743,8 @@ export default function CleaningScreen({ route, navigation }) {
         assets={group.filter((a) => !movedIds.has(a.id))}
         markedIds={markedIds}
         onToggleMark={toggleMark}
-        onSkip={nextGroup}
+        onClose={closeConfirmOnly}
+        onSkip={skipGroup}
         onDeleteMarked={deleteMarkedNow}
         onMoveMarked={() => setMoveMarkedMode(true)}
       />

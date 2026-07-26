@@ -21,10 +21,12 @@ import { LANGUAGES } from '../i18n';
 import {
   getAssets,
   getAssetSize,
+  getAssetsByIds,
   findAlbumByTitle,
   formatBytes,
   ALL_ALBUM_ID,
 } from '../utils/albumHelpers';
+import analyzer from '../utils/chunkedAnalyzer';
 import { groupBursts } from '../utils/burstDetection';
 import {
   enableDailyReminder,
@@ -34,7 +36,7 @@ import {
 const GITHUB_URL = 'https://github.com/youmikk/media-cleaner';
 const SUPPORT_EMAIL = 'support@example.com';
 const VERSION = 'v1.0.0';
-const SUGGESTIONS_KEY = 'analysis_suggestions';
+const SUGGESTIONS_KEY = 'analysis_suggestions_v2';
 const SUGGESTIONS_TTL = 24 * 60 * 60 * 1000; // refresh daily
 const NINETY_DAYS = 90 * 24 * 60 * 60 * 1000;
 const SIZE_SCAN_CAP = 300;
@@ -51,6 +53,7 @@ export default function ProfileScreen({ navigation }) {
     largest: [],
     bursts: [],
     screenshots: [],
+    videoDupes: [],
   });
   const [expandedStat, setExpandedStat] = useState(null);
 
@@ -58,6 +61,42 @@ export default function ProfileScreen({ navigation }) {
     useCallback(() => {
       refreshTrash();
     }, [refreshTrash])
+  );
+
+  // Low-quality photos AND exact duplicates come from the chunked
+  // analyzer's cached metrics.
+  const [lowQuality, setLowQuality] = useState({ ids: [], thumb: null });
+  const [photoDupes, setPhotoDupes] = useState({ groups: [], thumb: null });
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      analyzer
+        .getCached(ALL_ALBUM_ID, 'photo')
+        .then(async (cache) => {
+          if (!alive || !cache) return;
+          if (cache.lowQuality) {
+            const ids = cache.lowQuality.map((x) => x.id);
+            let thumb = null;
+            if (ids.length > 0) {
+              const first = await getAssetsByIds(ids.slice(0, 1));
+              thumb = first[0]?.uri || null;
+            }
+            if (alive) setLowQuality({ ids, thumb });
+          }
+          if (cache.duplicates) {
+            let thumb = null;
+            if (cache.duplicates.length > 0) {
+              const first = await getAssetsByIds(cache.duplicates[0].slice(0, 1));
+              thumb = first[0]?.uri || null;
+            }
+            if (alive) setPhotoDupes({ groups: cache.duplicates, thumb });
+          }
+        })
+        .catch(() => {});
+      return () => {
+        alive = false;
+      };
+    }, [])
   );
 
   // ---- Smart suggestions (cached, refreshed daily) ----
@@ -111,10 +150,33 @@ export default function ProfileScreen({ navigation }) {
             .map((s) => ({ id: s.id, uri: s.uri }));
         }
 
+        // 4) Duplicate videos: same duration (±0.5s), resolution and size.
+        const videoDupes = [];
+        const vBuckets = new Map();
+        for (const v of videos) {
+          const key = `${Math.round((v.duration || 0) * 2)}_${v.width}x${v.height}`;
+          if (!vBuckets.has(key)) vBuckets.set(key, []);
+          vBuckets.get(key).push(v);
+        }
+        for (const members of vBuckets.values()) {
+          if (members.length < 2) continue;
+          const bySize = new Map();
+          for (const v of members) {
+            if (!alive) return;
+            const size = await getAssetSize(v);
+            if (!bySize.has(size)) bySize.set(size, []);
+            bySize.get(size).push(v.id);
+          }
+          for (const [size, ids] of bySize.entries()) {
+            if (size > 0 && ids.length >= 2) videoDupes.push({ ids });
+          }
+        }
+
         const data = {
           largest,
           bursts: bursts.map((b) => ({ ...b, thumb: burstThumb })),
           screenshots,
+          videoDupes,
         };
         if (!alive) return;
         setSuggestions(data);
@@ -145,14 +207,14 @@ export default function ProfileScreen({ navigation }) {
     setSetting('dailyReminder', value);
   };
 
-  const cleanAssets = (assetIds, title) => {
+  const cleanAssets = (assetIds, title, sizesById = null) => {
     navigation.navigate('PhotosTab', {
       screen: 'Cleaning',
       params: {
         albumId: ALL_ALBUM_ID,
         albumTitle: title,
-        groupSize: 5,
-        assetIds,
+        assetIds, // group size comes from the global setting
+        sizesById, // shown as a size badge on each photo (Largest Files)
       },
     });
   };
@@ -252,7 +314,10 @@ export default function ProfileScreen({ navigation }) {
               onClean={() =>
                 cleanAssets(
                   suggestions.largest.map((a) => a.id),
-                  t('suggestion_largest')
+                  t('suggestion_largest'),
+                  Object.fromEntries(
+                    suggestions.largest.map((a) => [a.id, a.size])
+                  )
                 )
               }
             />
@@ -281,7 +346,85 @@ export default function ProfileScreen({ navigation }) {
                 )
               }
             />
+            <SuggestionCard
+              icon="copy-outline"
+              title={t('suggestion_dupes')}
+              description={
+                photoDupes.groups.length > 0
+                  ? t('suggestion_dupes_desc')
+                  : t('lowquality_need_analysis')
+              }
+              thumbnailUri={photoDupes.thumb}
+              count={photoDupes.groups.length}
+              onClean={() =>
+                navigation.navigate('BurstClean', {
+                  groups: photoDupes.groups.map((ids) => ({ ids })),
+                  mode: 'duplicate',
+                })
+              }
+            />
+            <SuggestionCard
+              icon="film-outline"
+              title={t('suggestion_video_dupes')}
+              description={t('suggestion_video_dupes_desc')}
+              thumbnailUri={null}
+              count={(suggestions.videoDupes || []).length}
+              onClean={() =>
+                navigation.navigate('BurstClean', {
+                  groups: suggestions.videoDupes,
+                  mode: 'duplicate',
+                })
+              }
+            />
+            <SuggestionCard
+              icon="eye-off-outline"
+              title={t('suggestion_lowquality')}
+              description={
+                lowQuality.ids.length > 0
+                  ? t('suggestion_lowquality_desc')
+                  : t('lowquality_need_analysis')
+              }
+              thumbnailUri={lowQuality.thumb}
+              count={lowQuality.ids.length}
+              onClean={() =>
+                cleanAssets(lowQuality.ids, t('suggestion_lowquality'))
+              }
+            />
           </ScrollView>
+        </Section>
+
+        {/* Tools: photography profile & compressor */}
+        <Section title={t('tools_title')}>
+          <Pressable
+            style={[styles.binRow, { backgroundColor: colors.card, marginBottom: 10 }]}
+            onPress={() => navigation.navigate('Insights')}
+          >
+            <Ionicons name="analytics-outline" size={22} color={colors.accent} />
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowLabel, { color: colors.text }]}>
+                {t('insights_title')}
+              </Text>
+              <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
+                {t('insights_desc')}
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
+          </Pressable>
+          <Pressable
+            style={[styles.binRow, { backgroundColor: colors.card }]}
+            onPress={() => navigation.navigate('Compress')}
+          >
+            <Ionicons name="archive-outline" size={22} color={colors.accent} />
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowLabel, { color: colors.text }]}>
+                {t('compress_title')}
+              </Text>
+              <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
+                {t('compress_desc')}
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
+          </Pressable>
         </Section>
 
         {/* Storage comparison */}
@@ -350,6 +493,12 @@ export default function ProfileScreen({ navigation }) {
         {/* Settings */}
         <Section title={t('settings_title')}>
           <View style={[styles.settingsCard, { backgroundColor: colors.card }]}>
+            <SegmentedRow
+              label={t('setting_group_size')}
+              value={settings.groupSize}
+              onChange={(v) => setSetting('groupSize', v)}
+              options={[5, 10, 15, 20].map((n) => ({ value: n, label: String(n) }))}
+            />
             <SegmentedRow
               label={t('setting_order')}
               value={settings.order}

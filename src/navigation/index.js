@@ -4,11 +4,12 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import LiquidTabBar from '../components/LiquidTabBar';
 import AlbumSelectScreen from '../screens/AlbumSelectScreen';
 import CleaningScreen from '../screens/CleaningScreen';
-import VideoAlbumSelectScreen from '../screens/VideoAlbumSelectScreen';
 import VideoCleaningScreen from '../screens/VideoCleaningScreen';
 import ProfileScreen from '../screens/ProfileScreen';
 import RecycleBinScreen from '../screens/RecycleBinScreen';
 import BurstCleanScreen from '../screens/BurstCleanScreen';
+import GalleryInsightsScreen from '../screens/GalleryInsightsScreen';
+import CompressScreen from '../screens/CompressScreen';
 
 const Tab = createBottomTabNavigator();
 const PhotosStack = createNativeStackNavigator();
@@ -28,13 +29,10 @@ function PhotosNavigator() {
   );
 }
 
+// Videos tab opens the cleaning feed DIRECTLY (no album-select screen).
 function VideosNavigator() {
   return (
     <VideosStack.Navigator screenOptions={{ headerShown: false }}>
-      <VideosStack.Screen
-        name="VideoAlbumSelect"
-        component={VideoAlbumSelectScreen}
-      />
       <VideosStack.Screen
         name="VideoCleaning"
         component={VideoCleaningScreen}
@@ -50,6 +48,8 @@ function ProfileNavigator() {
       <ProfileStack.Screen name="Profile" component={ProfileScreen} />
       <ProfileStack.Screen name="RecycleBin" component={RecycleBinScreen} />
       <ProfileStack.Screen name="BurstClean" component={BurstCleanScreen} />
+      <ProfileStack.Screen name="Insights" component={GalleryInsightsScreen} />
+      <ProfileStack.Screen name="Compress" component={CompressScreen} />
     </ProfileStack.Navigator>
   );
 }

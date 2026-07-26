@@ -5,23 +5,25 @@ import {
   Text,
   Pressable,
   FlatList,
-  Image,
   StyleSheet,
   useWindowDimensions,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
 
 /**
  * End-of-group confirmation sheet: shows every item of the group with its
  * delete mark; the user can toggle marks, then Skip / Delete All Marked /
- * Move All Marked to an album.
+ * Move All Marked to an album. `onClose` (X button, backdrop tap, Android
+ * back) dismisses WITHOUT advancing to the next group.
  */
 export default function GroupConfirmSheet({
   visible,
   assets,
   markedIds,
   onToggleMark,
+  onClose,
   onSkip,
   onDeleteMarked,
   onMoveMarked,
@@ -30,14 +32,28 @@ export default function GroupConfirmSheet({
   const { width } = useWindowDimensions();
   const cell = (width - 16 * 2 - 8 * 3) / 4;
   const markedCount = assets.filter((a) => markedIds.has(a.id)).length;
+  const handleClose = onClose || onSkip;
 
   return (
-    <Modal visible={visible} transparent animationType="slide">
-      <View style={styles.backdrop}>
-        <View style={[styles.sheet, { backgroundColor: colors.card }]}>
-          <Text style={[styles.title, { color: colors.text }]}>
-            {t('group_review_title')}
-          </Text>
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={handleClose}
+    >
+      <Pressable style={styles.backdrop} onPress={handleClose}>
+        <Pressable
+          style={[styles.sheet, { backgroundColor: colors.card }]}
+          onPress={() => {}}
+        >
+          <View style={styles.header}>
+            <Text style={[styles.title, { color: colors.text }]}>
+              {t('group_review_title')}
+            </Text>
+            <Pressable onPress={handleClose} hitSlop={10}>
+              <Ionicons name="close" size={22} color={colors.subtext} />
+            </Pressable>
+          </View>
           <FlatList
             data={assets}
             numColumns={4}
@@ -117,8 +133,8 @@ export default function GroupConfirmSheet({
               {t('move_all_marked')}
             </Text>
           </Pressable>
-        </View>
-      </View>
+        </Pressable>
+      </Pressable>
     </Modal>
   );
 }
@@ -135,7 +151,13 @@ const styles = StyleSheet.create({
     padding: 16,
     paddingBottom: 30,
   },
-  title: { fontSize: 17, fontWeight: '700', marginBottom: 12 },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  title: { fontSize: 17, fontWeight: '700' },
   thumb: { width: '100%', height: '100%', borderRadius: 10 },
   mark: {
     position: 'absolute',

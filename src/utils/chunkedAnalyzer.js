@@ -1,12 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { InteractionManager } from 'react-native';
-import {
-  getAssets,
-  getAssetSize,
-  getAlbumFingerprint,
-} from './albumHelpers';
-import { aHash, hammingDistance } from './imageHashing';
-import { laplacianVariance } from './sharpness';
+import { getAssets, getAssetSize, getAlbumFingerprint } from './albumHelpers';
+import { analyzePixels, hammingDistance } from './imageHashing';
 import { groupBursts } from './burstDetection';
 import {
   subscribeLowPower,
@@ -14,13 +9,23 @@ import {
   chunkSizeFor,
 } from './batteryUtils';
 
-const CACHE_PREFIX = 'analysis_';
-const SIMILAR_THRESHOLD = 10; // hamming distance on 64-bit aHash
-const MAX_HASHED = 3000; // cap heavy per-photo work for huge albums
+// v2: dHash replaced aHash — bump both stores so stale aHash data is ignored.
+const CACHE_PREFIX = 'analysis_v2_';
+const METRICS_KEY = 'analysis_metrics_v2'; // GLOBAL per-asset metric store
+const SIMILAR_THRESHOLD = 10;
+const MAX_HASHED = 3000;
+const CONCURRENCY = 6; // parallel decodes (I/O bound native work)
+
+// Low-quality thresholds
+const BLUR_THRESHOLD = 45;
+const UNDER_MEAN = 45;
+const UNDER_RATIO = 0.55;
+const OVER_MEAN = 215;
+const OVER_RATIO = 0.45;
+const BLANK_STDDEV = 8; // near-uniform frame => blank / pocket shot
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Yield to the UI thread between chunks. */
 function yieldToUI() {
   return new Promise((resolve) => {
     InteractionManager.runAfterInteractions(() => setTimeout(resolve, 0));
@@ -28,15 +33,18 @@ function yieldToUI() {
 }
 
 /**
- * ChunkedAnalyzer
- * ----------------
- * - FIFO queue; only ONE album analyzed at a time.
- * - Selecting a different album pauses the current job (progress kept) and
- *   moves it to the back of the queue.
- * - Chunk size adapts to low-power mode (50 -> 10); iOS memory warnings
- *   pause the loop entirely until pressure clears.
- * - Results cached in AsyncStorage under `analysis_${albumId}` together with
- *   { assetCount, latestModificationTime } for staleness detection.
+ * ChunkedAnalyzer v3
+ * ------------------
+ * - Metrics (hash / sharpness / exposure) are stored PER ASSET in one global
+ *   store, persisted INCREMENTALLY after every chunk. Killing or cancelling
+ *   the app never loses progress, revisits resume instead of restarting, and
+ *   assets shared between albums ("All Photos" ∩ "Screenshots") are decoded
+ *   exactly once.
+ * - No file-size lookups during analysis (they doubled the per-photo cost);
+ *   size-based features compute sizes themselves.
+ * - One album at a time (FIFO), pause/requeue on album switch, low-power
+ *   chunk shrink (50 -> 10), memory-warning pause. Album caches store only
+ *   derived results (clusters/bursts/lowQuality) + freshness fingerprint.
  */
 class ChunkedAnalyzer {
   constructor() {
@@ -45,6 +53,7 @@ class ChunkedAnalyzer {
     this.listeners = new Set();
     this.lowPower = false;
     this.memoryPaused = false;
+    this.metrics = null; // id -> {hash, sharpness, brightness}
     this.state = {
       running: false,
       albumId: null,
@@ -54,6 +63,35 @@ class ChunkedAnalyzer {
       memoryPaused: false,
     };
     this._powerInit = false;
+  }
+
+  async _loadMetrics() {
+    if (this.metrics) return this.metrics;
+    try {
+      const raw = await AsyncStorage.getItem(METRICS_KEY);
+      this.metrics = raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      this.metrics = {};
+    }
+    return this.metrics;
+  }
+
+  async _persistMetrics() {
+    try {
+      await AsyncStorage.setItem(METRICS_KEY, JSON.stringify(this.metrics));
+    } catch (e) {
+      // best effort
+    }
+  }
+
+  /** Metrics for one asset — instant when already analyzed. */
+  async metricsFor(asset) {
+    const store = await this._loadMetrics();
+    if (store[asset.id]) return store[asset.id];
+    const m = await analyzePixels(asset.localUri || asset.uri);
+    store[asset.id] = m;
+    this._persistMetrics(); // fire & forget
+    return m;
   }
 
   _initPowerAdaptation() {
@@ -66,7 +104,6 @@ class ChunkedAnalyzer {
     subscribeMemoryWarning(() => {
       this.memoryPaused = true;
       this._emit({ memoryPaused: true });
-      // Resume automatically after a cool-down period.
       setTimeout(() => {
         this.memoryPaused = false;
         this._emit({ memoryPaused: false });
@@ -100,10 +137,6 @@ class ChunkedAnalyzer {
     }
   }
 
-  /**
-   * Compare the stored fingerprint with the album's current one.
-   * Returns { cache, stale } — cache may be non-null but stale.
-   */
   async checkCache(albumId, mediaType = 'photo') {
     const cache = await this.getCached(albumId, mediaType);
     if (!cache) return { cache: null, stale: false };
@@ -118,11 +151,6 @@ class ChunkedAnalyzer {
     }
   }
 
-  /**
-   * Queue an album for analysis. Resolves with the analysis result, or null
-   * when cancelled. If the album is already cached and fresh (and !force),
-   * resolves immediately from cache.
-   */
   analyzeAlbum(albumId, options = {}) {
     const { mediaType = 'photo', force = false, onProgress } = options;
     this._initPowerAdaptation();
@@ -136,7 +164,6 @@ class ChunkedAnalyzer {
         }
       }
 
-      // Already queued or running for this album? Attach to it.
       if (this.current && this.current.albumId === albumId && !this.current.cancelled) {
         this.current.resolvers.push(resolve);
         if (onProgress) this.current.progressCbs.push(onProgress);
@@ -156,13 +183,9 @@ class ChunkedAnalyzer {
         progressCbs: onProgress ? [onProgress] : [],
         cancelled: false,
         pauseRequested: false,
-        doneIndex: 0,
-        hashes: {},
-        sizes: {},
       };
 
       if (this.current) {
-        // Pause the running job, keep its progress, run the new one first.
         this.current.pauseRequested = true;
         this.queue.push(this.current);
         this.queue.unshift(job);
@@ -202,62 +225,108 @@ class ChunkedAnalyzer {
     const { albumId, mediaType } = job;
     let finished = false;
     try {
+      const store = await this._loadMetrics();
       const assets = await getAssets(albumId, mediaType);
-      const total = assets.length;
-      const heavyTotal = Math.min(total, MAX_HASHED);
-      this._emit({ running: true, albumId, done: job.doneIndex, total: heavyTotal });
+      const scope = assets.slice(0, MAX_HASHED);
 
-      let i = job.doneIndex;
-      while (i < heavyTotal) {
+      // Only photos we have NOT seen before need pixel work — everything
+      // already in the global store is free.
+      const targets =
+        mediaType === 'photo' ? scope.filter((a) => !store[a.id]) : [];
+      const total = targets.length;
+      this._emit({ running: true, albumId, done: 0, total });
+
+      let i = 0;
+      let sinceSave = 0;
+      while (i < total) {
         if (job.cancelled) {
+          await this._persistMetrics(); // keep what we got
           job.resolvers.forEach((r) => r(null));
           finished = true;
           return;
         }
         if (job.pauseRequested) {
-          job.doneIndex = i;
-          finished = true; // job re-queued by analyzeAlbum
+          await this._persistMetrics();
+          finished = true; // re-queued by analyzeAlbum
           return;
         }
         while (this.memoryPaused && !job.cancelled) await sleep(500);
 
         const chunk = chunkSizeFor(this.lowPower);
-        const end = Math.min(i + chunk, heavyTotal);
-        for (; i < end; i++) {
-          const a = assets[i];
-          try {
-            if (mediaType === 'photo') {
-              job.hashes[a.id] = await aHash(a.uri);
-            }
-            job.sizes[a.id] = await getAssetSize(a);
-          } catch (e) {
-            // unreadable asset -> skip
-          }
-          if (job.cancelled || job.pauseRequested) break;
+        const end = Math.min(i + chunk, total);
+        while (i < end && !job.cancelled && !job.pauseRequested) {
+          const batch = targets.slice(i, Math.min(i + CONCURRENCY, end));
+          await Promise.all(
+            batch.map(async (a) => {
+              try {
+                store[a.id] = await analyzePixels(a.uri);
+              } catch (e) {
+                store[a.id] = { hash: null, sharpness: 0, brightness: null };
+              }
+            })
+          );
+          i += batch.length;
         }
-        job.doneIndex = i;
+        sinceSave += chunk;
+        if (sinceSave >= 50) {
+          sinceSave = 0;
+          await this._persistMetrics(); // INCREMENTAL: survive app kills
+        }
         this._emit({ done: i });
-        job.progressCbs.forEach((cb) => cb(i, heavyTotal));
+        job.progressCbs.forEach((cb) => cb(i, total));
         await yieldToUI();
       }
+      await this._persistMetrics();
 
-      // ---- Aggregate results ----
-      const clusters =
-        mediaType === 'photo' ? this._cluster(assets, job.hashes) : [];
-      const bursts =
-        mediaType === 'photo' ? groupBursts(assets.slice(0, heavyTotal)) : [];
-
-      // Sharpness only for burst members (bounded work).
-      const sharpness = {};
+      // ---- Aggregate derived results for THIS album ----
+      const clusters = mediaType === 'photo' ? this._cluster(scope, store) : [];
+      const bursts = mediaType === 'photo' ? groupBursts(scope) : [];
+      const lowQuality = [];
       if (mediaType === 'photo') {
-        const assetById = Object.fromEntries(assets.map((a) => [a.id, a]));
-        for (const g of bursts.slice(0, 20)) {
-          for (const id of g.ids) {
-            if (job.cancelled) break;
-            const a = assetById[id];
-            if (a) sharpness[id] = await laplacianVariance(a.uri);
+        for (const a of scope) {
+          const m = store[a.id];
+          if (!m || !m.hash) continue;
+          const b = m.brightness || {};
+          if (b.stdDev !== undefined && b.stdDev < BLANK_STDDEV) {
+            lowQuality.push({ id: a.id, reason: 'blank' });
+          } else if (m.sharpness < BLUR_THRESHOLD) {
+            lowQuality.push({ id: a.id, reason: 'blurry' });
+          } else if (b.mean < UNDER_MEAN || b.underRatio > UNDER_RATIO) {
+            lowQuality.push({ id: a.id, reason: 'underexposed' });
+          } else if (b.mean > OVER_MEAN || b.overRatio > OVER_RATIO) {
+            lowQuality.push({ id: a.id, reason: 'overexposed' });
           }
-          await yieldToUI();
+        }
+      }
+
+      // ---- EXACT duplicates: identical hash + identical dimensions,
+      // confirmed by identical file size (only candidates get a size call) --
+      let duplicates = [];
+      if (mediaType === 'photo') {
+        const buckets = new Map();
+        for (const a of scope) {
+          const m = store[a.id];
+          if (!m || !m.hash) continue;
+          const key = `${m.hash}_${a.width}x${a.height}`;
+          if (!buckets.has(key)) buckets.set(key, []);
+          buckets.get(key).push(a);
+        }
+        for (const members of buckets.values()) {
+          if (members.length < 2) continue;
+          const bySize = new Map();
+          for (const a of members) {
+            let size = 0;
+            try {
+              size = await getAssetSize(a);
+            } catch (e) {
+              size = 0;
+            }
+            if (!bySize.has(size)) bySize.set(size, []);
+            bySize.get(size).push(a.id);
+          }
+          for (const ids of bySize.values()) {
+            if (ids.length >= 2) duplicates.push(ids);
+          }
         }
       }
 
@@ -268,10 +337,10 @@ class ChunkedAnalyzer {
         assetCount: fp.assetCount,
         latestModificationTime: fp.latestModificationTime,
         createdAt: new Date().getTime(),
-        clusters, // Array<string[]> asset-id clusters of similar photos
-        bursts, // Array<{ids, startTime}>
-        sharpness, // id -> laplacian variance
-        sizes: job.sizes, // id -> bytes (sampled set)
+        clusters,
+        bursts,
+        lowQuality,
+        duplicates, // Array<string[]> — exact-duplicate id groups
       };
       await AsyncStorage.setItem(
         this.cacheKey(albumId, mediaType),
@@ -289,9 +358,8 @@ class ChunkedAnalyzer {
     }
   }
 
-  /** Greedy clustering of assets by aHash hamming distance. */
-  _cluster(assets, hashes) {
-    const entries = assets.filter((a) => hashes[a.id]);
+  _cluster(assets, store) {
+    const entries = assets.filter((a) => store[a.id] && store[a.id].hash);
     const used = new Set();
     const clusters = [];
     for (let i = 0; i < entries.length; i++) {
@@ -301,7 +369,10 @@ class ChunkedAnalyzer {
       for (let j = i + 1; j < entries.length; j++) {
         const b = entries[j];
         if (used.has(b.id)) continue;
-        if (hammingDistance(hashes[a.id], hashes[b.id]) <= SIMILAR_THRESHOLD) {
+        if (
+          hammingDistance(store[a.id].hash, store[b.id].hash) <=
+          SIMILAR_THRESHOLD
+        ) {
           cluster.push(b.id);
           used.add(b.id);
         }

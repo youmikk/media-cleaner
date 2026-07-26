@@ -5,7 +5,9 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
+    "icon": "./assets/icon.png",
     "splash": {
+      "image": "./assets/splash-icon.png",
       "backgroundColor": "#000000",
       "resizeMode": "contain"
     },
@@ -19,17 +21,24 @@
     },
     "android": {
       "package": "com.mediacleaner.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0A84FF"
+      },
       "permissions": [
         "READ_MEDIA_IMAGES",
         "READ_MEDIA_VIDEO",
         "READ_EXTERNAL_STORAGE",
         "WRITE_EXTERNAL_STORAGE",
-        "ACCESS_MEDIA_LOCATION",
-        "android.permission.READ_EXTERNAL_STORAGE",
-        "android.permission.WRITE_EXTERNAL_STORAGE",
-        "android.permission.ACCESS_MEDIA_LOCATION"
+        "ACCESS_MEDIA_LOCATION"
       ]
     },
+    "extra": {
+      "eas": {
+        "projectId": "b743ab9c-d60e-4d6c-8da5-7712618b985b"
+      }
+    },
+    "owner": "youmikk",
     "plugins": [
       [
         "expo-media-library",
@@ -45,11 +54,6 @@
           "color": "#0A84FF"
         }
       ]
-    ],
-    "extra": {
-      "eas": {
-        "projectId": "b743ab9c-d60e-4d6c-8da5-7712618b985b"
-      }
-    }
+    ]
   }
 }

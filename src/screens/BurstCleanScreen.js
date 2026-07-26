@@ -4,27 +4,38 @@ import {
   Text,
   Pressable,
   SectionList,
-  Image,
   StyleSheet,
   ActivityIndicator,
   useWindowDimensions,
   Alert,
 } from 'react-native';
+import { Image } from 'expo-image';
+import * as VideoThumbnails from 'expo-video-thumbnails';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
 import { useApp } from '../context/AppContext';
 import { getAssetsByIds, formatBytes } from '../utils/albumHelpers';
-import { laplacianVariance } from '../utils/sharpness';
-import { permanentDelete } from '../utils/deletionManager';
+import { hammingDistance } from '../utils/imageHashing';
+import analyzer from '../utils/chunkedAnalyzer';
+import { batchDelete } from '../utils/deletionManager';
+
+// Members whose hash differs from the group's reference by more than this
+// are NOT real burst duplicates — drop them from the group.
+const BURST_SIMILAR_THRESHOLD = 16;
 
 /**
- * Burst cleaning: for each burst group, computes sharpness (Laplacian
- * variance) and auto-selects every photo EXCEPT the sharpest for deletion.
- * The user can toggle any photo; Confirm deletes the selected set.
+ * Group-based cleanup screen, two modes:
+ * - 'burst': candidate groups are verified with perceptual hashes
+ *   (dissimilar members dropped), scored for sharpness, everything except
+ *   the sharpest pre-selected.
+ * - 'duplicate': exact-duplicate groups (photos or videos) — first copy is
+ *   kept, the rest pre-selected. Video members get generated thumbnails.
+ * Confirm deletes the selected set with ONE system dialog.
  */
 export default function BurstCleanScreen({ route, navigation }) {
-  const { groups = [] } = route.params || {};
+  const { groups = [], mode = 'burst' } = route.params || {};
+  const isDuplicate = mode === 'duplicate';
   const { colors, t, recycleBinActive } = useSettings();
   const { recordCleaned } = useApp();
   const { width } = useWindowDimensions();
@@ -33,6 +44,7 @@ export default function BurstCleanScreen({ route, navigation }) {
   const [selected, setSelected] = useState({});
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [working, setWorking] = useState(false);
+  const [thumbs, setThumbs] = useState({}); // video id -> generated thumbnail uri
 
   useEffect(() => {
     let alive = true;
@@ -42,30 +54,83 @@ export default function BurstCleanScreen({ route, navigation }) {
       const out = [];
       const autoSel = {};
       let done = 0;
+      let sectionNo = 0;
+
       for (let gi = 0; gi < groups.length; gi++) {
         const assets = await getAssetsByIds(groups[gi].ids);
         if (!alive) return;
-        // Score sharpness per member, chunk-yielding to the UI.
-        let bestId = null;
-        let bestScore = -1;
-        const scored = [];
-        for (const a of assets) {
-          const score = await laplacianVariance(a.localUri || a.uri);
-          scored.push({ ...a, score });
-          if (score > bestScore) {
-            bestScore = score;
-            bestId = a.id;
-          }
-          done += 1;
+
+        let members;
+        let bestId;
+        if (isDuplicate) {
+          // Exact duplicates — already verified, no pixel work needed.
+          members = assets;
+          done += assets.length;
           if (alive) setProgress({ done, total });
-          await new Promise((r) => setTimeout(r, 0));
+          if (members.length < 2) continue;
+          bestId = members[0].id; // keep the first copy
+          // Generate thumbnails for video members.
+          for (const a of members) {
+            if (a.mediaType === 'video') {
+              try {
+                const { uri } = await VideoThumbnails.getThumbnailAsync(
+                  a.localUri || a.uri,
+                  { time: 500 }
+                );
+                if (alive) setThumbs((s) => ({ ...s, [a.id]: uri }));
+              } catch (e) {
+                // no thumbnail — icon shows instead
+              }
+            }
+          }
+        } else {
+          // Burst mode: metrics via the analyzer's global store — instant
+          // for photos the album analysis has already seen.
+          const scored = [];
+          for (const a of assets) {
+            try {
+              const m = await analyzer.metricsFor(a);
+              if (m && m.hash) scored.push({ ...a, score: m.sharpness, hash: m.hash });
+            } catch (e) {
+              // unreadable — skip member
+            }
+            done += 1;
+            if (alive) setProgress({ done, total });
+            await new Promise((r) => setTimeout(r, 0));
+          }
+          if (scored.length < 2) continue;
+
+          // Similarity filter: medoid reference, drop outliers.
+          let medoid = scored[0];
+          let bestSum = Infinity;
+          for (const a of scored) {
+            let sum = 0;
+            for (const b of scored) sum += hammingDistance(a.hash, b.hash);
+            if (sum < bestSum) {
+              bestSum = sum;
+              medoid = a;
+            }
+          }
+          members = scored.filter(
+            (a) => hammingDistance(a.hash, medoid.hash) <= BURST_SIMILAR_THRESHOLD
+          );
+          if (members.length < 2) continue; // not a real burst — drop group
+
+          bestId = members[0].id;
+          let bestScore = -1;
+          for (const a of members) {
+            if (a.score > bestScore) {
+              bestScore = a.score;
+              bestId = a.id;
+            }
+          }
         }
-        if (scored.length > 1) {
-          scored.forEach((a) => {
-            if (a.id !== bestId) autoSel[a.id] = true;
-          });
-          out.push({ title: `#${gi + 1}`, bestId, data: [scored] });
-        }
+
+        members.forEach((a) => {
+          if (a.id !== bestId) autoSel[a.id] = true;
+        });
+        sectionNo += 1;
+        out.push({ title: `#${sectionNo}`, bestId, data: [members] });
       }
       if (!alive) return;
       setSections(out);
@@ -88,23 +153,21 @@ export default function BurstCleanScreen({ route, navigation }) {
         style: 'destructive',
         onPress: async () => {
           setWorking(true);
-          let bytes = 0;
-          let count = 0;
+          const targets = [];
           for (const section of sections) {
             for (const asset of section.data[0]) {
-              if (selected[asset.id]) {
-                try {
-                  bytes += await permanentDelete(asset, {
-                    useRecycleBin: recycleBinActive,
-                  });
-                  count += 1;
-                } catch (e) {
-                  // skip failures
-                }
-              }
+              if (selected[asset.id]) targets.push(asset);
             }
           }
-          if (count > 0) await recordCleaned('photo', count, bytes);
+          try {
+            // ONE system deletion dialog for all selected burst photos.
+            const { count, bytes } = await batchDelete(targets, {
+              useRecycleBin: recycleBinActive,
+            });
+            if (count > 0) await recordCleaned('photo', count, bytes);
+          } catch (e) {
+            // user cancelled the system dialog
+          }
           setWorking(false);
           navigation.goBack();
         },
@@ -132,59 +195,75 @@ export default function BurstCleanScreen({ route, navigation }) {
           <Ionicons name="chevron-back" size={26} color={colors.text} />
         </Pressable>
         <Text style={[styles.title, { color: colors.text }]}>
-          {t('burst_title')}
+          {isDuplicate ? t('dupes_title') : t('burst_title')}
         </Text>
         <View style={{ width: 26 }} />
       </View>
       <Text style={[styles.hint, { color: colors.subtext }]}>
-        {t('burst_keep_hint')}
+        {isDuplicate ? t('dupes_keep_hint') : t('burst_keep_hint')}
       </Text>
 
-      <SectionList
-        sections={sections}
-        keyExtractor={(item, i) => `row_${i}`}
-        contentContainerStyle={{ paddingBottom: 140 }}
-        renderSectionHeader={({ section }) => (
-          <Text style={[styles.groupTitle, { color: colors.subtext }]}>
-            {section.title}
+      {sections.length === 0 ? (
+        <View style={styles.center}>
+          <Ionicons name="checkmark-circle-outline" size={48} color={colors.subtext} />
+          <Text style={[styles.progress, { color: colors.subtext }]}>
+            {t('nothing_found')}
           </Text>
-        )}
-        renderItem={({ item: rowAssets, section }) => (
-          <View style={styles.grid}>
-            {rowAssets.map((asset) => {
-              const isSel = !!selected[asset.id];
-              const isBest = asset.id === section.bestId;
-              return (
-                <Pressable
-                  key={asset.id}
-                  onPress={() =>
-                    setSelected((s) => ({ ...s, [asset.id]: !s[asset.id] }))
-                  }
-                  style={{ width: cell, height: cell }}
-                >
-                  <Image
-                    source={{ uri: asset.uri }}
-                    style={[styles.thumb, isSel && { opacity: 0.5 }]}
-                  />
-                  {isBest && (
-                    <View style={[styles.bestBadge, { backgroundColor: colors.success }]}>
-                      <Ionicons name="star" size={11} color="#fff" />
-                    </View>
-                  )}
-                  <View
-                    style={[
-                      styles.mark,
-                      { backgroundColor: isSel ? colors.danger : 'rgba(0,0,0,0.35)' },
-                    ]}
+        </View>
+      ) : (
+        <SectionList
+          sections={sections}
+          keyExtractor={(item, i) => `row_${i}`}
+          contentContainerStyle={{ paddingBottom: 140 }}
+          renderSectionHeader={({ section }) => (
+            <Text style={[styles.groupTitle, { color: colors.subtext }]}>
+              {section.title}
+            </Text>
+          )}
+          renderItem={({ item: rowAssets, section }) => (
+            <View style={styles.grid}>
+              {rowAssets.map((asset) => {
+                const isSel = !!selected[asset.id];
+                const isBest = asset.id === section.bestId;
+                return (
+                  <Pressable
+                    key={asset.id}
+                    onPress={() =>
+                      setSelected((s) => ({ ...s, [asset.id]: !s[asset.id] }))
+                    }
+                    style={{ width: cell, height: cell }}
                   >
-                    <Ionicons name={isSel ? 'trash' : 'checkmark'} size={12} color="#fff" />
-                  </View>
-                </Pressable>
-              );
-            })}
-          </View>
-        )}
-      />
+                    <Image
+                      source={{ uri: thumbs[asset.id] || asset.uri }}
+                      style={[styles.thumb, isSel && { opacity: 0.5 }]}
+                      cachePolicy="memory-disk"
+                      recyclingKey={asset.id}
+                    />
+                    {asset.mediaType === 'video' && (
+                      <View style={styles.videoBadge}>
+                        <Ionicons name="videocam" size={11} color="#fff" />
+                      </View>
+                    )}
+                    {isBest && (
+                      <View style={[styles.bestBadge, { backgroundColor: colors.success }]}>
+                        <Ionicons name="star" size={11} color="#fff" />
+                      </View>
+                    )}
+                    <View
+                      style={[
+                        styles.mark,
+                        { backgroundColor: isSel ? colors.danger : 'rgba(0,0,0,0.35)' },
+                      ]}
+                    >
+                      <Ionicons name={isSel ? 'trash' : 'checkmark'} size={12} color="#fff" />
+                    </View>
+                  </Pressable>
+                );
+              })}
+            </View>
+          )}
+        />
+      )}
 
       {selectedIds.length > 0 && (
         <Pressable
@@ -215,6 +294,14 @@ const styles = StyleSheet.create({
   groupTitle: { fontSize: 13, fontWeight: '700', marginTop: 14, marginBottom: 6 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   thumb: { width: '100%', height: '100%', borderRadius: 10 },
+  videoBadge: {
+    position: 'absolute',
+    bottom: 5,
+    left: 5,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderRadius: 8,
+    padding: 3,
+  },
   bestBadge: {
     position: 'absolute',
     top: 5,

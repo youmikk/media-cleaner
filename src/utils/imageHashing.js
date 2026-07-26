@@ -30,28 +30,114 @@ export function toGrayscale(decoded) {
   return { gray, width, height };
 }
 
+const ANALYZE_SIZE = 64;
+
 /**
- * 64-bit average hash (aHash) of the image at `uri`.
- * Returns a 16-char hex string.
+ * ONE decode, every metric. Downscales to 64x64 and computes:
+ * - hash: 64-bit DIFFERENCE hash (dHash, 8 rows × 9 cols gradient) —
+ *   robust to brightness shifts, far fewer false "similar" matches than aHash
+ * - sharpness: Laplacian variance — blur detection
+ * - brightness: { mean, underRatio, overRatio, stdDev } — exposure and
+ *   blank/pocket-shot detection
  */
-export async function aHash(uri) {
-  const decoded = await decodePixels(uri, 8, 8);
-  const { gray } = toGrayscale(decoded);
-  const n = Math.min(64, gray.length);
-  let sum = 0;
-  for (let i = 0; i < n; i++) sum += gray[i];
-  const avg = sum / n;
-  let hex = '';
-  for (let nibbleStart = 0; nibbleStart < 64; nibbleStart += 4) {
-    let nibble = 0;
-    for (let b = 0; b < 4; b++) {
-      const idx = nibbleStart + b;
-      const bit = idx < n && gray[idx] >= avg ? 1 : 0;
-      nibble = (nibble << 1) | bit;
+export async function analyzePixels(uri) {
+  const decoded = await decodePixels(uri, ANALYZE_SIZE, ANALYZE_SIZE);
+  const { gray, width, height } = toGrayscale(decoded);
+
+  // --- dHash: 8 rows × 9 columns of block means, compare neighbours ---
+  const ROWS = 8;
+  const COLS = 9;
+  const means = new Float32Array(ROWS * COLS);
+  for (let r = 0; r < ROWS; r++) {
+    const y0 = Math.floor((r * height) / ROWS);
+    const y1 = Math.floor(((r + 1) * height) / ROWS);
+    for (let c = 0; c < COLS; c++) {
+      const x0 = Math.floor((c * width) / COLS);
+      const x1 = Math.floor(((c + 1) * width) / COLS);
+      let sum = 0;
+      let n = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          sum += gray[y * width + x];
+          n++;
+        }
+      }
+      means[r * COLS + c] = n ? sum / n : 0;
     }
+  }
+  const bits = [];
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS - 1; c++) {
+      bits.push(means[r * COLS + c] > means[r * COLS + c + 1] ? 1 : 0);
+    }
+  }
+  let hex = '';
+  for (let n = 0; n < 64; n += 4) {
+    const nibble = (bits[n] << 3) | (bits[n + 1] << 2) | (bits[n + 2] << 1) | bits[n + 3];
     hex += nibble.toString(16);
   }
-  return hex;
+
+  // --- Laplacian variance (sharpness) ---
+  let lapSum = 0;
+  let lapCount = 0;
+  const lap = new Float32Array(width * height);
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const i = y * width + x;
+      const v =
+        gray[i - 1] + gray[i + 1] + gray[i - width] + gray[i + width] - 4 * gray[i];
+      lap[i] = v;
+      lapSum += v;
+      lapCount++;
+    }
+  }
+  const lapMean = lapCount ? lapSum / lapCount : 0;
+  let variance = 0;
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const d = lap[y * width + x] - lapMean;
+      variance += d * d;
+    }
+  }
+  const sharpness = lapCount ? variance / lapCount : 0;
+
+  // --- Brightness / exposure / uniformity ---
+  let sum = 0;
+  let under = 0;
+  let over = 0;
+  const total = width * height;
+  for (let i = 0; i < total; i++) {
+    const v = gray[i];
+    sum += v;
+    if (v < 30) under++;
+    else if (v > 225) over++;
+  }
+  const mean = sum / total;
+  let varSum = 0;
+  for (let i = 0; i < total; i++) {
+    const d = gray[i] - mean;
+    varSum += d * d;
+  }
+  const brightness = {
+    mean,
+    underRatio: under / total,
+    overRatio: over / total,
+    stdDev: Math.sqrt(varSum / total), // near-zero => blank / pocket shot
+  };
+
+  return { hash: hex, sharpness, brightness };
+}
+
+/** 64-bit average hash (compat wrapper around analyzePixels). */
+export async function aHash(uri) {
+  const { hash } = await analyzePixels(uri);
+  return hash;
+}
+
+/** Laplacian-variance sharpness (compat wrapper around analyzePixels). */
+export async function sharpnessOf(uri) {
+  const { sharpness } = await analyzePixels(uri);
+  return sharpness;
 }
 
 const POPCOUNT = (() => {

@@ -1,52 +1,59 @@
 # MediaCleaner 🧹
 
-An open-source **photo & video cleaner** for iOS and Android, built with **React Native + Expo (managed workflow)**. Swipe through your gallery in small groups, soft-delete with a 10-second undo window, detect similar and burst photos on-device, and watch how much space you reclaim — all fully offline. Nothing ever leaves your device.
+**中文** · [English](./README.en.md)
 
-**License:** MIT · **Version:** v1.0.0
+一款开源的 iOS / Android **照片视频清理应用**,基于 **React Native + Expo SDK 54**(managed workflow)。按小组滑动浏览相册、整组批量删除、设备端相似/重复/连拍/低质量检测,实时看到释放了多少空间——完全离线,任何数据都不会离开你的设备。
 
-## Features
+**协议:** MIT · **版本:** v1.0.0
 
-**Cleaning flows.** The Photos tab groups an album into chunks of X (2–20, default 5). Swipe left/right to browse a group, swipe **up** to soft-delete (10 s undo, then platform-appropriate permanent deletion), swipe **down** to move the photo to another album. A floating glass info bar shows the date (tap for full EXIF), a favorite heart and an undo button with a pending count. At the end of every group a confirmation sheet lets you review marks, batch-delete or batch-move. The Videos tab is a vertical, auto-playing feed with floating delete/like buttons and the same group confirmation and undo semantics.
+## 功能特性
 
-**Heavy analysis without jank.** A chunked analyzer (`src/utils/chunkedAnalyzer.js`) runs similarity hashing (8×8 aHash via `expo-image-manipulator` + `jpeg-js`), burst grouping and sharpness scoring in batches of 50 per frame, yielding to the UI through `InteractionManager`. It is a FIFO queue — one album at a time; picking another album pauses the current job and reprioritizes. Progress shows in a cancellable, non-blocking overlay. Results are cached in AsyncStorage under `analysis_${albumId}` together with `assetCount` and the newest `modificationTime`; when those drift the app asks "Album content has changed. Re-analyze?" and lets you keep using stale data. In low-power mode (via `expo-battery`) the batch size drops to 10 and a subtle indicator appears; iOS memory warnings pause analysis entirely for a cool-down.
+**清理流程。** 照片页按全局分组大小(5/10/15/20,设置中调整)把相册切成小组;照片保持原始宽高比,切换为弹簧动画(reanimated + gesture-handler)。左右滑动浏览;**上滑标记删除**——顶部红色发光删除条随手势滑下,超过约 40% 屏高即标记并伴随触感反馈;**下滑移动到其他相册**。标记只是预选:真正的删除在每组结束的确认页一次性批量提交,**系统确认框每组只弹一次**;跳过即整组保留,中途退出不删任何东西。视频页点击标签直接进入竖向自动播放清理流(右上角可切相册),右侧悬浮删除/收藏按钮,同样按组批量确认。首次启动有 3 步手势教程。
 
-**Sessions that survive restarts.** Entering a cleaning screen captures a "before" snapshot (count + sampled size) persisted with a session id. If the app dies mid-clean, the next launch offers **Resume or discard**; resuming reopens the flow at the last group. Finishing computes the "after" snapshot and feeds the storage comparison chart and usage statistics on the Profile tab.
+**按时间清理。** 照片首页的时间选择器支持**按年、按年月**圈定范围("2023年"/"2023年6月"),把大相册拆成一小块一小块地清。
 
-**Smart suggestions.** Largest files (top 10 by size), burst photos (EXIF burst id or shots within 2 s, with Laplacian-variance sharpness scoring — everything except the sharpest of each burst is pre-selected for deletion), and screenshots untouched for 90+ days. All three reuse the chunked/cached analysis system.
+**智能建议。** "我的"页提供六张建议卡:最大文件(进入清理流时每张照片带文件大小角标)、连拍照片(时间戳+感知哈希双重校验,自动保留最清晰一张)、旧截图(90 天未动)、**完全重复**(哈希+分辨率+文件大小三重确认,每组保留一份)、**重复视频**(时长+分辨率+大小匹配,自动生成封面)、**低质量照片**(模糊 / 欠曝 / 过曝 / 全黑全白废片)。
 
-**Recycle bin (Android).** With the recycle bin enabled, deletions are copied to an internal `trash/` folder for 30 days before auto-purge. The bin screen supports select-all, restore and permanent delete; items with fewer than 7 days left show in red. On iOS the system's own "Recently Deleted" is used instead.
+**分析引擎。** 每张照片**一次解码**同时产出 dHash 差值哈希、拉普拉斯清晰度和曝光直方图;指标存入全局照片指标库并**增量落盘**——中断可续、跨相册复用、永不重复分析。分块(50 张/批,低电量自动降到 10)+ 6 路并行,进度浮层可取消;缓存带 `assetCount` + `modificationTime` 指纹,相册变化时询问是否重新分析;iOS 内存警告时自动暂停。
 
-**Settings.** Cleaning order (random / by date), similar-photo detection toggle, recycle bin toggle (Android only), a daily reminder scheduled at a random time between 8 AM and 8 PM (`expo-notifications`), theme (system / light / dark, applied instantly) and language (English / 中文).
+**断点续清。** 进入清理即记录"前"快照;应用被杀后下次启动提示**继续或放弃**,继续会恢复乱序后的完整顺序、当前组、组内位置和已标记列表。结束时计算"后"快照,喂给"我的"页的空间对比图和使用统计。
 
-## Project structure
+**信息展示。** 底部毛玻璃信息栏显示拍摄时间与**反向地理编码的地址**(城市·区·街道,结果缓存);点开可见全中文 EXIF 详情(相机/镜头/光圈/快门/ISO/焦距等)。图片全部走 `expo-image` 原生缓存并预加载下一张。
+
+**工具。** 摄影画像(拍摄时段分布、最活跃星期/月份、日均拍摄等)、压缩工具(挑最大的文件按高/中/低质量批量压缩,图片用 expo-image-manipulator,视频用 react-native-compressor,可选删除原文件)。
+
+**回收站(Android)。** 开启后删除会先复制到应用内 `trash/` 目录保留 30 天,支持全选、恢复、彻底删除,剩余不足 7 天红字提示;iOS 使用系统"最近删除"。
+
+**液态玻璃。** iOS 26+ 上标签栏和信息栏是**原生 Liquid Glass**(`expo-glass-effect`,真实折射与高光);旧系统和 Android 自动回退到 `expo-blur` 毛玻璃,由统一的 `GlassSurface` 组件适配。
+
+**设置。** 全局分组大小、清理顺序(随机/按日期,默认随机)、相似检测开关、回收站开关(仅 Android)、每日提醒(8:00–20:00 随机时间)、主题(跟随系统/浅色/深色,即时生效)、语言(**默认中文**,可切英文)。
+
+## 项目结构
 
 ```
 MediaCleaner/
-├── App.js                     # Providers, permission gate, session-resume prompt
-├── app.json                   # Expo config + permission plugins
+├── App.js                     # Provider、权限门、会话恢复提示、教程
+├── app.json                   # Expo 配置 + 图标/启动页 + 权限插件
+├── assets/                    # icon / adaptive-icon / splash
 ├── src/
-│   ├── navigation/index.js    # Bottom tabs (liquid glass) + three stacks
-│   ├── theme/index.js         # Light/dark palettes
-│   ├── i18n/index.js          # EN/ZH strings + translate()
-│   ├── context/
-│   │   ├── SettingsContext.js # Settings, theme, i18n
-│   │   └── AppContext.js      # Stats, favorites, trash (useReducer)
-│   ├── screens/
-│   │   ├── AlbumSelectScreen.js / VideoAlbumSelectScreen.js (+ AlbumSelectBase)
-│   │   ├── CleaningScreen.js / VideoCleaningScreen.js
-│   │   ├── ProfileScreen.js / RecycleBinScreen.js / BurstCleanScreen.js
-│   ├── components/            # PhotoCard, VideoCard, BottomInfoBar, SimilarModal,
-│   │                          # EXIFModal, AlbumPicker, MoveSheet, GroupConfirmSheet,
-│   │                          # UndoButton, PageIndicator, StorageChart, SuggestionCard,
-│   │                          # AnalysisProgress, CacheStalePrompt, LiquidTabBar
-│   └── utils/                 # chunkedAnalyzer, imageHashing, sharpness, burstDetection,
-│                              # batteryUtils, deletionManager, trashManager, sessionManager,
-│                              # statsManager, notificationScheduler, permissions, albumHelpers
+│   ├── navigation/index.js    # 底部标签(液态玻璃)+ 三个栈
+│   ├── theme/  ├── i18n/      # 深浅色调色板 · 中英文案
+│   ├── context/               # SettingsContext · AppContext
+│   ├── screens/               # AlbumSelect / Cleaning / VideoCleaning /
+│   │                          # Profile / RecycleBin / BurstClean(兼去重) /
+│   │                          # GalleryInsights / Compress
+│   ├── components/            # PhotoCard, VideoCard, BottomInfoBar, GlassSurface,
+│   │                          # LiquidTabBar, GlowingTrashBar, TutorialOverlay,
+│   │                          # AlbumPicker, TimePicker, SimilarModal, EXIFModal,
+│   │                          # MoveSheet, GroupConfirmSheet, StorageChart, 等
+│   └── utils/                 # chunkedAnalyzer, imageHashing(dHash), burstDetection,
+│                              # deletionManager(批量删除), trashManager, sessionManager,
+│                              # statsManager, geocode, notificationScheduler, 等
 ```
 
-## Setup
+## 快速开始
 
-Prerequisites: Node 18+, npm, and the Expo Go app (or Xcode / Android Studio for simulators).
+前置:Node 20+、npm,以及 Expo Go(或 Xcode / Android Studio)。
 
 ```bash
 git clone https://github.com/youmikk/media-cleaner.git
@@ -55,18 +62,18 @@ npm install
 npx expo start
 ```
 
-Scan the QR code with Expo Go, or press `i` / `a` for the iOS simulator / Android emulator. Note that media-library access on simulators is limited — a physical device gives the real experience. For store builds use EAS: `npx eas build --platform all`.
+用 Expo Go 扫码,或按 `i` / `a` 启动模拟器。模拟器的相册权限受限,**真机体验才完整**。发布构建用 EAS:`npx eas build -p android --profile preview`(APK)/ `npx eas build -p ios --profile production`(需 Apple 开发者账号);仓库里还带了一个 GitHub Actions 工作流,可在免费 macOS 运行器上产出未签名 IPA 供自签测试。
 
-> Some capabilities (notification scheduling on Android 13+, full media access) behave best in a development build: `npx expo run:ios` / `npx expo run:android`.
+> 部分能力(Android 13+ 通知、视频压缩、原生液态玻璃)需要安装版应用(EAS / dev build),Expo Go 中会优雅降级。
 
-## Implementation notes & known trade-offs
+## 实现说明与已知取舍
 
-Album sizes are computed from a sampled subset (first 300 assets, extrapolated) to keep snapshots fast on huge libraries, and per-photo hashing is capped at 3 000 assets per album. Similarity uses a 64-bit average hash with a Hamming-distance threshold of 10 — tune `SIMILAR_THRESHOLD` in `chunkedAnalyzer.js` for stricter or looser matching. "Move to album" uses `addAssetsToAlbumAsync`; on iOS this adds the asset to the target album (iOS albums are non-exclusive), and the photo simply leaves the current cleaning scope. Deleting assets always goes through the OS confirmation dialog — that's a platform requirement, not a bug. In the burst cleaner the pre-selected set is what gets deleted on confirm; the starred (sharpest) photo is kept.
+相册大小采用抽样估算(前 300 项外推);单相册哈希上限 3000 张。相似判定用 64 位 dHash、汉明距离阈值 10(`chunkedAnalyzer.js` 中的 `SIMILAR_THRESHOLD` 可调);完全重复要求哈希、分辨率、文件大小三者全等。"移动到相册"在 iOS 上是加入目标相册(iOS 相册非互斥),照片只是离开当前清理范围。删除始终经过系统确认弹窗——这是平台强制要求;本应用已把弹窗压缩到**每组一次**。连拍清理中预选集是删除对象,星标(最清晰)那张保留。
 
-## Contributing
+## 参与贡献
 
-Issues and PRs are welcome. Fork, create a feature branch (`git checkout -b feat/my-feature`), keep the code style (functional components, hooks, no class components outside utils), test on both platforms where possible, and open a PR with a clear description. Good first areas: pHash/dHash upgrades, video thumbnails in grids, iCloud-offloaded asset handling, more languages in `src/i18n`.
+欢迎 Issue 和 PR。Fork 后建特性分支(`git checkout -b feat/xxx`),保持代码风格(函数组件 + hooks),尽量双平台验证,PR 描述清楚改动。适合上手的方向:pHash/DCT 哈希、更多语言、iCloud 卸载照片处理、单元测试。
 
-## License
+## 协议
 
-[MIT](./LICENSE) — do whatever you like, attribution appreciated.
+[MIT](./LICENSE) —— 随意使用,注明出处更佳。

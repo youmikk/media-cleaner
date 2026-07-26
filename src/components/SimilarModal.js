@@ -5,10 +5,10 @@ import {
   Text,
   Pressable,
   FlatList,
-  Image,
   StyleSheet,
   useWindowDimensions,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
 import { getAssetsByIds } from '../utils/albumHelpers';
@@ -33,7 +33,7 @@ export default function SimilarModal({ visible, clusterIds, onClose, onDeleteSel
   const selectedIds = Object.keys(selected).filter((k) => selected[k]);
 
   return (
-    <Modal visible={visible} transparent animationType="slide">
+    <Modal visible={visible} transparent animationType="fade">
       <View style={styles.backdrop}>
         <View style={[styles.sheet, { backgroundColor: colors.card }]}>
           <View style={styles.header}>

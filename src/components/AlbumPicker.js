@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Modal,
   View,
@@ -6,17 +6,33 @@ import {
   Pressable,
   FlatList,
   StyleSheet,
+  Animated,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
 
 /**
  * Button + modal list to pick a source album.
+ * The backdrop FADES in while the sheet springs up separately — avoids the
+ * ugly "black sheet sliding up" artifact of animationType="slide".
  */
 export default function AlbumPicker({ albums, selected, onSelect }) {
   const { colors, t } = useSettings();
   const [open, setOpen] = useState(false);
+  const slide = useRef(new Animated.Value(80)).current;
   const current = albums.find((a) => a.id === selected);
+
+  useEffect(() => {
+    if (open) {
+      slide.setValue(80);
+      Animated.spring(slide, {
+        toValue: 0,
+        useNativeDriver: true,
+        friction: 10,
+        tension: 60,
+      }).start();
+    }
+  }, [open, slide]);
 
   return (
     <>
@@ -31,50 +47,58 @@ export default function AlbumPicker({ albums, selected, onSelect }) {
         <Ionicons name="chevron-down" size={16} color={colors.subtext} />
       </Pressable>
 
-      <Modal visible={open} transparent animationType="slide">
+      <Modal
+        visible={open}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setOpen(false)}
+      >
         <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>
-          <Pressable
-            style={[styles.sheet, { backgroundColor: colors.card }]}
-            onPress={() => {}}
-          >
-            <Text style={[styles.title, { color: colors.text }]}>
-              {t('choose_album')}
-            </Text>
-            <FlatList
-              data={albums}
-              keyExtractor={(item) => item.id}
-              renderItem={({ item }) => (
-                <Pressable
-                  style={styles.row}
-                  onPress={() => {
-                    setOpen(false);
-                    onSelect(item);
-                  }}
-                >
-                  <Text
-                    style={[
-                      styles.rowText,
-                      {
-                        color: item.id === selected ? colors.accent : colors.text,
-                        fontWeight: item.id === selected ? '700' : '400',
-                      },
-                    ]}
-                    numberOfLines={1}
+          <Animated.View style={{ transform: [{ translateY: slide }] }}>
+            <Pressable
+              style={[styles.sheet, { backgroundColor: colors.card }]}
+              onPress={() => {}}
+            >
+              <Text style={[styles.title, { color: colors.text }]}>
+                {t('choose_album')}
+              </Text>
+              <FlatList
+                data={albums}
+                keyExtractor={(item) => item.id}
+                style={{ maxHeight: 420 }}
+                renderItem={({ item }) => (
+                  <Pressable
+                    style={styles.row}
+                    onPress={() => {
+                      setOpen(false);
+                      onSelect(item);
+                    }}
                   >
-                    {item.title}
-                  </Text>
-                  {item.assetCount !== undefined && (
-                    <Text style={[styles.count, { color: colors.subtext }]}>
-                      {item.assetCount}
+                    <Text
+                      style={[
+                        styles.rowText,
+                        {
+                          color: item.id === selected ? colors.accent : colors.text,
+                          fontWeight: item.id === selected ? '700' : '400',
+                        },
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {item.title}
                     </Text>
-                  )}
-                  {item.id === selected && (
-                    <Ionicons name="checkmark" size={18} color={colors.accent} />
-                  )}
-                </Pressable>
-              )}
-            />
-          </Pressable>
+                    {item.assetCount !== undefined && (
+                      <Text style={[styles.count, { color: colors.subtext }]}>
+                        {item.assetCount}
+                      </Text>
+                    )}
+                    {item.id === selected && (
+                      <Ionicons name="checkmark" size={18} color={colors.accent} />
+                    )}
+                  </Pressable>
+                )}
+              />
+            </Pressable>
+          </Animated.View>
         </Pressable>
       </Modal>
     </>
@@ -95,14 +119,14 @@ const styles = StyleSheet.create({
   buttonText: { fontSize: 14, fontWeight: '600', flexShrink: 1 },
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: 'rgba(0,0,0,0.35)',
     justifyContent: 'flex-end',
   },
   sheet: {
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     padding: 20,
-    maxHeight: '70%',
+    paddingBottom: 34,
   },
   title: { fontSize: 17, fontWeight: '700', marginBottom: 12 },
   row: {

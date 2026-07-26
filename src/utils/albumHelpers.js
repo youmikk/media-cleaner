@@ -1,5 +1,6 @@
 import * as MediaLibrary from 'expo-media-library';
-import * as FileSystem from 'expo-file-system';
+// SDK 54: use the stable legacy file-system API (getInfoAsync etc.).
+import * as FileSystem from 'expo-file-system/legacy';
 
 export const ALL_ALBUM_ID = 'all';
 const PAGE_SIZE = 200;
@@ -21,6 +22,26 @@ export async function getAlbums(mediaType, allLabel) {
     result.push({ id: album.id, title: album.title, assetCount: album.assetCount });
   }
   return result;
+}
+
+/**
+ * Fetch ONE page of assets (for progressive loading — first page shows
+ * immediately, the rest streams in the background).
+ */
+export async function getAssetsPage(albumId, mediaType, after) {
+  const options = {
+    first: PAGE_SIZE,
+    mediaType,
+    sortBy: [[MediaLibrary.SortBy.creationTime, false]],
+  };
+  if (after) options.after = after;
+  if (albumId && albumId !== ALL_ALBUM_ID) options.album = albumId;
+  const page = await MediaLibrary.getAssetsAsync(options);
+  return {
+    assets: page.assets,
+    hasNext: page.hasNextPage && page.assets.length > 0,
+    endCursor: page.endCursor,
+  };
 }
 
 /**

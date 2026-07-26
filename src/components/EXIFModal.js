@@ -12,11 +12,11 @@ import { Ionicons } from '@expo/vector-icons';
 import * as MediaLibrary from 'expo-media-library';
 import { useSettings } from '../context/SettingsContext';
 import { formatBytes, formatDate, getAssetSize } from '../utils/albumHelpers';
+import { reverseGeocode } from '../utils/geocode';
 
 /**
- * Modal with full EXIF / metadata details for an asset.
- * Uses MediaLibrary.getAssetInfoAsync (exposes EXIF on iOS); shows basic
- * asset metadata everywhere.
+ * Modal with full, LOCALIZED EXIF / metadata details for an asset.
+ * GPS coordinates are resolved into a human-readable address.
  */
 export default function EXIFModal({ visible, asset, onClose }) {
   const { colors, t, language } = useSettings();
@@ -29,52 +29,67 @@ export default function EXIFModal({ visible, asset, onClose }) {
       const out = [];
       try {
         const info = await MediaLibrary.getAssetInfoAsync(asset.id);
-        out.push(['File', info.filename || '—']);
-        out.push(['Created', formatDate(info.creationTime, language)]);
-        out.push(['Modified', formatDate(info.modificationTime, language)]);
-        out.push(['Dimensions', `${info.width} × ${info.height}`]);
-        if (info.duration) out.push(['Duration', `${info.duration.toFixed(1)}s`]);
+        out.push([t('exif_file'), info.filename || '—']);
+        out.push([t('exif_created'), formatDate(info.creationTime, language)]);
+        out.push([t('exif_modified'), formatDate(info.modificationTime, language)]);
+        out.push([t('exif_dimensions'), `${info.width} × ${info.height}`]);
+        if (info.duration)
+          out.push([t('exif_duration'), `${info.duration.toFixed(1)}s`]);
         const size = await getAssetSize(info);
-        if (size) out.push(['Size', formatBytes(size)]);
+        if (size) out.push([t('exif_size'), formatBytes(size)]);
         if (info.location) {
+          const address = await reverseGeocode(
+            info.location.latitude,
+            info.location.longitude,
+            language
+          );
           out.push([
-            'Location',
-            `${info.location.latitude.toFixed(5)}, ${info.location.longitude.toFixed(5)}`,
+            t('exif_location'),
+            address ||
+              `${info.location.latitude.toFixed(5)}, ${info.location.longitude.toFixed(5)}`,
           ]);
         }
         if (info.exif) {
           const exif = info.exif;
-          const pick = (obj, keys) =>
-            keys.forEach((k) => {
-              const v = k.split('.').reduce((o, p) => (o ? o[p] : undefined), obj);
-              if (v !== undefined && v !== null) out.push([k.split('.').pop(), String(v)]);
-            });
-          pick(exif, [
-            '{Exif}.LensModel',
-            '{Exif}.FNumber',
-            '{Exif}.ExposureTime',
-            '{Exif}.ISOSpeedRatings',
-            '{Exif}.FocalLength',
-            '{TIFF}.Make',
-            '{TIFF}.Model',
-            'LensModel',
-            'FNumber',
-            'ExposureTime',
-            'ISOSpeedRatings',
-            'FocalLength',
-            'Make',
-            'Model',
-          ]);
+          const get = (keys) => {
+            for (const k of keys) {
+              const v = k
+                .split('.')
+                .reduce((o, p) => (o ? o[p] : undefined), exif);
+              if (v !== undefined && v !== null && v !== '') return v;
+            }
+            return null;
+          };
+          const make = get(['{TIFF}.Make', 'Make']);
+          const model = get(['{TIFF}.Model', 'Model']);
+          if (make || model)
+            out.push([t('exif_camera'), [make, model].filter(Boolean).join(' ')]);
+          const lens = get(['{Exif}.LensModel', 'LensModel']);
+          if (lens) out.push([t('exif_lens'), String(lens)]);
+          const fnum = get(['{Exif}.FNumber', 'FNumber']);
+          if (fnum) out.push([t('exif_aperture'), `f/${fnum}`]);
+          const exposure = get(['{Exif}.ExposureTime', 'ExposureTime']);
+          if (exposure) {
+            const ex = Number(exposure);
+            out.push([
+              t('exif_shutter'),
+              ex >= 1 ? `${ex}s` : `1/${Math.round(1 / ex)}s`,
+            ]);
+          }
+          const iso = get(['{Exif}.ISOSpeedRatings', 'ISOSpeedRatings']);
+          if (iso) out.push([t('exif_iso'), String(Array.isArray(iso) ? iso[0] : iso)]);
+          const focal = get(['{Exif}.FocalLength', 'FocalLength']);
+          if (focal) out.push([t('exif_focal'), `${focal}mm`]);
         }
       } catch (e) {
         // fall through with whatever we collected
       }
       setRows(out);
     })();
-  }, [visible, asset, language]);
+  }, [visible, asset, language, t]);
 
   return (
-    <Modal visible={visible} transparent animationType="slide">
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <Pressable style={styles.backdrop} onPress={onClose}>
         <Pressable style={[styles.sheet, { backgroundColor: colors.card }]} onPress={() => {}}>
           <View style={styles.header}>
@@ -115,7 +130,7 @@ export default function EXIFModal({ visible, asset, onClose }) {
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: 'rgba(0,0,0,0.35)',
     justifyContent: 'flex-end',
   },
   sheet: {

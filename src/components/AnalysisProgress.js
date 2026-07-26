@@ -1,8 +1,8 @@
 import React from 'react';
 import { View, Text, Pressable, StyleSheet } from 'react-native';
-import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
+import GlassSurface from './GlassSurface';
 
 /**
  * Non-blocking analysis overlay pinned above the tab bar.
@@ -22,14 +22,8 @@ export default function AnalysisProgress({ state, mediaType = 'photo', onCancel 
 
   return (
     <View style={styles.wrap} pointerEvents="box-none">
-      <BlurView
-        intensity={60}
-        tint={colors.glassTint}
-        style={[styles.card, { borderColor: colors.border }]}
-      >
-        <View
-          style={[StyleSheet.absoluteFill, { backgroundColor: colors.glassOverlay }]}
-        />
+      <GlassSurface style={[styles.card, { borderColor: colors.border }]}>
+        <View style={styles.inner}>
         <View style={styles.row}>
           <Text style={[styles.text, { color: colors.text }]} numberOfLines={1}>
             {label}
@@ -46,7 +40,8 @@ export default function AnalysisProgress({ state, mediaType = 'photo', onCancel 
             ]}
           />
         </View>
-      </BlurView>
+        </View>
+      </GlassSurface>
     </View>
   );
 }
@@ -62,8 +57,8 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
-    padding: 12,
   },
+  inner: { padding: 12 },
   row: { flexDirection: 'row', alignItems: 'center' },
   text: { flex: 1, fontSize: 13, fontWeight: '600' },
   cancel: { marginLeft: 8 },

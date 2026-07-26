@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, Alert } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   NavigationContainer,
   DefaultTheme,
@@ -12,12 +14,13 @@ import { Ionicons } from '@expo/vector-icons';
 import { SettingsProvider, useSettings } from './src/context/SettingsContext';
 import { AppProvider } from './src/context/AppContext';
 import RootNavigator from './src/navigation';
+import TutorialOverlay from './src/components/TutorialOverlay';
 import { ensureMediaPermission } from './src/utils/permissions';
 import * as trashManager from './src/utils/trashManager';
 import * as sessionManager from './src/utils/sessionManager';
-import { recoverPending } from './src/utils/deletionManager';
 
 const navigationRef = createNavigationContainerRef();
+const TUTORIAL_KEY = '@mediacleaner/tutorial_seen';
 
 /**
  * Blocks the app behind the media-library permission with a retry prompt.
@@ -59,13 +62,23 @@ function PermissionGate({ children }) {
 function AppInner() {
   const { colors, isDark, t, loaded } = useSettings();
   const resumeChecked = useRef(false);
+  const [showTutorial, setShowTutorial] = useState(false);
 
   // App init: purge expired recycle-bin items, drop stale soft-delete
-  // bookkeeping from a killed session.
+  // bookkeeping, and decide whether the first-launch tutorial should show.
   useEffect(() => {
     trashManager.purgeExpired().catch(() => {});
-    recoverPending();
+    AsyncStorage.getItem(TUTORIAL_KEY)
+      .then((seen) => {
+        if (!seen) setShowTutorial(true);
+      })
+      .catch(() => {});
   }, []);
+
+  const dismissTutorial = () => {
+    setShowTutorial(false);
+    AsyncStorage.setItem(TUTORIAL_KEY, '1').catch(() => {});
+  };
 
   // Unfinished-session prompt: resume restores the cleaning flow at the last
   // group; discard clears the snapshot.
@@ -84,22 +97,18 @@ function AppInner() {
         text: t('resume'),
         onPress: () => {
           if (!navigationRef.isReady()) return;
-          const params = {
-            albumId: session.albumId,
-            albumTitle: session.albumTitle,
-            groupSize: session.groupSize,
-            assetIds: session.assetIds || null,
-            resumeGroupIndex: session.groupIndex || 0,
-          };
           if (session.type === 'video') {
-            navigationRef.navigate('VideosTab', {
-              screen: 'VideoCleaning',
-              params,
-            });
+            navigationRef.navigate('VideosTab');
           } else {
             navigationRef.navigate('PhotosTab', {
               screen: 'Cleaning',
-              params,
+              params: {
+                albumId: session.albumId,
+                albumTitle: session.albumTitle,
+                assetIds: session.assetIds || null,
+                timeRange: session.timeRange || null,
+                resume: true, // restore exact order, group, position & marks
+              },
             });
           }
         },
@@ -129,6 +138,7 @@ function AppInner() {
       >
         <StatusBar style={isDark ? 'light' : 'dark'} />
         <RootNavigator />
+        <TutorialOverlay visible={showTutorial} onDone={dismissTutorial} />
       </NavigationContainer>
     </PermissionGate>
   );
@@ -136,13 +146,15 @@ function AppInner() {
 
 export default function App() {
   return (
-    <SafeAreaProvider>
-      <SettingsProvider>
-        <AppProvider>
-          <AppInner />
-        </AppProvider>
-      </SettingsProvider>
-    </SafeAreaProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <SettingsProvider>
+          <AppProvider>
+            <AppInner />
+          </AppProvider>
+        </SettingsProvider>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 

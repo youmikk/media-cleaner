@@ -1,31 +1,42 @@
 import React from 'react';
-import { View, Image, StyleSheet, Text } from 'react-native';
-import { Video, ResizeMode } from 'expo-av';
+import { View, StyleSheet, Text } from 'react-native';
+import { Image } from 'expo-image';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
 
 /**
- * Full-bleed media display for the cleaning flow. Renders an inline video
- * player when the asset is a video (e.g. in the "Largest Files" flow).
+ * Full-bleed media display for the cleaning flow. The photo keeps its
+ * ORIGINAL aspect ratio (like iOS Photos), centered on a theme-adaptive
+ * background. Renders an inline video player (expo-video) when the asset
+ * is a video (e.g. in the "Largest Files" flow).
  */
-export default function PhotoCard({ asset, isFavorite, marked }) {
+export default function PhotoCard({ asset, isFavorite, marked, sizeLabel }) {
   const { colors, t } = useSettings();
+  const isVideo = asset ? asset.mediaType === 'video' : false;
+  const player = useVideoPlayer(isVideo ? asset.uri : null);
+
   if (!asset) return null;
-  const isVideo = asset.mediaType === 'video';
+  const aspectRatio =
+    asset.width && asset.height ? asset.width / asset.height : 1;
+
   return (
-    <View style={[styles.card, { backgroundColor: colors.card }]}>
+    <View style={styles.card}>
       {isVideo ? (
-        <Video
-          source={{ uri: asset.uri }}
-          style={styles.image}
-          resizeMode={ResizeMode.CONTAIN}
-          useNativeControls
+        <VideoView
+          player={player}
+          style={styles.fill}
+          contentFit="contain"
+          nativeControls
         />
       ) : (
         <Image
           source={{ uri: asset.uri }}
-          style={styles.image}
-          resizeMode="contain"
+          style={[styles.image, { aspectRatio }]}
+          contentFit="contain"
+          cachePolicy="memory-disk"
+          recyclingKey={asset.id}
+          transition={80}
         />
       )}
       {isFavorite && (
@@ -39,6 +50,12 @@ export default function PhotoCard({ asset, isFavorite, marked }) {
           <Text style={styles.markText}>{t('marked_for_deletion')}</Text>
         </View>
       )}
+      {!!sizeLabel && (
+        <View style={styles.sizeBadge}>
+          <Ionicons name="server-outline" size={12} color="#fff" />
+          <Text style={styles.sizeText}>{sizeLabel}</Text>
+        </View>
+      )}
     </View>
   );
 }
@@ -46,10 +63,15 @@ export default function PhotoCard({ asset, isFavorite, marked }) {
 const styles = StyleSheet.create({
   card: {
     flex: 1,
-    borderRadius: 24,
-    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  image: { flex: 1 },
+  fill: { ...StyleSheet.absoluteFillObject },
+  image: {
+    width: '100%',
+    maxHeight: '100%',
+    borderRadius: 14,
+  },
   favBadge: {
     position: 'absolute',
     top: 14,
@@ -70,4 +92,17 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   markText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  sizeBadge: {
+    position: 'absolute',
+    bottom: 14,
+    left: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  sizeText: { color: '#fff', fontSize: 12, fontWeight: '700' },
 });

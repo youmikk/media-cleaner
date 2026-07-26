@@ -28,7 +28,7 @@ export default function MoveSheet({ visible, excludeAlbumId, onClose, onSelect }
   }, [visible, excludeAlbumId]);
 
   return (
-    <Modal visible={visible} transparent animationType="slide">
+    <Modal visible={visible} transparent animationType="fade">
       <Pressable style={styles.backdrop} onPress={onClose}>
         <Pressable
           style={[styles.sheet, { backgroundColor: colors.card }]}

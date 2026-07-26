@@ -1,17 +1,20 @@
 import React from 'react';
-import { View, Text, Pressable, StyleSheet, Platform } from 'react-native';
-import { BlurView } from 'expo-blur';
+import { View, Text, Pressable, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
+import GlassSurface from './GlassSurface';
 import { formatDate } from '../utils/albumHelpers';
 
 /**
  * Floating info bar shown on cleaning screens (replaces the tab bar).
- * Left: favorite · Center: date (opens EXIF modal) · Right: undo.
+ * Liquid Glass on iOS 26, blur fallback elsewhere.
+ * Left: favorite · Center: date (+optional subtitle, opens EXIF) · Right: undo.
  */
 export default function BottomInfoBar({
   asset,
+  subtitle,
+  address,
   isFavorite,
   onToggleFavorite,
   onPressDate,
@@ -26,53 +29,67 @@ export default function BottomInfoBar({
       style={[styles.wrap, { bottom: Math.max(insets.bottom, 12) }]}
       pointerEvents="box-none"
     >
-      <BlurView
-        intensity={Platform.OS === 'ios' ? 60 : 100}
-        tint={colors.glassTint}
+      <GlassSurface
         style={[styles.bar, { borderColor: colors.border }]}
+        overlayColor={colors.barOverlay}
       >
-        <View
-          style={[StyleSheet.absoluteFill, { backgroundColor: colors.barOverlay }]}
-        />
-        <Pressable
-          onPress={onToggleFavorite}
-          hitSlop={10}
-          style={styles.side}
-          accessibilityLabel={t('favorite')}
-        >
-          <Ionicons
-            name={isFavorite ? 'heart' : 'heart-outline'}
-            size={24}
-            color={isFavorite ? colors.heart : colors.subtext}
-          />
-        </Pressable>
+        <View style={styles.row}>
+          <Pressable
+            onPress={onToggleFavorite}
+            hitSlop={10}
+            style={styles.side}
+            accessibilityLabel={t('favorite')}
+          >
+            <Ionicons
+              name={isFavorite ? 'heart' : 'heart-outline'}
+              size={24}
+              color={isFavorite ? colors.heart : colors.subtext}
+            />
+          </Pressable>
 
-        <Pressable onPress={onPressDate} style={styles.center} hitSlop={6}>
-          <Text style={[styles.date, { color: colors.text }]} numberOfLines={1}>
-            {asset ? formatDate(asset.creationTime, language) : '—'}
-          </Text>
-          <Ionicons
-            name="information-circle-outline"
-            size={15}
-            color={colors.subtext}
-          />
-        </Pressable>
-
-        <Pressable
-          onPress={onUndo}
-          disabled={undoCount === 0}
-          hitSlop={10}
-          style={[styles.side, { opacity: undoCount === 0 ? 0.35 : 1 }]}
-          accessibilityLabel={t('undo')}
-        >
-          <Ionicons name="arrow-undo" size={22} color={colors.accent} />
-          {undoCount > 0 && (
-            <View style={[styles.badge, { backgroundColor: colors.danger }]}>
-              <Text style={styles.badgeText}>{undoCount}</Text>
+          <Pressable onPress={onPressDate} style={styles.center} hitSlop={6}>
+            <View style={styles.centerText}>
+              <View style={styles.dateRow}>
+                <Text style={[styles.date, { color: colors.text }]} numberOfLines={1}>
+                  {asset ? formatDate(asset.creationTime, language) : '—'}
+                  {subtitle ? ` · ${subtitle}` : ''}
+                </Text>
+                <Ionicons
+                  name="information-circle-outline"
+                  size={15}
+                  color={colors.subtext}
+                />
+              </View>
+              {!!address && (
+                <View style={styles.addressRow}>
+                  <Ionicons name="location-outline" size={11} color={colors.subtext} />
+                  <Text
+                    style={[styles.address, { color: colors.subtext }]}
+                    numberOfLines={1}
+                  >
+                    {address}
+                  </Text>
+                </View>
+              )}
             </View>
-          )}
-        </Pressable>
-      </BlurView>
+          </Pressable>
+
+          <Pressable
+            onPress={onUndo}
+            disabled={undoCount === 0}
+            hitSlop={10}
+            style={[styles.side, { opacity: undoCount === 0 ? 0.35 : 1 }]}
+            accessibilityLabel={t('undo')}
+          >
+            <Ionicons name="arrow-undo" size={22} color={colors.accent} />
+            {undoCount > 0 && (
+              <View style={[styles.badge, { backgroundColor: colors.danger }]}>
+                <Text style={styles.badgeText}>{undoCount}</Text>
+              </View>
+            )}
+          </Pressable>
+        </View>
+      </GlassSurface>
     </View>
   );
 }
@@ -80,24 +97,34 @@ export default function BottomInfoBar({
 const styles = StyleSheet.create({
   wrap: { position: 'absolute', left: 16, right: 16, alignItems: 'center' },
   bar: {
-    flexDirection: 'row',
-    alignItems: 'center',
     borderRadius: 28,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
+    alignSelf: 'stretch',
+  },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingHorizontal: 18,
     paddingVertical: 12,
-    alignSelf: 'stretch',
   },
   side: { width: 44, alignItems: 'center', justifyContent: 'center' },
   center: {
     flex: 1,
-    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 5,
+  },
+  centerText: { alignItems: 'center' },
+  dateRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  addressRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    marginTop: 2,
+    maxWidth: 220,
   },
   date: { fontSize: 14, fontWeight: '600' },
+  address: { fontSize: 11 },
   badge: {
     position: 'absolute',
     top: -4,
