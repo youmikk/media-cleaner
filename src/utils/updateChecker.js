@@ -4,6 +4,7 @@ export const APP_VERSION = '1.0.0';
 const RELEASES_API =
   'https://api.github.com/repos/youmikk/media-cleaner/releases/latest';
 const LAST_CHECK_KEY = '@mediacleaner/last_update_check';
+const UPDATE_ID_KEY = '@mediacleaner/last_update_id';
 const CHECK_INTERVAL = 24 * 60 * 60 * 1000; // silent auto-check once a day
 
 // expo-updates is a native module — absent in Expo Go; guard the import.
@@ -74,6 +75,29 @@ export async function reloadWithUpdate() {
   try {
     await Updates.reloadAsync();
     return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * True EXACTLY ONCE after a new JS bundle became active, then false again.
+ *
+ * Keyed on the running bundle's updateId rather than a flag set before
+ * reloadAsync, because an OTA can also land without us doing anything:
+ * expo-updates downloads at launch and activates on the NEXT start, with no
+ * code of ours in between. Comparing ids catches both routes.
+ *
+ * The very first run only records the id — a fresh install is not an update.
+ */
+export async function consumeUpdateApplied() {
+  try {
+    // null while the embedded bundle is running (no OTA active, Expo Go).
+    const current = String((Updates && Updates.updateId) || 'embedded');
+    const seen = await AsyncStorage.getItem(UPDATE_ID_KEY);
+    if (seen !== current) await AsyncStorage.setItem(UPDATE_ID_KEY, current);
+    if (!seen) return false;
+    return seen !== current;
   } catch (e) {
     return false;
   }

@@ -25,11 +25,15 @@ import { subscribeMemoryWarning } from './src/utils/batteryUtils';
 import { SettingsProvider, useSettings } from './src/context/SettingsContext';
 import { AppProvider } from './src/context/AppContext';
 import RootNavigator from './src/navigation';
-import TutorialOverlay from './src/components/TutorialOverlay';
-import { ensureMediaPermission } from './src/utils/permissions';
+import OnboardingScreen from './src/screens/OnboardingScreen';
+import { ensureMediaPermission, getMediaPermission } from './src/utils/permissions';
 import * as trashManager from './src/utils/trashManager';
 import * as sessionManager from './src/utils/sessionManager';
-import { autoCheckDaily, APP_VERSION } from './src/utils/updateChecker';
+import {
+  autoCheckDaily,
+  consumeUpdateApplied,
+  APP_VERSION,
+} from './src/utils/updateChecker';
 import { installLogger } from './src/utils/logger';
 
 // Capture crashes and console errors from the very first frame.
@@ -56,6 +60,12 @@ function PermissionGate({ children }) {
   }, []);
 
   if (status === 'granted' || status === 'limited') return children;
+  // While the check is still in flight, show a blank background — rendering
+  // the denial copy here flashes "permission needed" at every launch and
+  // right after onboarding hands over.
+  if (status === 'pending') {
+    return <View style={[styles.gate, { backgroundColor: colors.background }]} />;
+  }
 
   return (
     <View style={[styles.gate, { backgroundColor: colors.background }]}>
@@ -79,10 +89,13 @@ function PermissionGate({ children }) {
 function AppInner() {
   const { colors, isDark, t, loaded } = useSettings();
   const resumeChecked = useRef(false);
-  const [showTutorial, setShowTutorial] = useState(false);
+  // null = still reading the flag; true = show the onboarding page.
+  const [onboarding, setOnboarding] = useState(null);
+  // Post-update permission repair page (permissions-only onboarding).
+  const [permRepair, setPermRepair] = useState(false);
 
   // App init: purge expired recycle-bin items, drop stale soft-delete
-  // bookkeeping, and decide whether the first-launch tutorial should show.
+  // bookkeeping, and decide whether the first-launch onboarding should show.
   // Low-memory pressure valve: drop expo-image's decoded-bitmap cache the
   // moment the OS warns, instead of letting it OOM-kill the app while the
   // user swipes through a huge library.
@@ -96,15 +109,19 @@ function AppInner() {
   useEffect(() => {
     trashManager.purgeExpired().catch(() => {});
     AsyncStorage.getItem(TUTORIAL_KEY)
-      .then((seen) => {
-        if (!seen) setShowTutorial(true);
-      })
-      .catch(() => {});
-    // FIRST LAUNCH (Android, native build): ask for "All files access" up
-    // front — categorizing moves photos in place and needs it. Delayed so
-    // it never fights the media-permission dialog; asked only once.
+      .then((seen) => setOnboarding(!seen))
+      .catch(() => setOnboarding(false));
+  }, []);
+
+  // Everything that can pop a dialog waits until onboarding is out of the
+  // way — an Alert over the permission/gesture page would be unusable.
+  useEffect(() => {
+    if (onboarding !== false) return undefined;
+    let timer = null;
+    // Android, native build: users who upgraded past the onboarding page
+    // never saw the "All files access" step — ask them once, here.
     if (Platform.OS === 'android' && PhotoMove.isAvailable()) {
-      setTimeout(async () => {
+      timer = setTimeout(async () => {
         try {
           if (PhotoMove.hasAllFilesPermission()) return;
           const prompted = await AsyncStorage.getItem(ALLFILES_PROMPTED_KEY);
@@ -129,13 +146,49 @@ function AppInner() {
         { text: t('update_download'), onPress: () => Linking.openURL(info.url) },
       ]);
     });
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [onboarding]);
 
-  const dismissTutorial = () => {
-    setShowTutorial(false);
-    AsyncStorage.setItem(TUTORIAL_KEY, '1').catch(() => {});
+  // The onboarding page already asked for "All files access", so mark it as
+  // prompted — the legacy Alert above must never double-ask.
+  const finishOnboarding = () => {
+    setOnboarding(false);
+    AsyncStorage.multiSet([
+      [TUTORIAL_KEY, '1'],
+      [ALLFILES_PROMPTED_KEY, '1'],
+    ]).catch(() => {});
   };
+
+  // An OTA update can land at any time, including while the app sits in the
+  // background — and a user may well have revoked access in the meantime.
+  // The first launch on a new bundle therefore audits permissions once and,
+  // if anything is missing, reopens the onboarding page in permissions-only
+  // mode. consumeUpdateApplied() is true exactly once per update, so this
+  // never turns into a recurring nag.
+  useEffect(() => {
+    if (onboarding !== false) return;
+    let alive = true;
+    (async () => {
+      try {
+        if (!(await consumeUpdateApplied())) return;
+        const media = await getMediaPermission();
+        const filesOk =
+          Platform.OS !== 'android' ||
+          !PhotoMove.isAvailable() ||
+          PhotoMove.hasAllFilesPermission();
+        const mediaOk = media === 'granted' || media === 'limited';
+        if (alive && (!mediaOk || !filesOk)) setPermRepair(true);
+      } catch (e) {
+        // never block startup on the audit
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [onboarding]);
 
   // Unfinished-session prompt: resume restores the cleaning flow at the last
   // group; discard clears the snapshot.
@@ -187,7 +240,29 @@ function AppInner() {
     },
   };
 
-  if (!loaded) return null;
+  if (!loaded || onboarding === null) return null;
+
+  // Onboarding replaces the whole app shell: permission first, gestures
+  // after — no navigator, no background dialogs behind it.
+  if (onboarding) {
+    return (
+      <>
+        <StatusBar style={isDark ? 'light' : 'dark'} />
+        <OnboardingScreen onDone={finishOnboarding} />
+      </>
+    );
+  }
+
+  // Same page, permissions step only — shown once after an OTA update if
+  // access has gone missing.
+  if (permRepair) {
+    return (
+      <>
+        <StatusBar style={isDark ? 'light' : 'dark'} />
+        <OnboardingScreen mode="permissions" onDone={() => setPermRepair(false)} />
+      </>
+    );
+  }
 
   return (
     <PermissionGate>
@@ -198,7 +273,6 @@ function AppInner() {
       >
         <StatusBar style={isDark ? 'light' : 'dark'} />
         <RootNavigator />
-        <TutorialOverlay visible={showTutorial} onDone={dismissTutorial} />
       </NavigationContainer>
     </PermissionGate>
   );

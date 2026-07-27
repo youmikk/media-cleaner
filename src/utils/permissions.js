@@ -13,6 +13,24 @@ export async function ensureMediaPermission() {
 }
 
 /**
+ * Read the CURRENT media-library permission without prompting.
+ * Returns 'granted' | 'limited' | 'undetermined' | 'blocked' — 'blocked'
+ * meaning the system will no longer show a dialog, so the only way forward
+ * is the settings app.
+ */
+export async function getMediaPermission() {
+  try {
+    const current = await MediaLibrary.getPermissionsAsync();
+    if (current.granted) {
+      return current.accessPrivileges === 'limited' ? 'limited' : 'granted';
+    }
+    return current.canAskAgain === false ? 'blocked' : 'undetermined';
+  } catch (e) {
+    return 'undetermined';
+  }
+}
+
+/**
  * Request notification permission only when the daily reminder is enabled.
  */
 export async function ensureNotificationPermission() {
