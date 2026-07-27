@@ -162,10 +162,23 @@ export default function BurstCleanScreen({ route, navigation }) {
           }
           try {
             // ONE system deletion dialog for all selected burst photos.
-            const { count, bytes } = await batchDelete(targets, {
+            const { count, bytes, deletedIds } = await batchDelete(targets, {
               useRecycleBin: recycleBinActive,
             });
-            if (count > 0) await recordCleaned('photo', count, bytes);
+            if (count > 0) {
+              // The duplicate mode is also reachable with VIDEO groups
+              // (Profile's "duplicate videos" card), and everything used to
+              // be booked as photos.
+              const goneIds = new Set(deletedIds || targets.map((a) => a.id));
+              const gone = targets.filter((a) => goneIds.has(a.id));
+              const vids = gone.filter((a) => a.mediaType === 'video').length;
+              const pics = gone.length - vids;
+              // Split the measured bytes proportionally — batchDelete
+              // reports one total for the batch.
+              const share = gone.length > 0 ? bytes / gone.length : 0;
+              if (vids > 0) await recordCleaned('video', vids, share * vids);
+              if (pics > 0) await recordCleaned('photo', pics, share * pics);
+            }
           } catch (e) {
             // user cancelled the system dialog
           }

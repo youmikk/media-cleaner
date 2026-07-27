@@ -1,0 +1,138 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Also publish the APK as a GitHub Release (the in-app updater reads the latest release)'
+        type: boolean
+        default: false
+      tag:
+        description: 'Release tag, e.g. v1.0.1 (defaults to the app.json version)'
+        type: string
+        required: false
+
+# A second run would fight the first over the Gradle cache.
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Linux runners bill at 1x, macOS at 10x — Android needs no macOS.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write # only used by the optional release step
+    env:
+      # Lifted to job level because the `secrets` context is NOT available in
+      # a step-level `if:` — `env` is.
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # RN 0.81 / AGP 8.x require JDK 17; the runner default is newer and
+      # Gradle rejects it.
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check version consistency
+        id: meta
+        run: |
+          VERSION=$(node -p "require('./app.json').expo.version")
+          PKG=$(node -p "require('./package.json').version")
+          APPV=$(grep -oP "APP_VERSION = '\K[^']+" src/utils/updateChecker.js)
+          echo "app.json=$VERSION package.json=$PKG APP_VERSION=$APPV"
+          # These three must agree or the APK reports a version it isn't, and
+          # the in-app update check compares against the wrong number.
+          if [ "$VERSION" != "$PKG" ] || [ "$VERSION" != "$APPV" ]; then
+            echo "::error::version mismatch between app.json, package.json and APP_VERSION"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # Generates android/ from app.json + plugins, and autolinks the local
+      # native module in modules/photo-move.
+      - name: Expo prebuild (generate android project)
+        run: npx expo prebuild -p android --no-install
+
+      # After prebuild: the Gradle wrapper does not exist before it.
+      - name: Setup Gradle (with cache)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: android
+
+      # Optional. Without these secrets the build uses the keystore bundled
+      # in the Expo template: still installable and still upgradeable (that
+      # key is fixed, not generated per run), just not publishable to Play.
+      - name: Configure release signing
+        if: env.ANDROID_KEYSTORE_BASE64 != ''
+        env:
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/app/release.keystore
+          {
+            echo "MC_STORE_FILE=release.keystore"
+            echo "MC_STORE_PASSWORD=$STORE_PASSWORD"
+            echo "MC_KEY_ALIAS=$KEY_ALIAS"
+            echo "MC_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> android/gradle.properties
+          node .github/scripts/patch-android-signing.js
+
+      - name: Build release APK
+        run: |
+          cd android
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Collect APK
+        id: apk
+        run: |
+          SRC=android/app/build/outputs/apk/release/app-release.apk
+          OUT="MediaCleaner-${{ steps.meta.outputs.version }}-${{ github.run_number }}.apk"
+          cp "$SRC" "$OUT"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+          ls -lh "$OUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MediaCleaner-apk
+          path: ${{ steps.apk.outputs.path }}
+          retention-days: 30
+
+      # updateChecker.js polls the latest GitHub release once a day and
+      # offers whatever .apk asset it finds there.
+      - name: Publish GitHub Release
+        if: ${{ inputs.release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then TAG="v${{ steps.meta.outputs.version }}"; fi
+          NOTES=$(node -p "
+            const e = require('./CHANGELOG.json')[0];
+            e && Array.isArray(e.notes) ? e.notes.map(n => '- ' + n).join('\n') : '';
+          ")
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${{ steps.apk.outputs.path }}" --clobber
+          else
+            gh release create "$TAG" "${{ steps.apk.outputs.path }}" \
+              --title "MediaCleaner $TAG" --notes "$NOTES"
+          fi

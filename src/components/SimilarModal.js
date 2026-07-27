@@ -27,10 +27,21 @@ export default function SimilarModal({ visible, clusterIds, onClose, onDeleteSel
   const [viewerIndex, setViewerIndex] = useState(null); // null = closed
 
   useEffect(() => {
-    if (!visible || !clusterIds) return;
+    if (!visible || !clusterIds) return undefined;
     setSelected({});
     setViewerIndex(null);
-    getAssetsByIds(clusterIds).then(setAssets);
+    setAssets([]);
+    // Guarded: getAssetsByIds does up to 600 getAssetInfoAsync calls, so
+    // closing and reopening on a different cluster could land the FIRST
+    // request's results after the second's — the sheet then showed the
+    // previous cluster's photos and any deletion acted on the wrong assets.
+    let alive = true;
+    getAssetsByIds(clusterIds).then((list) => {
+      if (alive) setAssets(list);
+    });
+    return () => {
+      alive = false;
+    };
   }, [visible, clusterIds]);
 
   const cell = (width - 16 * 2 - 8 * 2) / 3;

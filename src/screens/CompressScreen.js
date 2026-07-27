@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -110,7 +110,18 @@ export default function CompressScreen({ navigation }) {
   const selectedAfter = selectedItems.reduce((s, i) => s + estimateFor(i), 0);
   const selectedBefore = selectedItems.reduce((s, i) => s + i.size, 0);
 
+  // Set to false to abort between items. Compressing a single video can take
+  // minutes; without this the loop kept running after the user left the
+  // screen, calling setProgress on an unmounted component and finally
+  // navigating a screen that was no longer there.
+  const runningRef = useRef(false);
+  useEffect(() => () => {
+    runningRef.current = false;
+  }, []);
+
   const run = async () => {
+    if (runningRef.current) return;
+    runningRef.current = true;
     setProgress({ done: 0, total: selectedItems.length });
     let savedBytes = 0;
     let done = 0;
@@ -118,16 +129,21 @@ export default function CompressScreen({ navigation }) {
     const originalsToDelete = [];
 
     for (const item of selectedItems) {
+      if (!runningRef.current) break; // user left or hit cancel
+      // Compressor output lives in the cache directory. It used to be left
+      // there forever — both the copies that were imported into the library
+      // AND the ones rejected for not being smaller — so compressing 100
+      // large files leaked a full second copy of all of them.
+      let outUri = null;
       try {
         const info = await MediaLibrary.getAssetInfoAsync(item.id);
         const src = info.localUri || info.uri;
-        let outUri = null;
 
         if (item.mediaType === 'video') {
           if (!VideoCompressor) {
             failedVideos.push(item);
             done += 1;
-            setProgress({ done, total: selectedItems.length });
+            if (runningRef.current) setProgress({ done, total: selectedItems.length });
             continue;
           }
           outUri = await VideoCompressor.compress(src, {
@@ -153,9 +169,15 @@ export default function CompressScreen({ navigation }) {
         }
       } catch (e) {
         // skip failures, keep going
+      } finally {
+        if (outUri) {
+          await FileSystem.deleteAsync(outUri, { idempotent: true }).catch(
+            () => {}
+          );
+        }
       }
       done += 1;
-      setProgress({ done, total: selectedItems.length });
+      if (runningRef.current) setProgress({ done, total: selectedItems.length });
     }
 
     // Delete all originals with ONE system dialog.
@@ -164,16 +186,28 @@ export default function CompressScreen({ navigation }) {
         const res = await batchDelete(originalsToDelete, {
           useRecycleBin: recycleBinActive,
         });
-        const vids = originalsToDelete.filter((i) => i.mediaType === 'video').length;
-        if (vids > 0) recordCleaned('video', vids, 0);
-        if (res.count - vids > 0) recordCleaned('photo', res.count - vids, 0);
+        const goneIds = new Set(res.deletedIds || []);
+        const gone = originalsToDelete.filter((i) => goneIds.has(i.id));
+        const vids = gone.filter((i) => i.mediaType === 'video');
+        const pics = gone.filter((i) => i.mediaType !== 'video');
+        // Report the real bytes each category freed. These were previously
+        // both passed 0, so compression never showed up in "space saved" —
+        // and the two calls raced each other, so one category's count was
+        // reliably lost. (statsManager now serialises, but the byte totals
+        // still had to be real.)
+        const sum = (list) => list.reduce((s, i) => s + (i.size || 0), 0);
+        if (vids.length > 0) await recordCleaned('video', vids.length, sum(vids));
+        if (pics.length > 0) await recordCleaned('photo', pics.length, sum(pics));
       } catch (e) {
         // user cancelled the deletion dialog — compressed copies remain
       }
     }
 
+    const aborted = !runningRef.current;
+    runningRef.current = false;
     setProgress(null);
     setSelected({});
+    if (aborted) return; // screen is gone; don't touch navigation
     const message =
       failedVideos.length > 0 ? t('compress_video_unavailable') : '';
     Alert.alert(t('compress_done', { size: formatBytes(savedBytes) }), message, [

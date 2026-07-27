@@ -195,10 +195,18 @@ export default function CleaningScreen({ route, navigation }) {
     opacity: tx.value < -8 || ty.value < -8 ? 1 : 0,
   }));
 
+  // Timer is tracked so a rapid second toast replaces the first cleanly and
+  // nothing calls setState after the screen is gone.
+  const toastTimerRef = useRef(null);
   const showToast = (msg) => {
     setToast(msg);
-    setTimeout(() => setToast(null), 1800);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => {
+      toastTimerRef.current = null;
+      setToast(null);
+    }, 1800);
   };
+  useEffect(() => () => clearTimeout(toastTimerRef.current), []);
 
   // Suspend background analysis while cleaning — swipes stay buttery.
   useFocusEffect(
@@ -358,10 +366,28 @@ export default function CleaningScreen({ route, navigation }) {
         if (!alive) return;
         setGroups(makeGroups(finalList, groupSize));
         setGi(0); // the interrupted group is always first now
-        setPi(Math.min(pending.photoIndex || 0, Math.max(0, groupSize - 1)));
         const savedMarks = new Set(pending.markedIds || []);
-        setMarkedIds(savedMarks);
-        markStackRef.current = [...savedMarks];
+        // Drop marks whose asset no longer resolves (deleted outside the
+        // app, or a similar-modal pick from outside the restored range).
+        // A mark that can't be resolved can never be cleared either, and one
+        // of them was enough to reopen an empty confirm sheet at every
+        // group end for the rest of the session.
+        const liveIds = new Set(finalList.map((a) => a.id));
+        const usableMarks = new Set(
+          [...savedMarks].filter((id) => liveIds.has(id))
+        );
+        // Clamp to what will actually be VISIBLE: marked photos are filtered
+        // out of the group, so a saved index measured against groupSize left
+        // the user swiping right several times with nothing happening.
+        const firstGroup = finalList.slice(0, groupSize);
+        const visibleCount = firstGroup.filter(
+          (a) => !usableMarks.has(a.id)
+        ).length;
+        setPi(
+          Math.min(pending.photoIndex || 0, Math.max(0, visibleCount - 1))
+        );
+        setMarkedIds(usableMarks);
+        markStackRef.current = [...usableMarks];
         // Re-save the restored order: guards against any earlier writer.
         sessionManager.saveOrder(orderRef.current);
         initializedRef.current = true;
@@ -486,6 +512,18 @@ export default function CleaningScreen({ route, navigation }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gi, markedIds]);
 
+  // Persist the in-group position too. The effect above only fires on group
+  // or mark changes, and setPi(0) has already run by then — so browsing four
+  // photos without marking any saved nothing, and resuming dropped the user
+  // back on the first photo of the group.
+  useEffect(() => {
+    if (!sessionRef.current || sessionRef.current.ephemeral) return;
+    const id = setTimeout(() => {
+      sessionManager.saveProgress({ photoIndex: piRef.current });
+    }, 600);
+    return () => clearTimeout(id);
+  }, [pi]);
+
   // ---- Derived state ----
   const group = groups[gi] || [];
   // Assets selected in the Similar modal can live OUTSIDE the current
@@ -518,6 +556,11 @@ export default function CleaningScreen({ route, navigation }) {
   }, [group, markedIds]);
   const currentIdx = Math.min(pi, Math.max(0, visible.length - 1));
   const current = visible[currentIdx] || null;
+  // Lets async handlers check whether the user has moved on since they
+  // started — an awaited move that then advances unconditionally skips a
+  // photo the user never saw.
+  const currentRef = useRef(current);
+  currentRef.current = current;
   // Stack neighbours (pre-rendered underneath the top card).
   const prevAsset = currentIdx > 0 ? visible[currentIdx - 1] : null;
   const nextAsset = visible[currentIdx + 1] || null;
@@ -539,6 +582,18 @@ export default function CleaningScreen({ route, navigation }) {
       viewedRef.current.add(current.id);
     }
   }, [current]);
+
+  // A group can end up with nothing left to show: the Similar modal deletes
+  // across group boundaries, so every member of a later group may already be
+  // gone by the time it comes up. That rendered a blank card area with
+  // "photo 1 of 0" and needed a blind swipe to get past. Skip it instead.
+  useEffect(() => {
+    if (loading || showConfirm || groups.length === 0) return;
+    if (group.length > 0 && visible.length === 0 && markedAssets.length === 0) {
+      endOfGroupRef.current();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible.length, markedAssets.length, group.length, loading, showConfirm]);
 
   // Prefetch the next TWO photos so swiping feels instant even while the
   // decoder is still warm on slower devices.
@@ -735,15 +790,22 @@ export default function CleaningScreen({ route, navigation }) {
     ]);
   };
 
+  // One categorization at a time. Without this, a double-tap on a chip sent
+  // two in-place moves for the same id (the second acting on a path the
+  // first had already invalidated), and each completion called callNext() —
+  // so the flow jumped two photos and skipped one entirely.
+  const movingRef = useRef(false);
+
   const moveCurrentTo = async (album) => {
-    if (!current) return;
+    if (!current || movingRef.current) return;
     const id = current.id;
     const asset = current;
     const fromAlbumId = albumOverrides[id] || current.albumId || null;
+    movingRef.current = true;
     try {
       if (
         Platform.OS === 'android' &&
-        PhotoMove.isAvailable() &&
+        PhotoMove.hasNativeMove() &&
         PhotoMove.hasAllFilesPermission()
       ) {
         // photoo-style TRUE in-place move: bytes, EXIF and mtime all
@@ -755,10 +817,15 @@ export default function CleaningScreen({ route, navigation }) {
           fromAlbumId,
           toAlbumId: album.id,
           native: true,
+          // Absolute source folder, so undo can put the file back exactly
+          // where it came from. Deriving it from the album title instead
+          // sent camera-roll photos to Pictures/Camera rather than
+          // DCIM/Camera — a different folder that shows up as a new album.
+          oldDir: res.oldDir || null,
           fromAlbumTitle:
             (realAlbums.find((a) => a.id === fromAlbumId) || {}).title || null,
         };
-      } else if (Platform.OS === 'android' && PhotoMove.isAvailable()) {
+      } else if (Platform.OS === 'android' && PhotoMove.hasNativeMove()) {
         // Native module present but "All files access" not granted yet:
         // prompt once and do nothing — categorizing only ever uses the
         // info-preserving in-place move.
@@ -772,9 +839,14 @@ export default function CleaningScreen({ route, navigation }) {
       incrementUsage(album.id);
       setAlbumOverrides((m) => ({ ...m, [id]: album.id }));
       showToast(t('moved_to', { album: album.title }));
-      callNext(); // categorized -> straight to the next photo
+      // Only advance if we are still on the photo we just moved — the user
+      // may have swiped on during the await, and blindly calling next then
+      // skipped an unseen photo.
+      if (currentRef.current && currentRef.current.id === id) callNext();
     } catch (e) {
       // move failed — nothing changes
+    } finally {
+      movingRef.current = false;
     }
   };
 
@@ -785,14 +857,15 @@ export default function CleaningScreen({ route, navigation }) {
 
   // "+" chip: create a NEW album with the current photo (photo stays).
   const createAlbumWithCurrent = async (name) => {
-    if (!current || !name) return;
+    if (!current || !name || movingRef.current) return;
     const id = current.id;
     const asset = current;
     const fromAlbumId = albumOverrides[id] || current.albumId || null;
+    movingRef.current = true;
     try {
       if (
         Platform.OS === 'android' &&
-        PhotoMove.isAvailable() &&
+        PhotoMove.hasNativeMove() &&
         PhotoMove.hasAllFilesPermission()
       ) {
         // In-place move — the target folder is created automatically.
@@ -807,11 +880,12 @@ export default function CleaningScreen({ route, navigation }) {
           fromAlbumId,
           toAlbumId: album ? album.id : name,
           native: true,
+          oldDir: res.oldDir || null,
           fromAlbumTitle:
             (realAlbums.find((a) => a.id === fromAlbumId) || {}).title || null,
         };
         setAlbumOverrides((m) => ({ ...m, [id]: album ? album.id : name }));
-      } else if (Platform.OS === 'android' && PhotoMove.isAvailable()) {
+      } else if (Platform.OS === 'android' && PhotoMove.hasNativeMove()) {
         // Needs "All files access" — prompt once, do nothing this time.
         maybeOfferNativeMove();
         return;
@@ -827,25 +901,40 @@ export default function CleaningScreen({ route, navigation }) {
         setRealAlbums(list.filter((a) => a.assetCount > 0));
       }
       showToast(t('moved_to', { album: name }));
-      callNext(); // categorized -> straight to the next photo
+      if (currentRef.current && currentRef.current.id === id) callNext();
     } catch (e) {
       // creation failed — photo stays
+    } finally {
+      movingRef.current = false;
     }
   };
 
   // Second tap on the ✓ chip: undo THIS SESSION's categorization — move the
   // photo back to its previous album (or just remove it on iOS).
   const cancelCurrentCategory = async () => {
-    if (!displayAsset) return;
+    if (!displayAsset || movingRef.current) return;
     const id = displayAsset.id;
     const rec = overrideHistoryRef.current[id];
     if (!rec) return;
+    movingRef.current = true;
     try {
       if (rec.native) {
-        // In-place move: move the file straight back to its old folder.
+        // Restore to the ORIGINAL absolute folder when we recorded it; the
+        // album-title fallback only exists for records written before that
+        // was captured.
         const backTitle = rec.fromAlbumTitle || 'Camera';
-        const [res] = await PhotoMove.moveToAlbum([id], backTitle);
-        if (res && res.ok) displayAsset.uri = 'file://' + res.newPath;
+        const [res] = await PhotoMove.moveToAlbum(
+          [id],
+          backTitle,
+          rec.oldDir || null
+        );
+        // A failed undo must NOT look like a successful one. MediaScanner
+        // re-indexes a moved file under a NEW MediaStore id, so this lookup
+        // can legitimately fail — and the old code then still dropped the
+        // undo record, rolled back the chip and said "category removed"
+        // while the file sat in the new album, now unrecoverable.
+        if (!res || !res.ok) throw new Error((res && res.error) || 'undo_failed');
+        displayAsset.uri = 'file://' + res.newPath;
       } else {
         // iOS: pull the photo back out of the collection.
         const backAlbum = rec.fromAlbumId
@@ -867,7 +956,10 @@ export default function CleaningScreen({ route, navigation }) {
       });
       showToast(t('category_cancelled'));
     } catch (e) {
-      // undo failed — keep the current category
+      // Keep the record so the user can try again, and say so.
+      showToast(t('category_cancel_failed'));
+    } finally {
+      movingRef.current = false;
     }
   };
 
@@ -906,7 +998,20 @@ export default function CleaningScreen({ route, navigation }) {
     drop.forEach((id) => delete extraAssetsRef.current[id]);
   };
 
-  const clearGroupMarks = () => clearMarks(markedAssets.map((a) => a.id));
+  // Clear EVERY mark, not just the ones that still resolve to an asset.
+  //
+  // The sheet's open/close test uses markStackRef (authoritative), but this
+  // used to clear `markedAssets`, which silently drops ids it can't resolve
+  // — a photo deleted in the system gallery, or a similar-modal pick from
+  // outside the current time range after a resume. One such id was enough to
+  // wedge the flow: every group end reopened an empty "delete (0)" sheet
+  // whose Delete button was disabled and whose "keep all" could not clear it.
+  const clearGroupMarks = () => {
+    const ids = [...markStackRef.current];
+    if (ids.length > 0) clearMarks(ids);
+    markStackRef.current = [];
+    setMarkedIds(new Set());
+  };
 
   const nextGroup = async () => {
     // Confirming a group (kept OR deleted) marks every photo in it as
@@ -951,29 +1056,54 @@ export default function CleaningScreen({ route, navigation }) {
   };
 
   const skipGroup = () => {
+    if (deleting) return; // a delete is mid-flight — see deleteMarkedNow
     clearGroupMarks(); // keep all = spare everything in this group
     nextGroup();
   };
 
-  const deletingRef = useRef(false); // ignore extra taps while the system dialog is up
+  // A delete is in flight. This is STATE, not a ref, because the sheet's
+  // other controls have to be disabled while it runs: batchDelete does real
+  // work (size lookup, per-file trash copies) BEFORE the system dialog even
+  // appears, and that window runs into seconds. Tapping "keep all" during it
+  // used to clear the marks and advance a group while the already-captured
+  // target list went on to delete the very photos the user just chose to
+  // keep — and nextGroup() fired twice, skipping a group that was never
+  // shown yet got recorded as reviewed.
+  const [deleting, setDeleting] = useState(false);
+  const deletingRef = useRef(false);
   const deleteMarkedNow = async () => {
     if (deletingRef.current) return;
     deletingRef.current = true;
+    setDeleting(true);
     try {
       // Group marks AND similar-modal picks — deleted together, ONE dialog.
       const targets = markedAssets;
       if (targets.length > 0) {
         try {
-          const { count, bytes } = await batchDelete(targets, {
-            useRecycleBin: recycleBinActive,
-          });
+          const { count, bytes, deletedIds, skipped } = await batchDelete(
+            targets,
+            { useRecycleBin: recycleBinActive }
+          );
           cleanedRef.current.count += count;
           cleanedRef.current.bytes += bytes;
-          recordCleaned('photo', count, bytes);
-          // Remember deletions so later groups don't show ghosts.
-          targets.forEach((a) => deletedIdsRef.current.add(a.id));
-          clearMarks(targets.map((a) => a.id));
+          if (count > 0) recordCleaned('photo', count, bytes);
+          // Only what ACTUALLY went away — a recycle-bin backup that failed
+          // leaves its photo in place, and pretending otherwise would hide
+          // it from this round while it still sits in the library.
+          const gone = deletedIds || targets.map((a) => a.id);
+          gone.forEach((id) => deletedIdsRef.current.add(id));
+          clearMarks(gone);
+          if (skipped > 0) {
+            Alert.alert(
+              t('delete_forever'),
+              t('delete_partial', { count: skipped })
+            );
+          }
         } catch (e) {
+          if (e && e.message === 'trash-no-space') {
+            Alert.alert(t('delete_forever'), t('trash_no_space'));
+            return;
+          }
           // user cancelled the system dialog — keep marks, stay in the sheet
           return;
         }
@@ -981,10 +1111,12 @@ export default function CleaningScreen({ route, navigation }) {
       nextGroup();
     } finally {
       deletingRef.current = false;
+      setDeleting(false);
     }
   };
 
   const closeConfirmOnly = () => {
+    if (deleting) return;
     if (visible.length === 0) {
       // Every photo in the group is marked and the user backed out —
       // treat it as "keep all" so nothing is deleted silently later.
@@ -1006,14 +1138,34 @@ export default function CleaningScreen({ route, navigation }) {
    * THIS group and re-entering resumes it exactly. Only completing the
    * whole album (finish=true) ends the session.
    */
+  const settledRef = useRef(false);
   const settleSession = (finish) => {
+    // Idempotent: completing the album settles once, then the user taps
+    // "Done" and beforeRemove fires — without this the viewed count would be
+    // recorded twice.
+    if (settledRef.current) return;
+    settledRef.current = true;
     const viewed = viewedRef.current.size;
     const session = sessionRef.current;
     sessionRef.current = null;
+    // Snapshot what this run actually removed. The alternative — diffing two
+    // album snapshots — extrapolates the whole album from its 60 newest (and
+    // therefore largest) assets, so it could report "0 B freed" after
+    // deleting gigabytes.
+    const measured = { ...cleanedRef.current };
+    // Persist the final in-group position before the session object goes.
+    if (session && !session.ephemeral && !finish) {
+      sessionManager.saveProgress({ photoIndex: piRef.current });
+    }
     (async () => {
       try {
         if (viewed > 0) await recordViewed('photo', viewed);
-        if (session && finish) await sessionManager.finishSession(session);
+        if (session && finish) {
+          await sessionManager.finishSession(
+            { ...session, afterAssets: allRef.current },
+            measured
+          );
+        }
       } catch (e) {
         // stats are best-effort
       }
@@ -1032,6 +1184,18 @@ export default function CleaningScreen({ route, navigation }) {
     navigation.goBack(); // leave IMMEDIATELY
     settleSession(false);
   };
+
+  // The X button is not the only way out: Android's hardware back and, in
+  // the native-tab build, swiping the fullScreenModal down both leave
+  // without touching exit(), so the viewed count never reached the stats.
+  // settleSession is idempotent, so a normal exit() still wins the race.
+  useEffect(() => {
+    const unsub = navigation.addListener('beforeRemove', () => {
+      settleSession(false);
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navigation]);
 
   // ---- Render ----
   if (loading) {
@@ -1075,7 +1239,11 @@ export default function CleaningScreen({ route, navigation }) {
         </Text>
         <Pressable
           style={[styles.doneBtn, { backgroundColor: colors.accent }]}
-          onPress={() => navigation.goBack()}
+          // Settle before leaving: startSession already wrote a session to
+          // disk by this point, and going straight back left an empty
+          // 0-photo session behind that the home screen kept offering to
+          // resume.
+          onPress={exit}
         >
           <Text style={styles.doneBtnText}>{t('done')}</Text>
         </Pressable>
@@ -1247,6 +1415,7 @@ export default function CleaningScreen({ route, navigation }) {
         onClose={closeConfirmOnly}
         onKeepAll={skipGroup}
         onDelete={deleteMarkedNow}
+        busy={deleting}
       />
     </SafeAreaView>
   );

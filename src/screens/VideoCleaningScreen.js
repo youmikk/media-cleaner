@@ -15,6 +15,7 @@ import {
   useWindowDimensions,
   Share,
   Platform,
+  Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
@@ -137,8 +138,10 @@ export default function VideoCleaningScreen({ navigation }) {
       await logSync('video', 'step1:load-list');
       // Local index first: unchanged album = instant open, no scanning.
       let assets = await getCachedAssetList(albumId, 'video');
+      if (!alive) return;
       if (!assets) {
         assets = await getAssets(albumId, 'video');
+        if (!alive) return;
         saveCachedAssetList(albumId, 'video', assets);
       }
       if (!alive) return;
@@ -151,18 +154,34 @@ export default function VideoCleaningScreen({ navigation }) {
 
       await logSync('video', 'step4:snapshot'); // native getSizes inside
       const before = await getAlbumSnapshot(albumId, 'video', assets);
+      if (!alive) return;
       await logSync('video', 'step5:snapshot-ok');
       const pending = await sessionManager.getPendingSession('video');
+      // Every await above is a chance for the user to switch albums. Without
+      // these guards the losing run still wrote sessionRef and clobbered
+      // @mediacleaner/active_session_video — the previous album's paused
+      // progress and "before" snapshot vanished without ever being finished,
+      // and sessionRef could end up describing a different album than the
+      // one on screen.
+      if (!alive) return;
       if (pending && pending.albumId === albumId && pending.type === 'video') {
         sessionRef.current = pending;
       } else {
-        sessionRef.current = await sessionManager.startSession({
+        // Hand over cleanly: close out the previous album's session (which
+        // records its stats) before startSession overwrites the slot.
+        if (pending && pending.albumId !== albumId) {
+          await sessionManager.finishSession(pending).catch(() => {});
+          if (!alive) return;
+        }
+        const started = await sessionManager.startSession({
           type: 'video',
           albumId,
           albumTitle,
           groupSize,
           before,
         });
+        if (!alive) return;
+        sessionRef.current = started;
       }
     })();
     return () => {
@@ -257,28 +276,41 @@ export default function VideoCleaningScreen({ navigation }) {
     if (listRef.current) listRef.current.scrollToOffset({ offset: 0, animated: false });
   }, [currentGroup]);
 
+  const [deleting, setDeleting] = useState(false);
   const deletingRef = useRef(false); // ignore extra taps while the system dialog is up
   const deleteMarkedNow = async () => {
     if (deletingRef.current) return;
     deletingRef.current = true;
+    setDeleting(true);
     try {
       const targets = currentGroup.filter((a) => markedIds.has(a.id));
       if (targets.length > 0) {
         try {
           // SINGLE system deletion dialog for the whole group.
-          const { count, bytes } = await batchDelete(targets, {
+          const { count, bytes, skipped } = await batchDelete(targets, {
             useRecycleBin: recycleBinActive,
           });
           cleanedRef.current.count += count;
           cleanedRef.current.bytes += bytes;
-          recordCleaned('video', count, bytes);
+          if (count > 0) recordCleaned('video', count, bytes);
+          if (skipped > 0) {
+            Alert.alert(
+              t('delete_forever'),
+              t('delete_partial', { count: skipped })
+            );
+          }
         } catch (e) {
+          if (e && e.message === 'trash-no-space') {
+            Alert.alert(t('delete_forever'), t('trash_no_space'));
+            return;
+          }
           return; // user cancelled the system dialog — keep marks
         }
       }
       advanceGroup();
     } finally {
       deletingRef.current = false;
+      setDeleting(false);
     }
   };
 
@@ -432,6 +464,13 @@ export default function VideoCleaningScreen({ navigation }) {
 
   // Swiping PAST the last video of the group ends the group (confirm sheet
   // only if something is marked).
+  //
+  // The old test needed contentOffset to exceed the content height by 40px.
+  // That only ever happens with iOS rubber-banding: Android clamps scroll
+  // offset to the content bounds, so the gesture could not end a group at
+  // all there — with a long final video the user was simply stuck on it.
+  // onMomentumScrollEnd + "already on the last item and still pulling" works
+  // on both platforms.
   const onScroll = (e) => {
     const y = e.nativeEvent.contentOffset.y;
     if (
@@ -441,6 +480,17 @@ export default function VideoCleaningScreen({ navigation }) {
     ) {
       endGroup();
     }
+  };
+
+  const onScrollEndDrag = (e) => {
+    if (showConfirm || visibleGroup.length === 0) return;
+    const { contentOffset, velocity } = e.nativeEvent;
+    const last = (visibleGroup.length - 1) * height;
+    // Pulling up (negative velocity = content moving up) while already at
+    // the final item.
+    const atLast = contentOffset.y >= last - height * 0.15;
+    const pullingPastEnd = velocity && velocity.y < -0.2;
+    if (atLast && pullingPastEnd) endGroup();
   };
 
   // The last video finishing its playback ends the group too.
@@ -550,6 +600,7 @@ export default function VideoCleaningScreen({ navigation }) {
         viewabilityConfig={{ itemVisiblePercentThreshold: 60 }}
         getItemLayout={(_, i) => ({ length: height, offset: height * i, index: i })}
         onScroll={onScroll}
+        onScrollEndDrag={onScrollEndDrag}
         scrollEventThrottle={64}
         windowSize={3}
         initialNumToRender={1}
@@ -646,6 +697,7 @@ export default function VideoCleaningScreen({ navigation }) {
         onKeepAll={advanceGroup}
         onDelete={deleteMarkedNow}
         thumbs={videoThumbs}
+        busy={deleting}
       />
     </View>
   );

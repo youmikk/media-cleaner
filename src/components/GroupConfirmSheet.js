@@ -29,6 +29,11 @@ export default function GroupConfirmSheet({
   onKeepAll,
   onDelete,
   thumbs = {},
+  // A delete is running. Everything that could advance the group or clear
+  // marks must be inert until it settles — the deletion captured its target
+  // list already, so a competing "keep all" would delete photos the user
+  // just spared and skip an unseen group.
+  busy = false,
 }) {
   const { colors, t } = useSettings();
   const { width } = useWindowDimensions();
@@ -48,9 +53,9 @@ export default function GroupConfirmSheet({
       visible={visible}
       transparent
       animationType="fade"
-      onRequestClose={onClose}
+      onRequestClose={busy ? undefined : onClose}
     >
-      <Pressable style={styles.backdrop} onPress={onClose}>
+      <Pressable style={styles.backdrop} onPress={busy ? undefined : onClose}>
         <Pressable
           style={[styles.sheet, { backgroundColor: colors.card }]}
           onPress={() => {}}
@@ -59,7 +64,7 @@ export default function GroupConfirmSheet({
             <Text style={[styles.title, { color: colors.text }]}>
               {t('confirm_delete_title', { count: assets.length })}
             </Text>
-            <Pressable onPress={onClose} hitSlop={10}>
+            <Pressable onPress={busy ? undefined : onClose} hitSlop={10}>
               <Ionicons name="close" size={22} color={colors.subtext} />
             </Pressable>
           </View>
@@ -97,7 +102,11 @@ export default function GroupConfirmSheet({
           />
           <View style={styles.buttons}>
             <Pressable
-              style={[styles.btn, { backgroundColor: colors.chartTrack }]}
+              disabled={busy}
+              style={[
+                styles.btn,
+                { backgroundColor: colors.chartTrack, opacity: busy ? 0.5 : 1 },
+              ]}
               onPress={onKeepAll}
             >
               <Text style={[styles.btnText, { color: colors.text }]}>
@@ -105,12 +114,13 @@ export default function GroupConfirmSheet({
               </Text>
             </Pressable>
             <Pressable
-              disabled={assets.length === 0}
+              disabled={busy || assets.length === 0}
               style={[
                 styles.btn,
                 {
                   backgroundColor:
                     assets.length === 0 ? colors.chartTrack : colors.danger,
+                  opacity: busy ? 0.6 : 1,
                 },
               ]}
               onPress={onDelete}
@@ -121,7 +131,9 @@ export default function GroupConfirmSheet({
                   { color: assets.length === 0 ? colors.subtext : '#fff' },
                 ]}
               >
-                {t('delete_all_marked')} ({assets.length})
+                {busy
+                  ? t('deleting')
+                  : `${t('delete_all_marked')} (${assets.length})`}
               </Text>
             </Pressable>
           </View>

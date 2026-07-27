@@ -53,7 +53,21 @@ export function requestAllFilesPermission() {
  */
 export async function moveToAlbum(assetIds, albumName, destDir = null) {
   if (!native || !native.moveToAlbum) throw new Error('unavailable');
-  return native.moveToAlbum(assetIds, albumName, destDir);
+  // Signature straddle: the destDir parameter only exists in binaries built
+  // after it was added, and JS ships independently of the native side (OTA,
+  // Expo Go, an older installed APK). Calling with the wrong arity throws,
+  // so try the current shape first and fall back to the old one.
+  try {
+    return await native.moveToAlbum(assetIds, albumName, destDir);
+  } catch (e) {
+    const msg = (e && e.message) || '';
+    // Only retry on an argument-shape complaint — a genuine move failure
+    // (PERMISSION_REQUIRED, not_found) must not be attempted twice.
+    if (/argument|parameter|arity|Mismatch/i.test(msg)) {
+      return native.moveToAlbum(assetIds, albumName);
+    }
+    throw e;
+  }
 }
 
 /** True when this build can do in-place moves (Android only). */

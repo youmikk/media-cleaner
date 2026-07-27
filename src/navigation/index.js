@@ -66,13 +66,37 @@ function VideosNavigator() {
 }
 
 function ProfileNavigator() {
+  // With the native tab bar the tabs cannot be hidden per route, so every
+  // screen that owns the whole viewport has to be a full-screen modal.
+  // These four position their action bars at a fixed `bottom: 30`, and
+  // without this they rendered UNDER the system tab bar — the delete and
+  // restore buttons were simply unreachable in native-tab builds.
+  const fullScreen = {
+    presentation: useNativeTabs ? 'fullScreenModal' : 'card',
+  };
   return (
     <ProfileStack.Navigator screenOptions={{ headerShown: false }}>
       <ProfileStack.Screen name="Profile" component={ProfileScreen} />
-      <ProfileStack.Screen name="RecycleBin" component={RecycleBinScreen} />
-      <ProfileStack.Screen name="BurstClean" component={BurstCleanScreen} />
-      <ProfileStack.Screen name="Insights" component={GalleryInsightsScreen} />
-      <ProfileStack.Screen name="Compress" component={CompressScreen} />
+      <ProfileStack.Screen
+        name="RecycleBin"
+        component={RecycleBinScreen}
+        options={fullScreen}
+      />
+      <ProfileStack.Screen
+        name="BurstClean"
+        component={BurstCleanScreen}
+        options={fullScreen}
+      />
+      <ProfileStack.Screen
+        name="Insights"
+        component={GalleryInsightsScreen}
+        options={fullScreen}
+      />
+      <ProfileStack.Screen
+        name="Compress"
+        component={CompressScreen}
+        options={fullScreen}
+      />
     </ProfileStack.Navigator>
   );
 }
