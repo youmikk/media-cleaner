@@ -10,6 +10,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import * as MediaLibrary from 'expo-media-library';
 import { useSettings } from '../context/SettingsContext';
 import { useApp } from '../context/AppContext';
 import * as trashManager from '../utils/trashManager';
@@ -23,6 +24,7 @@ export default function RecycleBinScreen({ navigation }) {
   const { colors, t } = useSettings();
   const { trash, refreshTrash } = useApp();
   const [selected, setSelected] = useState({});
+  const [busy, setBusy] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -44,16 +46,33 @@ export default function RecycleBinScreen({ navigation }) {
     }
   };
 
+  // Restores go one at a time (each is a separate createAssetAsync), but the
+  // index is rewritten ONCE at the end — the old code did a full
+  // read+serialise+write of the whole index per entry, so restoring a few
+  // hundred items rewrote megabytes over and over.
   const restoreSelected = async () => {
-    for (const entry of selectedEntries) {
-      try {
-        await trashManager.restoreFromTrash(entry);
-      } catch (e) {
-        // file missing — skip
+    if (busy) return;
+    setBusy(true);
+    const restored = [];
+    let failed = 0;
+    try {
+      for (const entry of selectedEntries) {
+        try {
+          await MediaLibrary.createAssetAsync(entry.fileUri);
+          restored.push(entry);
+        } catch (e) {
+          failed++; // backing file missing — leave the row in place
+        }
       }
+      if (restored.length > 0) {
+        await trashManager.removeManyFromTrash(restored);
+      }
+    } finally {
+      setBusy(false);
+      setSelected({});
+      refreshTrash();
+      if (failed > 0) Alert.alert(t('recycle_bin'), t('restore_failed_some'));
     }
-    setSelected({});
-    refreshTrash();
   };
 
   const deleteSelected = () => {
@@ -63,11 +82,15 @@ export default function RecycleBinScreen({ navigation }) {
         text: t('delete_forever'),
         style: 'destructive',
         onPress: async () => {
-          for (const entry of selectedEntries) {
-            await trashManager.removeFromTrash(entry);
+          if (busy) return;
+          setBusy(true);
+          try {
+            await trashManager.removeManyFromTrash(selectedEntries);
+          } finally {
+            setBusy(false);
+            setSelected({});
+            refreshTrash();
           }
-          setSelected({});
-          refreshTrash();
         },
       },
     ]);

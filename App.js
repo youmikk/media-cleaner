@@ -7,6 +7,7 @@ import {
   Alert,
   Linking,
   Platform,
+  InteractionManager,
 } from 'react-native';
 import * as PhotoMove from './modules/photo-move';
 import { StatusBar } from 'expo-status-bar';
@@ -29,6 +30,7 @@ import OnboardingScreen from './src/screens/OnboardingScreen';
 import { ensureMediaPermission, getMediaPermission } from './src/utils/permissions';
 import * as trashManager from './src/utils/trashManager';
 import * as sessionManager from './src/utils/sessionManager';
+import { pruneOrphanAlbumKeys } from './src/utils/storageGC';
 import {
   autoCheckDaily,
   consumeUpdateApplied,
@@ -146,8 +148,14 @@ function AppInner() {
         { text: t('update_download'), onPress: () => Linking.openURL(info.url) },
       ]);
     });
+    // Reclaim per-album cache entries for albums that no longer exist.
+    // Idle-time only: it walks every storage key.
+    const gc = InteractionManager.runAfterInteractions(() => {
+      pruneOrphanAlbumKeys().catch(() => {});
+    });
     return () => {
       if (timer) clearTimeout(timer);
+      if (gc && gc.cancel) gc.cancel();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onboarding]);

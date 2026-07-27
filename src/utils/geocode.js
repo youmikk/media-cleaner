@@ -1,19 +1,49 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
+import { readJSON, withLock } from './safeStore';
 
 const CACHE_KEY = '@mediacleaner/geocode_cache';
 const memoryCache = {};
 let persisted = null;
+// Bounded like every other large writer here: an unbounded map of ~100 m
+// grid cells crosses Android's silent ~2 MB per-value limit on a well
+// travelled library and takes the WHOLE cache down with it.
+const MAX_ENTRIES = 1500;
+// Coalesce writes: the old code re-serialised the entire growing map on
+// every cache miss, i.e. once per swiped photo, on the JS thread.
+const PERSIST_DELAY_MS = 3000;
+let persistTimer = null;
+// One in-flight lookup per cell — a fast swipe used to fire the same
+// coordinate at the geocoder several times over.
+const inFlight = new Map();
 
 async function loadPersisted() {
   if (persisted) return persisted;
-  try {
-    const raw = await AsyncStorage.getItem(CACHE_KEY);
-    persisted = raw ? JSON.parse(raw) : {};
-  } catch (e) {
-    persisted = {};
-  }
+  const { value } = await readJSON(CACHE_KEY);
+  persisted = value && typeof value === 'object' ? value : {};
   return persisted;
+}
+
+function schedulePersist() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(async () => {
+    persistTimer = null;
+    await withLock(CACHE_KEY, async () => {
+      if (!persisted) return;
+      let keys = Object.keys(persisted);
+      if (keys.length > MAX_ENTRIES) {
+        // Insertion-ordered string keys ("lat,lng_lang" is never an integer
+        // index), so the head really is the oldest.
+        const drop = keys.length - MAX_ENTRIES;
+        for (let i = 0; i < drop; i++) delete persisted[keys[i]];
+      }
+      try {
+        await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(persisted));
+      } catch (e) {
+        // best effort
+      }
+    });
+  }, PERSIST_DELAY_MS);
 }
 
 function cacheKeyFor(lat, lng) {
@@ -42,9 +72,14 @@ function formatAddress(place, language) {
  * Reverse-geocode a coordinate into a short address string.
  * Cached in memory + AsyncStorage (offline photos re-resolve instantly).
  * Returns null when geocoding is unavailable (no network / no geocoder).
+ *
+ * A FAILED lookup is never cached. It used to be stored as null, and since
+ * the cache hit test was `!== undefined`, that null was permanent: browsing
+ * 50 geotagged photos in airplane mode meant those 50 places could never
+ * display an address again short of clearing app data.
  */
 export async function reverseGeocode(latitude, longitude, language = 'zh') {
-  if (latitude === undefined || longitude === undefined) return null;
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
   const key = `${cacheKeyFor(latitude, longitude)}_${language}`;
   if (memoryCache[key] !== undefined) return memoryCache[key];
 
@@ -54,20 +89,31 @@ export async function reverseGeocode(latitude, longitude, language = 'zh') {
     return store[key];
   }
 
-  let address = null;
-  try {
-    const results = await Location.reverseGeocodeAsync({ latitude, longitude });
-    address = formatAddress(results && results[0], language);
-  } catch (e) {
-    address = null; // geocoder unavailable — degrade gracefully
-  }
+  const pending = inFlight.get(key);
+  if (pending) return pending;
 
-  memoryCache[key] = address;
-  store[key] = address;
-  try {
-    await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(store));
-  } catch (e) {
-    // best effort
-  }
-  return address;
+  const task = (async () => {
+    try {
+      const results = await Location.reverseGeocodeAsync({
+        latitude,
+        longitude,
+      });
+      const address = formatAddress(results && results[0], language);
+      // Resolved — including "resolved to nothing", which is a real answer
+      // about this coordinate and worth remembering.
+      memoryCache[key] = address;
+      store[key] = address;
+      schedulePersist();
+      return address;
+    } catch (e) {
+      // Geocoder unavailable / throttled / offline: transient, so do NOT
+      // write it to either cache. The next attempt gets to try again.
+      return null;
+    } finally {
+      inFlight.delete(key);
+    }
+  })();
+
+  inFlight.set(key, task);
+  return task;
 }

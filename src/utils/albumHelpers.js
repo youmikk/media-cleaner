@@ -2,12 +2,19 @@ import * as MediaLibrary from 'expo-media-library';
 // SDK 54: use the stable legacy file-system API (getInfoAsync etc.).
 import * as FileSystem from 'expo-file-system/legacy';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { utf8ByteLength, MAX_VALUE_BYTES } from './safeStore';
 
 export const ALL_ALBUM_ID = 'all';
 const PAGE_SIZE = 200;
 const MAX_ASSETS = 20000; // safety cap for very large libraries
 const SNAPSHOT_SAMPLE = 60; // size sampling cap for storage snapshots
 const SNAPSHOT_CONCURRENCY = 6;
+// A slim asset serialises to ~300 B, so this is the point past which the
+// list cannot fit under the per-value storage ceiling.
+const MAX_CACHED_LIST = 4800;
+// getAssetsByIds cap. Exposed so callers can tell the user when a selection
+// was trimmed instead of silently cleaning a subset.
+export const MAX_ASSETS_BY_IDS = 600;
 
 /**
  * List device albums for the given media type, prefixed by a synthetic
@@ -73,7 +80,7 @@ export async function getAssetsByIds(ids) {
   // Parallel (8-wide) and hard-capped: the old serial loop stalled for
   // tens of seconds on large id lists (Low-Quality with hundreds of hits
   // looked like "the screen won't open").
-  const capped = ids.slice(0, 600);
+  const capped = ids.slice(0, MAX_ASSETS_BY_IDS);
   const out = [];
   const CONC = 8;
   for (let i = 0; i < capped.length; i += CONC) {
@@ -90,6 +97,17 @@ export async function getAssetsByIds(ids) {
     );
     for (const info of infos) if (info) out.push(info);
   }
+  // Non-enumerable so existing `.map`/`.length` callers are unaffected, but
+  // a caller that cares can tell the user "600 of 1500 shown" instead of
+  // reporting "all done" over a silently trimmed selection.
+  Object.defineProperty(out, 'truncated', {
+    value: ids.length > MAX_ASSETS_BY_IDS,
+    enumerable: false,
+  });
+  Object.defineProperty(out, 'totalRequested', {
+    value: ids.length,
+    enumerable: false,
+  });
   return out;
 }
 
@@ -103,7 +121,11 @@ export async function getAssetSize(asset) {
   try {
     // eslint-disable-next-line global-require
     const PhotoMove = require('../../modules/photo-move');
-    if (PhotoMove.isAvailable()) {
+    // hasNativeSizes(), not isAvailable(): the iOS module exists but has no
+    // getSizes, so isAvailable() sent every iOS call down a path that threw
+    // and was swallowed — pure overhead on the platform that then falls back
+    // to the slow per-file loop anyway.
+    if (PhotoMove.hasNativeSizes()) {
       const sizes = await PhotoMove.getSizes([String(id)]);
       const s = sizes[String(id).split('/')[0]];
       if (s > 0) return s;
@@ -133,7 +155,7 @@ export async function getAssetSizes(assets) {
   const out = {};
   // eslint-disable-next-line global-require
   const PhotoMove = require('../../modules/photo-move');
-  if (PhotoMove.isAvailable()) {
+  if (PhotoMove.hasNativeSizes()) {
     try {
       const sizes = await PhotoMove.getSizes(assets.map((a) => a.id));
       let missing = 0;
@@ -147,10 +169,17 @@ export async function getAssetSizes(assets) {
       // fall through to per-file stats
     }
   }
-  for (const a of assets) {
-    if (out[a.id] > 0) continue;
+  // Fallback (always the case on iOS): run it CONCURRENTLY. The old serial
+  // loop meant two awaited native calls per asset — hundreds of assets took
+  // tens of seconds, which is why "largest files" felt broken on iOS.
+  const pending = assets.filter((a) => !(out[a.id] > 0));
+  for (let i = 0; i < pending.length; i += SNAPSHOT_CONCURRENCY) {
+    const batch = pending.slice(i, i + SNAPSHOT_CONCURRENCY);
     // eslint-disable-next-line no-await-in-loop
-    out[a.id] = await getAssetSize(a);
+    const sizes = await Promise.all(batch.map((a) => getAssetSize(a)));
+    batch.forEach((a, k) => {
+      out[a.id] = sizes[k];
+    });
   }
   return out;
 }
@@ -170,7 +199,7 @@ export async function getAlbumSnapshot(albumId, mediaType, precomputedAssets) {
   try {
     // eslint-disable-next-line global-require
     const PhotoMove = require('../../modules/photo-move');
-    if (PhotoMove.isAvailable() && sample.length > 0) {
+    if (PhotoMove.hasNativeSizes() && sample.length > 0) {
       const sizes = await PhotoMove.getSizes(sample.map((a) => String(a.id)));
       for (const a of sample) {
         sampleBytes += sizes[String(a.id).split('/')[0]] || 0;
@@ -312,16 +341,26 @@ export async function getCachedAssetList(albumId, mediaType) {
 export async function saveCachedAssetList(albumId, mediaType, assets) {
   try {
     if (!assets || assets.length === 0) return;
+    // Bail BEFORE the expensive part. A slim entry is ~300 B, so anything
+    // past ~5000 assets cannot fit anyway — the old code sorted, mapped and
+    // serialised a 20 000-entry list into a ~6 MB string just to measure it
+    // and throw it away, on the JS thread, while the cleaning screen held
+    // decoded bitmaps.
+    if (assets.length > MAX_CACHED_LIST) return;
     const fp = await getAlbumFingerprint(albumId, mediaType);
     // Only COMPLETE lists may be cached: a partial index would silently
     // hide the rest of the album from the cleaning flow.
-    if (fp.assetCount && assets.length < fp.assetCount) return;
+    if (fp.assetCount && assets.length !== fp.assetCount) return;
     const slim = [...assets]
       .sort((a, b) => (b.creationTime || 0) - (a.creationTime || 0))
       .map(slimAsset);
     const payload = JSON.stringify({ fingerprint: fp, assets: slim });
-    // Android AsyncStorage rejects values >2MB — skip (don't truncate).
-    if (payload.length > 1800000) return;
+    // Byte length, not String.length: the payload is stored as UTF-8 and a
+    // Chinese album/file name costs 3 bytes per character, so the old
+    // character-count guard let ~2.2 MB payloads through — which Android
+    // then rejected silently, so the cache never existed and every entry
+    // rescanned MediaStore from scratch.
+    if (utf8ByteLength(payload) > MAX_VALUE_BYTES) return;
     await AsyncStorage.setItem(`${LIST_PREFIX}${mediaType}_${albumId}`, payload);
   } catch (e) {
     // best effort

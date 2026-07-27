@@ -44,11 +44,26 @@ export function requestAllFilesPermission() {
 
 /**
  * Move assets into Pictures/<albumName>/ in place.
- * Returns [{id, ok, newPath?, error?}].
+ *
+ * `destDir` is an absolute directory path that overrides the album-name
+ * derived destination — pass the original folder when UNDOING a move, or a
+ * camera-roll photo comes back into Pictures/Camera instead of DCIM/Camera.
+ *
+ * Returns [{id, ok, newPath?, oldPath?, oldDir?, error?}].
  */
-export async function moveToAlbum(assetIds, albumName) {
+export async function moveToAlbum(assetIds, albumName, destDir = null) {
   if (!native || !native.moveToAlbum) throw new Error('unavailable');
-  return native.moveToAlbum(assetIds, albumName);
+  return native.moveToAlbum(assetIds, albumName, destDir);
+}
+
+/** True when this build can do in-place moves (Android only). */
+export function hasNativeMove() {
+  return !!(native && native.moveToAlbum);
+}
+
+/** True when batched MediaStore size lookups are available (Android only). */
+export function hasNativeSizes() {
+  return !!(native && native.getSizes);
 }
 
 /**

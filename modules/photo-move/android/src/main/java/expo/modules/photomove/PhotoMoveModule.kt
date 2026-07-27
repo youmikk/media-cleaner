@@ -65,14 +65,14 @@ class PhotoMoveModule : Module() {
       null
     }
 
-    AsyncFunction("moveToAlbum") { assetIds: List<String>, albumName: String ->
+    AsyncFunction("moveToAlbum") { assetIds: List<String>, albumName: String, destDir: String? ->
       val context = appContext.reactContext ?: throw Exception("NO_CONTEXT")
       if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
         !Environment.isExternalStorageManager()
       ) {
         throw Exception("PERMISSION_REQUIRED")
       }
-      assetIds.map { moveOne(context, it, albumName) }
+      assetIds.map { moveOne(context, it, albumName, destDir) }
     }
 
     // photoo-style SUBSAMPLED decode: the image is decoded small from the
@@ -100,23 +100,32 @@ class PhotoMoveModule : Module() {
         sample *= 2
       }
       val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-      val bmp = open()?.use { BitmapFactory.decodeStream(it, null, opts) }
-        ?: throw Exception("DECODE_FAILED")
-      val scaled = Bitmap.createScaledBitmap(bmp, size, size, true)
-      if (scaled !== bmp) bmp.recycle()
-      val pixels = IntArray(size * size)
-      scaled.getPixels(pixels, 0, size, 0, 0, size, size)
-      scaled.recycle()
-      val bytes = ByteArray(size * size)
-      for (i in pixels.indices) {
-        val p = pixels[i]
-        val r = (p shr 16) and 0xFF
-        val g = (p shr 8) and 0xFF
-        val b = p and 0xFF
-        val luma = (0.299 * r + 0.587 * g + 0.114 * b).toInt().coerceIn(0, 255)
-        bytes[i] = luma.toByte()
+      var bmp: Bitmap? = null
+      var scaled: Bitmap? = null
+      try {
+        bmp = open()?.use { BitmapFactory.decodeStream(it, null, opts) }
+          ?: throw Exception("DECODE_FAILED")
+        scaled = Bitmap.createScaledBitmap(bmp, size, size, true)
+        val pixels = IntArray(size * size)
+        scaled.getPixels(pixels, 0, size, 0, 0, size, size)
+        val bytes = ByteArray(size * size)
+        for (i in pixels.indices) {
+          val p = pixels[i]
+          val r = (p shr 16) and 0xFF
+          val g = (p shr 8) and 0xFF
+          val b = p and 0xFF
+          val luma = (0.299 * r + 0.587 * g + 0.114 * b).toInt().coerceIn(0, 255)
+          bytes[i] = luma.toByte()
+        }
+        Base64.encodeToString(bytes, Base64.NO_WRAP)
+      } finally {
+        // Without this, an OOM or decode failure leaked the full-resolution
+        // bitmap (megabytes) and left it to the finalizer — while up to
+        // CONCURRENCY decodes run at once and the JS side just moves on to
+        // the next photo. That is how a long analysis run OOM-killed the app.
+        if (scaled !== bmp) scaled?.recycle()
+        bmp?.recycle()
       }
-      Base64.encodeToString(bytes, Base64.NO_WRAP)
     }
 
     // Full EXIF via androidx ExifInterface (photoo-style): handles
@@ -183,11 +192,21 @@ class PhotoMoveModule : Module() {
     }
   }
 
+  /**
+   * Move one asset. `destDirOverride` is an absolute directory path used to
+   * UNDO a previous move: the original may well have lived in DCIM/Camera,
+   * and re-deriving the destination from an album name would drop it into
+   * Pictures/Camera instead — a different folder that shows up as a new
+   * album while the real camera roll silently loses a photo.
+   */
   private fun moveOne(
     context: Context,
     idStr: String,
-    albumName: String
+    albumName: String,
+    destDirOverride: String? = null
   ): Map<String, Any?> {
+    var dest: File? = null
+    var copied = false
     return try {
       val id = idStr.substringBefore('/').toLong()
       val filesUri = MediaStore.Files.getContentUri("external")
@@ -204,33 +223,67 @@ class PhotoMoveModule : Module() {
       if (source == null || !source.exists()) {
         return mapOf("id" to idStr, "ok" to false, "error" to "not_found")
       }
+      val oldPath = source.absolutePath
+      val oldDir = source.parentFile?.absolutePath
 
-      val destDir = File(
-        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
-        albumName
-      )
+      val destDir = if (!destDirOverride.isNullOrBlank()) {
+        File(destDirOverride)
+      } else {
+        // The album name is user-typed: strip anything that could escape
+        // the pictures root now that we hold All-Files access.
+        val safeName = albumName
+          .replace(Regex("[/\\\\]"), "_")
+          .replace("..", "_")
+          .trim()
+          .ifEmpty { "Album" }
+        File(
+          Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+          safeName
+        )
+      }
       if (!destDir.exists()) destDir.mkdirs()
-      var dest = File(destDir, source.name)
+      var target = File(destDir, source.name)
       var n = 1
-      while (dest.exists()) {
-        dest = File(destDir, "${source.nameWithoutExtension}_$n.${source.extension}")
+      while (target.exists() && n < 1000) {
+        target = File(destDir, "${source.nameWithoutExtension}_$n.${source.extension}")
         n++
       }
+      dest = target
 
       val originalMtime = source.lastModified()
-      var moved = source.renameTo(dest)
+      val sourceLength = source.length()
+      var moved = source.renameTo(target)
       if (!moved) {
-        // Cross-volume: stream copy, restore mtime, verify, delete source.
+        // Cross-volume: stream copy, then verify BEFORE touching the source.
         source.inputStream().use { input ->
-          dest.outputStream().use { output -> input.copyTo(output) }
+          FileOutputStream(target).use { output ->
+            input.copyTo(output)
+            output.flush()
+            // close() only guarantees the bytes reached the page cache. If
+            // the device loses power (or the process is killed) after the
+            // source is deleted but before the pages are written back, the
+            // photo is gone for good. Force it down first.
+            try {
+              output.fd.sync()
+            } catch (e: Exception) {
+              // sync unsupported on this fs — verification below still runs
+            }
+          }
         }
-        dest.setLastModified(originalMtime)
-        if (dest.exists() && dest.length() == source.length()) {
-          source.delete()
-          moved = true
-        } else {
-          dest.delete()
+        copied = true
+        if (!target.exists() || target.length() != sourceLength) {
+          target.delete()
+          return mapOf("id" to idStr, "ok" to false, "error" to "copy_incomplete")
         }
+        target.setLastModified(originalMtime)
+        // A failed delete used to still report success, leaving the SAME
+        // photo in two folders — which the duplicate detector then offered
+        // up for cleaning.
+        if (!source.delete()) {
+          target.delete()
+          return mapOf("id" to idStr, "ok" to false, "error" to "source_locked")
+        }
+        moved = true
       }
       if (!moved) {
         return mapOf("id" to idStr, "ok" to false, "error" to "move_failed")
@@ -240,12 +293,22 @@ class PhotoMoveModule : Module() {
       // created from the SAME bytes (EXIF taken-date) and SAME mtime.
       MediaScannerConnection.scanFile(
         context,
-        arrayOf(source.absolutePath, dest.absolutePath),
+        arrayOf(oldPath, target.absolutePath),
         null,
         null
       )
-      mapOf("id" to idStr, "ok" to true, "newPath" to dest.absolutePath)
+      mapOf(
+        "id" to idStr,
+        "ok" to true,
+        "newPath" to target.absolutePath,
+        "oldPath" to oldPath,
+        "oldDir" to oldDir
+      )
     } catch (e: Exception) {
+      // A partially written destination must never survive: MediaScanner
+      // would index the truncated file and the user gets a corrupt photo
+      // next to the intact original.
+      if (copied) dest?.delete()
       mapOf("id" to idStr, "ok" to false, "error" to (e.message ?: "unknown"))
     }
   }
