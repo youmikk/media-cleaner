@@ -16,6 +16,7 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.InputStream
 
 /**

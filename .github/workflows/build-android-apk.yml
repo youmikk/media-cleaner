@@ -1,85 +1,81 @@
-name: Build Android APK
+name: 构建 Android APK
 
 on:
   workflow_dispatch:
     inputs:
       release:
-        description: 'Also publish the APK as a GitHub Release (the in-app updater reads the latest release)'
+        description: '构建完成后自动发布到 Releases(应用内的更新检查读取这里)'
         type: boolean
         default: false
       tag:
-        description: 'Release tag, e.g. v1.0.1 (defaults to the app.json version)'
+        description: '发布标签,例如 v1.0.1(留空则自动取 app.json 里的版本号)'
         type: string
         required: false
 
-# A second run would fight the first over the Gradle cache.
+# 同时跑两个会争抢 Gradle 缓存。
 concurrency:
   group: android-apk-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    # Linux runners bill at 1x, macOS at 10x — Android needs no macOS.
+    # Linux runner 按 1 倍计费,macOS 是 10 倍 —— 安卓不需要 macOS。
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
-      contents: write # only used by the optional release step
+      contents: write # 仅发布 Release 时需要
     env:
-      # Lifted to job level because the `secrets` context is NOT available in
-      # a step-level `if:` — `env` is.
+      # 提到 job 级别是因为 step 的 `if:` 里读不到 `secrets` 上下文,只能读 `env`。
       ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
 
     steps:
-      - name: Checkout
+      - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: 安装 Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
 
-      # RN 0.81 / AGP 8.x require JDK 17; the runner default is newer and
-      # Gradle rejects it.
-      - name: Setup JDK 17
+      # RN 0.81 / AGP 8.x 需要 JDK 17;runner 默认版本更高,Gradle 会拒绝。
+      - name: 安装 JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Install dependencies
+      - name: 安装依赖
         run: npm ci
 
-      - name: Check version consistency
+      - name: 校验版本号一致
         id: meta
         run: |
           VERSION=$(node -p "require('./app.json').expo.version")
           PKG=$(node -p "require('./package.json').version")
-          APPV=$(grep -oP "APP_VERSION = '\K[^']+" src/utils/updateChecker.js)
+          APPV=$(sed -n "s/.*APP_VERSION = '\([^']*\)'.*/\1/p" src/utils/updateChecker.js)
           echo "app.json=$VERSION package.json=$PKG APP_VERSION=$APPV"
-          # These three must agree or the APK reports a version it isn't, and
-          # the in-app update check compares against the wrong number.
+          # 三处必须一致,否则打出来的包会汇报一个它自己都不是的版本号,
+          # 在线更新检查也会拿错的号去比较。
           if [ "$VERSION" != "$PKG" ] || [ "$VERSION" != "$APPV" ]; then
-            echo "::error::version mismatch between app.json, package.json and APP_VERSION"
+            echo "::error::版本号不一致:app.json / package.json / APP_VERSION 三者必须相同"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # Generates android/ from app.json + plugins, and autolinks the local
-      # native module in modules/photo-move.
-      - name: Expo prebuild (generate android project)
+      # 依据 app.json 和插件生成 android/,并自动链接 modules/photo-move 本地原生模块。
+      - name: 生成 android 工程(expo prebuild)
         run: npx expo prebuild -p android --no-install
 
-      # After prebuild: the Gradle wrapper does not exist before it.
-      - name: Setup Gradle (with cache)
+      # 必须放在 prebuild 之后:在那之前 Gradle wrapper 还不存在。
+      # 不传 build-root-directory —— 该 action 不认这个输入,只会打一条
+      # "unexpected input" 警告;缓存本来就是全局配置的,我们手动 cd android 编译。
+      - name: 配置 Gradle 缓存
         uses: gradle/actions/setup-gradle@v4
-        with:
-          build-root-directory: android
 
-      # Optional. Without these secrets the build uses the keystore bundled
-      # in the Expo template: still installable and still upgradeable (that
-      # key is fixed, not generated per run), just not publishable to Play.
-      - name: Configure release signing
+      # 可选。没有这些 secret 时会用 Expo 模板自带的 keystore:一样能装、
+      # 一样能覆盖升级(那把 key 是固定的,不是每次构建现生成),只是不能上架 Play。
+      - name: 配置正式签名
         if: env.ANDROID_KEYSTORE_BASE64 != ''
         env:
           STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -95,13 +91,13 @@ jobs:
           } >> android/gradle.properties
           node .github/scripts/patch-android-signing.js
 
-      - name: Build release APK
+      - name: 编译 release APK
         run: |
           cd android
           chmod +x ./gradlew
           ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Collect APK
+      - name: 收集产物
         id: apk
         run: |
           SRC=android/app/build/outputs/apk/release/app-release.apk
@@ -110,29 +106,30 @@ jobs:
           echo "path=$OUT" >> "$GITHUB_OUTPUT"
           ls -lh "$OUT"
 
-      - name: Upload artifact
+      - name: 上传 artifact
         uses: actions/upload-artifact@v4
         with:
           name: MediaCleaner-apk
           path: ${{ steps.apk.outputs.path }}
           retention-days: 30
 
-      # updateChecker.js polls the latest GitHub release once a day and
-      # offers whatever .apk asset it finds there.
-      - name: Publish GitHub Release
+      # 这一步很关键:updateChecker.js 每天扫一次最新 Release,
+      # 找到里面的 .apk 资产就提示用户更新。
+      - name: 发布到 Releases
         if: ${{ inputs.release }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ inputs.tag }}"
           if [ -z "$TAG" ]; then TAG="v${{ steps.meta.outputs.version }}"; fi
-          NOTES=$(node -p "
-            const e = require('./CHANGELOG.json')[0];
-            e && Array.isArray(e.notes) ? e.notes.map(n => '- ' + n).join('\n') : '';
-          ")
           if gh release view "$TAG" >/dev/null 2>&1; then
+            # 同一个标签下可能已经有 iOS workflow 传上来的 IPA,直接追加。
             gh release upload "$TAG" "${{ steps.apk.outputs.path }}" --clobber
           else
+            NOTES=$(node -p "
+              const e = require('./CHANGELOG.json')[0];
+              e && Array.isArray(e.notes) ? e.notes.map(n => '- ' + n).join('\n') : '';
+            ")
             gh release create "$TAG" "${{ steps.apk.outputs.path }}" \
               --title "MediaCleaner $TAG" --notes "$NOTES"
           fi
