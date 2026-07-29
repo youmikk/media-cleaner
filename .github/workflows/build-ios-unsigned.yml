@@ -1,24 +1,42 @@
-name: Build unsigned iOS IPA
+name: 构建 iOS IPA(未签名)
 
 on:
   workflow_dispatch:
+    inputs:
+      release:
+        description: '构建完成后自动发布到 Releases(不勾选则只保留为 artifact)'
+        type: boolean
+        default: false
+      tag:
+        description: '发布标签,例如 v1.0.1(留空则自动取 app.json 里的版本号)'
+        type: string
+        required: false
+
+concurrency:
+  group: ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-ios:
+  build:
+    # macOS runner 按 10 倍计费,所以只在需要时手动触发。
     runs-on: macos-26
     timeout-minutes: 60
+    permissions:
+      contents: write # 仅发布 Release 时需要
+
     steps:
-      - name: Checkout
+      - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: 安装 Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
 
-      - name: Select newest Xcode (need >= 16.1; 26.x enables Liquid Glass)
+      - name: 选择 Xcode(需 >= 16.1;26.x 才有原生液态玻璃)
         run: |
-          echo "Available Xcodes:"
+          echo "可用的 Xcode:"
           ls -d /Applications/Xcode*.app || true
           XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
           if [ -z "$XCODE" ]; then
@@ -29,18 +47,40 @@ jobs:
           fi
           xcodebuild -version
 
-      - name: Install JS dependencies
-        run: npm install
+      - name: 安装依赖
+        run: npm ci
 
-      - name: Expo prebuild (generate ios project)
+      - name: 校验版本号一致
+        id: meta
+        run: |
+          VERSION=$(node -p "require('./app.json').expo.version")
+          PKG=$(node -p "require('./package.json').version")
+          APPV=$(sed -n "s/.*APP_VERSION = '\([^']*\)'.*/\1/p" src/utils/updateChecker.js)
+          echo "app.json=$VERSION package.json=$PKG APP_VERSION=$APPV"
+          # 三处必须一致,否则打出来的包会汇报一个它自己都不是的版本号,
+          # 在线更新检查也会拿错的号去比较。
+          if [ "$VERSION" != "$PKG" ] || [ "$VERSION" != "$APPV" ]; then
+            echo "::error::版本号不一致:app.json / package.json / APP_VERSION 三者必须相同"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: 生成 ios 工程(expo prebuild)
         run: npx expo prebuild -p ios --no-install
 
-      - name: Install CocoaPods
+      - name: 缓存 CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: ios/Pods
+          key: pods-${{ runner.os }}-${{ hashFiles('ios/Podfile.lock') }}
+          restore-keys: pods-${{ runner.os }}-
+
+      - name: 安装 CocoaPods 依赖
         run: |
           cd ios
           pod install
 
-      - name: Build (unsigned)
+      - name: 编译(不签名)
         run: |
           cd ios
           xcodebuild \
@@ -53,15 +93,42 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
 
-      - name: Package IPA
+      - name: 打包 IPA
+        id: ipa
         run: |
           mkdir -p Payload
           cp -R ios/build/Build/Products/Release-iphoneos/MediaCleaner.app Payload/
-          zip -qry MediaCleaner-unsigned.ipa Payload
+          OUT="MediaCleaner-${{ steps.meta.outputs.version }}-${{ github.run_number }}-unsigned.ipa"
+          zip -qry "$OUT" Payload
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+          ls -lh "$OUT"
 
-      - name: Upload artifact
+      - name: 上传 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MediaCleaner-unsigned-ipa
-          path: MediaCleaner-unsigned.ipa
-          retention-days: 14
+          name: MediaCleaner-ipa
+          path: ${{ steps.ipa.outputs.path }}
+          retention-days: 30
+
+      - name: 发布到 Releases
+        if: ${{ inputs.release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then TAG="v${{ steps.meta.outputs.version }}"; fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # 同一个标签下可能已经有安卓 workflow 传上来的 APK,直接追加。
+            gh release upload "$TAG" "${{ steps.ipa.outputs.path }}" --clobber
+          else
+            node -e "
+              const e = require('./CHANGELOG.json')[0];
+              const notes = e && Array.isArray(e.notes)
+                ? e.notes.map(n => '- ' + n).join('\n')
+                : '';
+              const hint = '> iOS 安装包未经签名,需用 AltStore / Sideloadly 等工具自签后安装。';
+              console.log(notes + '\n\n' + hint);
+            " > "$RUNNER_TEMP/notes.md"
+            gh release create "$TAG" "${{ steps.ipa.outputs.path }}" \
+              --title "MediaCleaner $TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          fi

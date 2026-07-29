@@ -95,6 +95,40 @@ function shuffle(list) {
 }
 
 /**
+ * One card of the filmstrip.
+ *
+ * Its position depends ONLY on its absolute index in `visible`, never on
+ * which photo is currently selected — so the re-render that advances the
+ * selection moves nothing on screen. The parent renders these in a KEYED
+ * array, so a neighbour promoted to current keeps its already-decoded
+ * expo-image view instead of remounting.
+ */
+function StackLayer({ asset, index, screenW, offset, ty, dragId, children }) {
+  const style = useAnimatedStyle(() => {
+    const x = index * screenW + offset.value;
+    return {
+      transform: [
+        { translateX: x },
+        // Vertical drag belongs to the card that started the gesture. Any
+        // other card sits flat, which is what makes an up-swipe commit safe:
+        // the marked card unmounts still holding the offset, and the photo
+        // taking its place is simply at 0.
+        { translateY: dragId.value === asset.id ? ty.value : 0 },
+      ],
+      // Clamped: during a drag a neighbour can travel further than one
+      // screen, and the default linear extrapolation would take opacity
+      // negative.
+      opacity: interpolate(Math.abs(x), [0, screenW], [1, 0.4], 'clamp'),
+    };
+  }, [index, screenW, asset.id]);
+  return (
+    <Animated.View style={[StyleSheet.absoluteFill, style]}>
+      {children}
+    </Animated.View>
+  );
+}
+
+/**
  * Swipe-based photo cleaning flow.
  * - Swiping up MARKS a photo; the actual media-library deletion happens ONCE
  *   per group ("Delete All Marked") — a single system dialog per batch.
@@ -173,27 +207,22 @@ export default function CleaningScreen({ route, navigation }) {
   const reviewedSetRef = useRef(new Set());
 
   // ---- Animation shared values ----
-  const tx = useSharedValue(0);
+  // The strip offset is ABSOLUTE, not a per-card drag delta: every card sits
+  // at `index * SCREEN_W + offset`, so committing a swipe is a pure change
+  // of `offset` and the React re-render that follows moves nothing.
+  //
+  // The old shape — a relative `tx` zeroed in the same JS callback that
+  // called setPi — was a race. The shared-value write reaches the UI thread
+  // immediately, the re-render a frame or more later, and whichever won
+  // decided which flicker you got: the outgoing photo snapping back to
+  // centre (iOS) or a blank gap before the incoming one (Android).
+  const offset = useSharedValue(0);
   const ty = useSharedValue(0);
+  // Asset id the CURRENT gesture owns; only that card follows `ty`.
+  const dragId = useSharedValue('');
   const deleteProgress = useDerivedValue(() =>
     Math.min(1, Math.max(0, -ty.value / DELETE_THRESHOLD))
   );
-
-  const cardStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: tx.value }, { translateY: ty.value }],
-    opacity: interpolate(Math.abs(tx.value), [0, SCREEN_W], [1, 0.4]),
-  }));
-
-  // photoo-style CARD STACK: the neighbour the gesture is moving toward is
-  // ALREADY rendered underneath, so committing a swipe swaps to a photo
-  // that's fully on screen — zero load gap, zero flicker, and what you see
-  // is always the real asset (no stale frames).
-  const prevUnderStyle = useAnimatedStyle(() => ({
-    opacity: tx.value > 8 ? 1 : 0,
-  }));
-  const nextUnderStyle = useAnimatedStyle(() => ({
-    opacity: tx.value < -8 || ty.value < -8 ? 1 : 0,
-  }));
 
   // Timer is tracked so a rapid second toast replaces the first cleanly and
   // nothing calls setState after the screen is gone.
@@ -561,9 +590,37 @@ export default function CleaningScreen({ route, navigation }) {
   // photo the user never saw.
   const currentRef = useRef(current);
   currentRef.current = current;
-  // Stack neighbours (pre-rendered underneath the top card).
-  const prevAsset = currentIdx > 0 ? visible[currentIdx - 1] : null;
-  const nextAsset = visible[currentIdx + 1] || null;
+  // The rendered window: the current photo plus one neighbour each side.
+  // Keyed by asset id in the render below, so the neighbour a swipe promotes
+  // to current keeps its mounted (already decoded) image view.
+  const stack = useMemo(() => {
+    const out = [];
+    for (let i = currentIdx - 1; i <= currentIdx + 1; i++) {
+      if (i >= 0 && i < visible.length) out.push({ asset: visible[i], index: i });
+    }
+    return out;
+  }, [visible, currentIdx]);
+
+  // Keep the strip's resting position in sync with the committed index, and
+  // clear any leftover vertical drag.
+  //
+  // After a swipe the worklet has already animated `offset` to exactly this
+  // value, so this is a no-op — that is the whole point: the commit itself
+  // must not move anything. It only bites for PROGRAMMATIC jumps (group
+  // change, afterRemovalAdvance, resuming a session), where the strip has to
+  // be snapped into place. Clearing `ty`/`dragId` here is safe precisely
+  // because it runs AFTER React committed: an up-swiped card is already
+  // unmounted, so nothing snaps back — and an undo can't resurrect a card
+  // still holding the -SCREEN_H offset.
+  useEffect(() => {
+    const target = -currentIdx * SCREEN_W;
+    if (Math.abs(offset.value - target) > 0.5) offset.value = target;
+    // dragId FIRST: with no owner every card is already flat, so zeroing ty
+    // afterwards can't snap a still-mounted card back into view.
+    dragId.value = '';
+    if (ty.value !== 0) ty.value = 0;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentIdx, visible.length, gi, SCREEN_W]);
 
   // Freeze the background photo while the confirm sheet is open.
   useEffect(() => {
@@ -595,15 +652,15 @@ export default function CleaningScreen({ route, navigation }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible.length, markedAssets.length, group.length, loading, showConfirm]);
 
-  // Prefetch the next TWO photos so swiping feels instant even while the
-  // decoder is still warm on slower devices.
+  // Prefetch the photos just PAST the rendered window — the window itself
+  // (current ± 1) is really mounted and decodes on its own.
   useEffect(() => {
-    [visible[pi + 1], visible[pi + 2]].forEach((next) => {
+    [visible[currentIdx + 2], visible[currentIdx + 3]].forEach((next) => {
       if (next && next.mediaType !== 'video') {
         ExpoImage.prefetch(next.uri).catch(() => {});
       }
     });
-  }, [pi, visible]);
+  }, [currentIdx, visible]);
 
   // Resolve the current photo's address (GPS -> reverse geocode, cached).
   const [address, setAddress] = useState(null);
@@ -678,28 +735,18 @@ export default function CleaningScreen({ route, navigation }) {
     [pi]
   );
 
-  // ---- Gesture callbacks (card stack: committing a swipe resets the top
-  // card INSTANTLY — the photo underneath is already fully on screen) ----
+  // ---- Gesture callbacks ----
+  // NONE of these touch a shared value. The worklet has already animated the
+  // strip to its new resting place before handing over, so all that is left
+  // is to commit the index — and a commit that moves nothing cannot flicker.
   const onSwipeNext = useCallback(() => {
-    if (pi < visible.length - 1) {
-      setPi(pi + 1);
-      tx.value = 0;
-      ty.value = 0;
-    } else {
-      tx.value = withTiming(0, EASE);
-      endOfGroupRef.current();
-    }
-  }, [pi, visible.length, tx, ty]);
+    if (currentIdx < visible.length - 1) setPi(currentIdx + 1);
+    else endOfGroupRef.current();
+  }, [currentIdx, visible.length]);
 
   const onSwipePrev = useCallback(() => {
-    if (pi > 0) {
-      setPi(pi - 1);
-      tx.value = 0;
-      ty.value = 0;
-    } else {
-      tx.value = withTiming(0, EASE);
-    }
-  }, [pi, tx, ty]);
+    if (currentIdx > 0) setPi(currentIdx - 1);
+  }, [currentIdx]);
 
   const onSwipeDelete = useCallback(() => {
     if (!current) return;
@@ -709,10 +756,8 @@ export default function CleaningScreen({ route, navigation }) {
       // haptics unavailable
     }
     mark(current);
-    tx.value = 0;
-    ty.value = 0;
     afterRemovalAdvance(visible.length - 1);
-  }, [current, mark, visible.length, afterRemovalAdvance, ty, tx]);
+  }, [current, mark, visible.length, afterRemovalAdvance]);
 
   const onSwipeDown = useCallback(() => {
     if (current) setShowMove(true);
@@ -730,32 +775,62 @@ export default function CleaningScreen({ route, navigation }) {
   const callDel = useCallback(() => handlersRef.current.del(), []);
   const callDown = useCallback(() => handlersRef.current.down(), []);
 
+  // Captured per render and read inside the worklets below.
+  const restOffset = -currentIdx * SCREEN_W;
+  const currentId = current ? current.id : '';
+  const hasNext = currentIdx < visible.length - 1;
+  const hasPrev = currentIdx > 0;
+
   const pan = Gesture.Pan()
     .enabled(!showConfirm && !showMove && !showSimilar && !showExif)
+    .onStart(() => {
+      'worklet';
+      // Claim the vertical axis for THIS card only.
+      ty.value = 0;
+      dragId.value = currentId;
+    })
     .onUpdate((e) => {
       'worklet';
       if (Math.abs(e.translationX) > Math.abs(e.translationY)) {
-        tx.value = e.translationX;
+        offset.value = restOffset + e.translationX;
         ty.value = 0;
       } else {
+        // Re-assert the owner rather than trusting onStart alone: a missed
+        // claim would leave the card frozen while the trash bar filled up.
+        if (dragId.value !== currentId) dragId.value = currentId;
         ty.value = e.translationY;
-        tx.value = 0;
+        offset.value = restOffset;
       }
     })
     .onEnd((e) => {
       'worklet';
       const horizontal = Math.abs(e.translationX) > Math.abs(e.translationY);
       if (horizontal) {
-        if (e.translationX < -SWIPE_X || e.velocityX < -800) {
-          tx.value = withTiming(-SCREEN_W, { duration: 110 }, (finished) => {
-            if (finished) runOnJS(callNext)();
-          });
-        } else if (e.translationX > SWIPE_X || e.velocityX > 800) {
-          tx.value = withTiming(SCREEN_W, { duration: 110 }, (finished) => {
-            if (finished) runOnJS(callPrev)();
-          });
+        const goNext = e.translationX < -SWIPE_X || e.velocityX < -800;
+        const goPrev = e.translationX > SWIPE_X || e.velocityX > 800;
+        if (goNext && hasNext) {
+          offset.value = withTiming(
+            restOffset - SCREEN_W,
+            { duration: 110 },
+            (finished) => {
+              if (finished) runOnJS(callNext)();
+            }
+          );
+        } else if (goPrev && hasPrev) {
+          offset.value = withTiming(
+            restOffset + SCREEN_W,
+            { duration: 110 },
+            (finished) => {
+              if (finished) runOnJS(callPrev)();
+            }
+          );
+        } else if (goNext) {
+          // Last photo of the group: there is nothing to slide to, so settle
+          // back and let the handler close the group out.
+          offset.value = withTiming(restOffset, EASE);
+          runOnJS(callNext)();
         } else {
-          tx.value = withTiming(0, EASE);
+          offset.value = withTiming(restOffset, EASE);
         }
       } else if (
         e.translationY < -DELETE_THRESHOLD ||
@@ -1023,8 +1098,9 @@ export default function CleaningScreen({ route, navigation }) {
     }
     setShowConfirm(false);
     setPi(0);
-    tx.value = 0;
-    ty.value = 0;
+    // No shared-value reset here: the strip resyncs itself once React has
+    // committed the new group (see the offset effect above).
+
     // Android has no OS memory-warning event — proactively drop the decoded
     // -bitmap cache every few groups so huge albums can't OOM the app.
     if (Platform.OS === 'android' && (gi + 1) % 5 === 0) {
@@ -1126,8 +1202,6 @@ export default function CleaningScreen({ route, navigation }) {
     }
     setShowConfirm(false);
     if (pi >= visible.length) setPi(visible.length - 1);
-    tx.value = 0;
-    ty.value = 0;
   };
 
   // ---- Completion / exit ----
@@ -1251,9 +1325,9 @@ export default function CleaningScreen({ route, navigation }) {
     );
   }
 
-  const sizeLabel =
-    sizesById && displayAsset && sizesById[displayAsset.id]
-      ? formatBytes(sizesById[displayAsset.id])
+  const sizeLabelFor = (asset) =>
+    sizesById && asset && sizesById[asset.id]
+      ? formatBytes(sizesById[asset.id])
       : null;
 
   return (
@@ -1289,31 +1363,35 @@ export default function CleaningScreen({ route, navigation }) {
         </Pressable>
       </View>
 
-      <View style={styles.photoArea}>
-        {/* UNDER layer: the neighbours, already rendered (photoo stack) */}
-        {prevAsset && (
-          <Animated.View style={[StyleSheet.absoluteFill, prevUnderStyle]}>
-            <PhotoCard asset={prevAsset} inactive isFavorite={false} marked={false} />
-          </Animated.View>
-        )}
-        {nextAsset && (
-          <Animated.View style={[StyleSheet.absoluteFill, nextUnderStyle]}>
-            <PhotoCard asset={nextAsset} inactive isFavorite={false} marked={false} />
-          </Animated.View>
-        )}
-        {/* TOP card: keyed per asset — always shows the REAL current photo */}
-        <GestureDetector gesture={pan}>
-          <Animated.View style={[StyleSheet.absoluteFill, cardStyle]}>
-            <PhotoCard
-              key={displayAsset ? displayAsset.id : 'none'}
-              asset={displayAsset}
-              isFavorite={displayAsset ? isFavorite(displayAsset.id) : false}
-              marked={displayAsset ? markedIds.has(displayAsset.id) : false}
-              sizeLabel={sizeLabel}
-            />
-          </Animated.View>
-        </GestureDetector>
-      </View>
+      {/* Filmstrip: current photo ± 1 neighbour, laid out side by side and
+          moved as ONE strip. The gesture lives on the STATIC container, so
+          it survives the card sliding out from under the finger. */}
+      <GestureDetector gesture={pan}>
+        <View style={styles.photoArea}>
+          {stack.map(({ asset, index }) => {
+            const isCurrent = index === currentIdx;
+            return (
+              <StackLayer
+                key={asset.id}
+                asset={asset}
+                index={index}
+                screenW={SCREEN_W}
+                offset={offset}
+                ty={ty}
+                dragId={dragId}
+              >
+                <PhotoCard
+                  asset={asset}
+                  inactive={!isCurrent}
+                  isFavorite={isFavorite(asset.id)}
+                  marked={markedIds.has(asset.id)}
+                  sizeLabel={isCurrent ? sizeLabelFor(asset) : null}
+                />
+              </StackLayer>
+            );
+          })}
+        </View>
+      </GestureDetector>
 
       <View style={styles.indicatorWrap}>
         <PageIndicator

@@ -9,6 +9,8 @@ import CoreGraphics
  *   of Android's ExifInterface.
  * - decodeGray: fast grayscale thumbnails; ph:// assets use the Photos
  *   framework's SYSTEM-CACHED thumbnails (near-zero cost).
+ * - getSizes / librarySize: file sizes read straight out of the Photos
+ *   database, the counterpart of Android's MediaStore queries.
  * - Move-related functions are Android-only and report unavailable here
  *   (iOS albums are collections — nothing needs moving).
  */
@@ -108,9 +110,139 @@ public class PhotoMoveModule: Module {
       }
       return Data(bytes).base64EncodedString()
     }
+
+    // Batch file sizes straight from the Photos database: ONE fetch for the
+    // whole id list, then resource metadata per asset. Nothing decodes and
+    // nothing is read off disk, so this replaces the per-asset
+    // getAssetInfoAsync + file stat pair the JS side used to fall back to —
+    // that pair cost two native round-trips PER PHOTO and is why "largest
+    // files" and the storage numbers took tens of seconds on iOS.
+    AsyncFunction("getSizes") { (assetIds: [String]) -> [String: Double] in
+      // expo-media-library ids carry a "/L0/001" suffix; PhotoKit wants the
+      // bare local identifier, and the JS side looks results up by that same
+      // first path component.
+      var identifiers: [String] = []
+      var seen = Set<String>()
+      for raw in assetIds {
+        let key = raw.components(separatedBy: "/").first ?? raw
+        if key.isEmpty || seen.contains(key) { continue }
+        seen.insert(key)
+        identifiers.append(key)
+      }
+      if identifiers.isEmpty { return [:] }
+
+      let fetched = PHAsset.fetchAssets(
+        withLocalIdentifiers: identifiers, options: nil
+      )
+      var assets: [PHAsset] = []
+      assets.reserveCapacity(fetched.count)
+      fetched.enumerateObjects { asset, _, _ in assets.append(asset) }
+      if assets.isEmpty { return [:] }
+
+      var out: [String: Double] = [:]
+      let lock = NSLock()
+      PhotoMoveModule.forEachChunk(assets) { slice in
+        var local: [String: Double] = [:]
+        for asset in slice {
+          let bytes = PhotoMoveModule.assetBytes(asset)
+          // 0 means "unknown" (iCloud-only original, revoked access). Leave
+          // the id out so the JS caller can fall back for just that one
+          // instead of reporting a photo as weightless.
+          if bytes > 0 {
+            let key =
+              asset.localIdentifier.components(separatedBy: "/").first
+              ?? asset.localIdentifier
+            local[key] = bytes
+          }
+        }
+        lock.lock()
+        out.merge(local) { _, new in new }
+        lock.unlock()
+      }
+      return out
+    }
+
+    // Exact size of the whole library. This is the only full-library walk in
+    // the app, so it fans out across cores; the JS caller caches the result
+    // against the library fingerprint and only recomputes when it changes.
+    AsyncFunction("librarySize") { () -> [String: Double] in
+      let photo = PhotoMoveModule.sumLibrary(.image)
+      let video = PhotoMoveModule.sumLibrary(.video)
+      return [
+        "photoBytes": photo.bytes,
+        "photoCount": photo.count,
+        "videoBytes": video.bytes,
+        "videoCount": video.count,
+      ]
+    }
   }
 
   // ---- helpers ----
+
+  /**
+   * Total bytes of an asset the way the Photos app counts it: every
+   * resource added together (a Live Photo is a still PLUS a movie).
+   *
+   * `fileSize` is not a declared property on PHAssetResource, but the value
+   * is there and KVC returns it from metadata alone. The public
+   * alternatives — requestContentEditingInput, PHAssetResourceManager —
+   * all do real per-asset I/O, which is exactly the cost this exists to
+   * avoid. Returns 0 when the key is missing so the caller can fall back.
+   */
+  private static func assetBytes(_ asset: PHAsset) -> Double {
+    var total: Int64 = 0
+    for resource in PHAssetResource.assetResources(for: asset) {
+      if let size = resource.value(forKey: "fileSize") as? NSNumber {
+        total += size.int64Value
+      }
+    }
+    return Double(total)
+  }
+
+  /** Split across cores and run every slice concurrently, then join. */
+  private static func forEachChunk(
+    _ assets: [PHAsset],
+    _ body: (ArraySlice<PHAsset>) -> Void
+  ) {
+    let count = assets.count
+    if count == 0 { return }
+    let cores = max(1, ProcessInfo.processInfo.activeProcessorCount)
+    // Below this the thread hand-off costs more than the work itself.
+    let chunkSize = max(64, (count + cores - 1) / cores)
+    let starts = stride(from: 0, to: count, by: chunkSize).map { $0 }
+    if starts.count == 1 {
+      body(assets[0..<count])
+      return
+    }
+    DispatchQueue.concurrentPerform(iterations: starts.count) { i in
+      let start = starts[i]
+      body(assets[start..<min(start + chunkSize, count)])
+    }
+  }
+
+  /** (totalBytes, count) for one media type across the whole library. */
+  private static func sumLibrary(
+    _ type: PHAssetMediaType
+  ) -> (bytes: Double, count: Double) {
+    let options = PHFetchOptions()
+    options.includeHiddenAssets = false
+    let result = PHAsset.fetchAssets(with: type, options: options)
+    if result.count == 0 { return (0, 0) }
+    var assets: [PHAsset] = []
+    assets.reserveCapacity(result.count)
+    result.enumerateObjects { asset, _, _ in assets.append(asset) }
+
+    var total: Double = 0
+    let lock = NSLock()
+    forEachChunk(assets) { slice in
+      var local: Double = 0
+      for asset in slice { local += assetBytes(asset) }
+      lock.lock()
+      total += local
+      lock.unlock()
+    }
+    return (total, Double(assets.count))
+  }
 
   private static func imageSource(for uri: String) -> CGImageSource? {
     if uri.hasPrefix("ph://") {

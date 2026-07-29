@@ -3,12 +3,21 @@ import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system/legacy';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { utf8ByteLength, MAX_VALUE_BYTES } from './safeStore';
+import { log } from './logger';
 
 export const ALL_ALBUM_ID = 'all';
 const PAGE_SIZE = 200;
 const MAX_ASSETS = 20000; // safety cap for very large libraries
-const SNAPSHOT_SAMPLE = 60; // size sampling cap for storage snapshots
+const SNAPSHOT_SAMPLE = 60; // size sampling cap when there is no native query
 const SNAPSHOT_CONCURRENCY = 6;
+// Assets measured for real per album snapshot. Cheap on Android (a cursor),
+// a few hundred ms on iOS for a big album — past this the average of 4000
+// real sizes is accurate enough that reading more only costs latency.
+const EXACT_SIZE_CAP = 4000;
+// Ids per native size query. The native side re-chunks internally; this only
+// bounds how much crosses the bridge at once.
+const SIZE_QUERY_CHUNK = 4000;
+const LIBRARY_SIZE_KEY = '@mediacleaner/library_size';
 // A slim asset serialises to ~300 B, so this is the point past which the
 // list cannot fit under the per-value storage ceiling.
 const MAX_CACHED_LIST = 4800;
@@ -116,15 +125,15 @@ export async function getAssetsByIds(ids) {
  */
 export async function getAssetSize(asset) {
   const id = asset && asset.id ? asset.id : asset;
-  // MediaStore size first (native module): under Android scoped storage,
-  // stat-ing another app's media file often reports 0/not-found.
+  // System index first (native module): under Android scoped storage,
+  // stat-ing another app's media file often reports 0/not-found, and on iOS
+  // the stat path costs two native round-trips per photo.
   try {
     // eslint-disable-next-line global-require
     const PhotoMove = require('../../modules/photo-move');
-    // hasNativeSizes(), not isAvailable(): the iOS module exists but has no
-    // getSizes, so isAvailable() sent every iOS call down a path that threw
-    // and was swallowed — pure overhead on the platform that then falls back
-    // to the slow per-file loop anyway.
+    // hasNativeSizes(), not isAvailable(): getSizes now exists on BOTH
+    // platforms, but an older installed binary (or Expo Go) has the module
+    // without it, and calling it there just throws into a swallowed catch.
     if (PhotoMove.hasNativeSizes()) {
       const sizes = await PhotoMove.getSizes([String(id)]);
       const s = sizes[String(id).split('/')[0]];
@@ -147,81 +156,234 @@ export async function getAssetSize(asset) {
 }
 
 /**
- * Batch sizes for many assets: ONE MediaStore query via the native module
- * (photoo-style) when available, per-file stats otherwise.
- * Returns {assetId: bytes}.
+ * Ask the native module for {id: bytes} over an arbitrarily long id list.
+ * Returns null when the module can't answer at all, so callers can tell
+ * "unavailable" apart from "answered, some ids unknown".
+ */
+async function nativeSizes(ids) {
+  // eslint-disable-next-line global-require
+  const PhotoMove = require('../../modules/photo-move');
+  if (!PhotoMove.hasNativeSizes() || ids.length === 0) return null;
+  const out = {};
+  try {
+    for (let i = 0; i < ids.length; i += SIZE_QUERY_CHUNK) {
+      const part = ids.slice(i, i + SIZE_QUERY_CHUNK);
+      // eslint-disable-next-line no-await-in-loop
+      const sizes = await PhotoMove.getSizes(part);
+      Object.assign(out, sizes);
+    }
+  } catch (e) {
+    log('size', `native getSizes failed: ${(e && e.message) || e}`);
+    return null;
+  }
+  return out;
+}
+
+/**
+ * Batch sizes for many assets: ONE system-index query via the native module
+ * (MediaStore on Android, PhotoKit on iOS) when available, per-file stats
+ * otherwise. Returns {assetId: bytes}.
  */
 export async function getAssetSizes(assets) {
   const out = {};
-  // eslint-disable-next-line global-require
-  const PhotoMove = require('../../modules/photo-move');
-  if (PhotoMove.hasNativeSizes()) {
-    try {
-      const sizes = await PhotoMove.getSizes(assets.map((a) => a.id));
-      let missing = 0;
-      for (const a of assets) {
-        const s = sizes[String(a.id).split('/')[0]];
-        if (s > 0) out[a.id] = s;
-        else missing++;
-      }
-      if (missing === 0) return out;
-    } catch (e) {
-      // fall through to per-file stats
+  const sizes = await nativeSizes(assets.map((a) => String(a.id)));
+  if (sizes) {
+    let missing = 0;
+    for (const a of assets) {
+      const s = sizes[String(a.id).split('/')[0]];
+      if (s > 0) out[a.id] = s;
+      else missing++;
     }
+    if (missing === 0) return out;
+    log('size', `native covered ${assets.length - missing}/${assets.length}`);
   }
-  // Fallback (always the case on iOS): run it CONCURRENTLY. The old serial
-  // loop meant two awaited native calls per asset — hundreds of assets took
-  // tens of seconds, which is why "largest files" felt broken on iOS.
+  // Fallback: run it CONCURRENTLY. The old serial loop meant two awaited
+  // native calls per asset — hundreds of assets took tens of seconds, which
+  // is why "largest files" felt broken on iOS.
   const pending = assets.filter((a) => !(out[a.id] > 0));
   for (let i = 0; i < pending.length; i += SNAPSHOT_CONCURRENCY) {
     const batch = pending.slice(i, i + SNAPSHOT_CONCURRENCY);
     // eslint-disable-next-line no-await-in-loop
-    const sizes = await Promise.all(batch.map((a) => getAssetSize(a)));
+    const stats = await Promise.all(batch.map((a) => getAssetSize(a)));
     batch.forEach((a, k) => {
-      out[a.id] = sizes[k];
+      out[a.id] = stats[k];
     });
   }
   return out;
 }
 
 /**
+ * Pick at most `n` items spread EVENLY across the list.
+ *
+ * Taking the first n instead is what made album size estimates so wrong:
+ * assets come back newest-first, and the newest photos are systematically
+ * the largest (newer phone, bigger sensor), so the head over-estimated
+ * every big album.
+ */
+function spread(list, n) {
+  if (list.length <= n) return list;
+  const step = list.length / n;
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(list[Math.floor(i * step)]);
+  return out;
+}
+
+/**
  * Compute a storage snapshot {count, bytes} for an album.
- * Sizes are sampled (first SNAPSHOT_SAMPLE assets) and extrapolated for
- * very large albums to keep this fast.
+ *
+ * With the native size query up to EXACT_SIZE_CAP assets are measured for
+ * real — one batched system-index query, no per-file I/O — so most albums
+ * come out exact. Only without the native module does this drop to sizing
+ * SNAPSHOT_SAMPLE assets, which is where the wildly-off "original gallery
+ * size" numbers came from.
  */
 export async function getAlbumSnapshot(albumId, mediaType, precomputedAssets) {
   const assets = precomputedAssets || (await getAssets(albumId, mediaType));
-  // Small sample — ONE MediaStore query via the native module when
-  // available, parallel per-file stats otherwise.
-  const sample = assets.slice(0, SNAPSHOT_SAMPLE);
-  let sampleBytes = 0;
-  let batched = false;
-  try {
-    // eslint-disable-next-line global-require
-    const PhotoMove = require('../../modules/photo-move');
-    if (PhotoMove.hasNativeSizes() && sample.length > 0) {
-      const sizes = await PhotoMove.getSizes(sample.map((a) => String(a.id)));
-      for (const a of sample) {
-        sampleBytes += sizes[String(a.id).split('/')[0]] || 0;
+  if (assets.length === 0) return { count: 0, bytes: 0 };
+
+  const capped = assets.slice(0, MAX_ASSETS);
+  const target = spread(capped, EXACT_SIZE_CAP);
+  const sizes = await nativeSizes(target.map((a) => String(a.id)));
+  if (sizes) {
+    let bytes = 0;
+    let measured = 0;
+    for (const a of target) {
+      const s = sizes[String(a.id).split('/')[0]];
+      if (s > 0) {
+        bytes += s;
+        measured++;
       }
-      batched = sampleBytes > 0;
     }
-  } catch (e) {
-    batched = false;
-  }
-  if (!batched) {
-    sampleBytes = 0;
-    for (let i = 0; i < sample.length; i += SNAPSHOT_CONCURRENCY) {
-      const batch = sample.slice(i, i + SNAPSHOT_CONCURRENCY);
-      const sizes = await Promise.all(batch.map((a) => getAssetSize(a)));
-      for (const s of sizes) sampleBytes += s;
+    if (measured > 0) {
+      // Ids we couldn't read (iCloud-only originals, a file the scanner
+      // hasn't indexed) must not shrink the total — spread the measured
+      // average over them, and over anything past the cap.
+      const total = Math.round((bytes / measured) * assets.length);
+      log('size', `${albumId}/${mediaType}: native ${measured}/${assets.length}`);
+      return { count: assets.length, bytes: total };
     }
+    log('size', `${albumId}/${mediaType}: native returned no sizes`);
   }
+
+  // Sampled fallback (Expo Go / older binaries): parallel per-file stats.
+  const sample = spread(capped, SNAPSHOT_SAMPLE);
+  let sampleBytes = 0;
+  for (let i = 0; i < sample.length; i += SNAPSHOT_CONCURRENCY) {
+    const batch = sample.slice(i, i + SNAPSHOT_CONCURRENCY);
+    // eslint-disable-next-line no-await-in-loop
+    const stats = await Promise.all(batch.map((a) => getAssetSize(a)));
+    for (const s of stats) sampleBytes += s;
+  }
+  log(
+    'size',
+    `${albumId}/${mediaType}: sampled ${sample.length} -> ${sampleBytes}B`
+  );
   const bytes =
     sample.length > 0
       ? Math.round((sampleBytes / sample.length) * assets.length)
       : 0;
   return { count: assets.length, bytes };
+}
+
+/**
+ * Real size of the user's whole photo + video library.
+ *
+ * Prefers the native whole-library query (exact, straight off the system
+ * index, no per-file I/O) and caches it against the library fingerprint, so
+ * repeat visits cost nothing.
+ *
+ * Returns null when only the SLOW path is left (Expo Go, binaries built
+ * before librarySize existed): walking every page of a 20k-asset library to
+ * size 60 of them is not something a screen should do on entry — callers
+ * fall back to the stored lifetime reference instead. Pass
+ * allowSlowFallback for the rare caller that really wants a number.
+ *
+ * Otherwise {bytes, photoBytes, videoBytes, photoCount, videoCount, exact}.
+ */
+export async function getLibrarySize({
+  force = false,
+  allowSlowFallback = false,
+} = {}) {
+  let fingerprint = null;
+  try {
+    const [p, v] = await Promise.all([
+      getAlbumFingerprint(ALL_ALBUM_ID, 'photo'),
+      getAlbumFingerprint(ALL_ALBUM_ID, 'video'),
+    ]);
+    fingerprint = [
+      p.assetCount,
+      p.latestModificationTime,
+      v.assetCount,
+      v.latestModificationTime,
+    ].join('_');
+  } catch (e) {
+    fingerprint = null; // freshness unknown — recompute rather than lie
+  }
+
+  if (!force && fingerprint) {
+    try {
+      const raw = await AsyncStorage.getItem(LIBRARY_SIZE_KEY);
+      const cached = raw ? JSON.parse(raw) : null;
+      if (cached && cached.fingerprint === fingerprint && cached.value) {
+        return cached.value;
+      }
+    } catch (e) {
+      // unreadable cache — just recompute
+    }
+  }
+
+  let value = null;
+  // eslint-disable-next-line global-require
+  const PhotoMove = require('../../modules/photo-move');
+  if (PhotoMove.hasLibrarySize()) {
+    try {
+      const r = await PhotoMove.librarySize();
+      const photoBytes = r.photoBytes || 0;
+      const videoBytes = r.videoBytes || 0;
+      if (photoBytes + videoBytes > 0) {
+        value = {
+          bytes: photoBytes + videoBytes,
+          photoBytes,
+          videoBytes,
+          photoCount: r.photoCount || 0,
+          videoCount: r.videoCount || 0,
+          exact: true,
+        };
+        log('size', `library: native ${value.bytes}B`);
+      } else {
+        log('size', 'library: native returned 0 — falling back');
+      }
+    } catch (e) {
+      log('size', `library: native failed (${(e && e.message) || e})`);
+    }
+  }
+
+  if (!value && allowSlowFallback) {
+    const [p, v] = await Promise.all([
+      getAlbumSnapshot(ALL_ALBUM_ID, 'photo'),
+      getAlbumSnapshot(ALL_ALBUM_ID, 'video'),
+    ]);
+    value = {
+      bytes: p.bytes + v.bytes,
+      photoBytes: p.bytes,
+      videoBytes: v.bytes,
+      photoCount: p.count,
+      videoCount: v.count,
+      exact: false,
+    };
+  }
+
+  if (value && fingerprint) {
+    try {
+      await AsyncStorage.setItem(
+        LIBRARY_SIZE_KEY,
+        JSON.stringify({ fingerprint, value })
+      );
+    } catch (e) {
+      // best effort — a missing cache only costs one recompute
+    }
+  }
+  return value;
 }
 
 /**

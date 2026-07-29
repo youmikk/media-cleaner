@@ -75,9 +75,14 @@ export function hasNativeMove() {
   return !!(native && native.moveToAlbum);
 }
 
-/** True when batched MediaStore size lookups are available (Android only). */
+/** True when batched MediaStore/PhotoKit size lookups are available. */
 export function hasNativeSizes() {
   return !!(native && native.getSizes);
+}
+
+/** True when the exact whole-library size query is available. */
+export function hasLibrarySize() {
+  return !!(native && native.librarySize);
 }
 
 /**
@@ -89,10 +94,25 @@ export async function decodeGray(uri, size) {
   return native.decodeGray(uri, size);
 }
 
-/** Batch file sizes via ONE MediaStore query: {id: bytes}. */
+/**
+ * Batch file sizes: {id: bytes}. ONE MediaStore query on Android, ONE
+ * PhotoKit fetch on iOS. Ids missing from the result have an UNKNOWN size —
+ * not a zero-byte file — so callers must fall back rather than treat them
+ * as free.
+ */
 export async function getSizes(assetIds) {
   if (!native || !native.getSizes) throw new Error('unavailable');
   return native.getSizes(assetIds);
+}
+
+/**
+ * Exact size of the whole media library, straight from the system index:
+ * {photoBytes, photoCount, videoBytes, videoCount}. No sampling, no
+ * extrapolation, no per-file I/O.
+ */
+export async function librarySize() {
+  if (!native || !native.librarySize) throw new Error('unavailable');
+  return native.librarySize();
 }
 
 /**

@@ -155,9 +155,14 @@ export default function PhotoCard({
         <Image
           source={{ uri: asset.uri }}
           // FIXED full-size container + contain: the layout never resizes
-          // between aspect ratios, so switching photos can't flash. No
-          // recyclingKey — the previous photo stays visible until the next
-          // one has decoded, then cross-fades.
+          // between aspect ratios, so switching photos can't flash.
+          //
+          // The cleaning screen mounts one of these PER ASSET and keys them
+          // by id, so this view's source never changes for its whole life —
+          // it decodes once, off screen, and is already painted by the time
+          // the card slides into view. (It used to be remounted on every
+          // swipe, which threw the decoded image away and made the incoming
+          // photo fade in from nothing.)
           style={styles.fillImage}
           contentFit="contain"
           cachePolicy="memory-disk"

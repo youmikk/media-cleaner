@@ -25,11 +25,13 @@ import {
   getAssets,
   getAssetSizes,
   getAssetsByIds,
+  getLibrarySize,
   findAlbumByTitle,
   formatBytes,
   ALL_ALBUM_ID,
 } from '../utils/albumHelpers';
 import analyzer from '../utils/chunkedAnalyzer';
+import * as statsManager from '../utils/statsManager';
 import { groupBursts } from '../utils/burstDetection';
 import {
   enableDailyReminder,
@@ -98,6 +100,43 @@ export default function ProfileScreen({ navigation }) {
       refreshTrash();
     }, [refreshTrash])
   );
+
+  // Real gallery size, measured off the system index. It used to come from
+  // stats.originalSizeBytes, which is only written when a cleaning session
+  // FINISHES and even then holds one album's extrapolated estimate — so a
+  // user who had not finished a session saw "0 B", and on Android the
+  // sampled estimate behind it read 0 anyway.
+  const [librarySize, setLibrarySize] = useState(null);
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      // Same reason as the caches below: let the tab transition paint first.
+      const timer = setTimeout(() => {
+        getLibrarySize()
+          .then((size) => {
+            if (alive && size && size.bytes > 0) setLibrarySize(size);
+          })
+          .catch(() => {});
+      }, 500);
+      return () => {
+        alive = false;
+        clearTimeout(timer);
+      };
+    }, [])
+  );
+
+  // "Original" = what the library would weigh if we had deleted nothing.
+  // Persisted as the lifetime reference so builds without the native query
+  // (Expo Go, older binaries) still have a number to show.
+  const measuredOriginal =
+    librarySize && librarySize.bytes > 0
+      ? librarySize.bytes + (stats.spaceSavedBytes || 0)
+      : 0;
+  useEffect(() => {
+    if (measuredOriginal > 0) {
+      statsManager.setOriginalSize(measuredOriginal).catch(() => {});
+    }
+  }, [measuredOriginal]);
 
   // Low-quality photos AND exact duplicates come from the chunked
   // analyzer's cached metrics.
@@ -572,7 +611,7 @@ export default function ProfileScreen({ navigation }) {
         <Section title={t('storage_title')}>
           <StorageChart
             savedBytes={stats.spaceSavedBytes}
-            originalBytes={stats.originalSizeBytes}
+            originalBytes={measuredOriginal || stats.originalSizeBytes}
           />
         </Section>
 

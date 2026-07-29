@@ -18,6 +18,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 
 /**
  * photoo-style in-place photo moving.
@@ -168,29 +170,192 @@ class PhotoMoveModule : Module() {
       out
     }
 
-    // Batch file sizes in ONE MediaStore query (vs hundreds of stat calls).
+    // Batch file sizes without a single per-file stat.
+    //
+    // Images/Video are queried FIRST because those are the collections the
+    // granular Android 13+ permissions (READ_MEDIA_IMAGES / READ_MEDIA_VIDEO)
+    // actually cover. Going straight to MediaStore.Files — as this used to —
+    // can come back empty on those devices, and the JS caller then falls back
+    // to FileSystem stats, which report 0 under scoped storage. That is how
+    // the gallery size ended up showing 0 B on Android.
     AsyncFunction("getSizes") { assetIds: List<String> ->
       val context = appContext.reactContext ?: throw Exception("NO_CONTEXT")
-      val out = mutableMapOf<String, Double>()
       val numeric = assetIds.mapNotNull { it.substringBefore('/').toLongOrNull() }
-      if (numeric.isEmpty()) return@AsyncFunction out
-      val filesUri = MediaStore.Files.getContentUri("external")
-      numeric.chunked(500).forEach { chunk ->
-        val placeholders = chunk.joinToString(",") { "?" }
+      val out = ConcurrentHashMap<String, Double>()
+      if (numeric.isEmpty()) return@AsyncFunction out.toMap()
+
+      var missing = numeric
+      for (collection in listOf(
+        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+        MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+        MediaStore.Files.getContentUri("external")
+      )) {
+        querySizesInto(context, collection, missing, out)
+        missing = missing.filter { !out.containsKey(it.toString()) }
+        if (missing.isEmpty()) break
+      }
+      // Last resort: with "All files access" the real path can be stat-ed.
+      // Only reached for rows whose SIZE column is empty — a file the media
+      // scanner has written but not finished indexing.
+      if (
+        missing.isNotEmpty() &&
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+        Environment.isExternalStorageManager()
+      ) {
+        statSizesInto(context, missing, out)
+      }
+      out.toMap()
+    }
+
+    // Exact size of the WHOLE media library: one cursor per collection
+    // projecting only SIZE, no per-file I/O. A 20k-asset library costs a few
+    // tens of milliseconds, so the JS side no longer has to size 60 assets
+    // and extrapolate the rest.
+    AsyncFunction("librarySize") {
+      val context = appContext.reactContext ?: throw Exception("NO_CONTEXT")
+      // Two independent cursors — run them on two threads.
+      val pool = Executors.newFixedThreadPool(2)
+      try {
+        val photo = pool.submit<LongArray> {
+          sumCollection(context, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
+        }
+        val video = pool.submit<LongArray> {
+          sumCollection(context, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
+        }
+        val p = photo.get()
+        val v = video.get()
+        mapOf(
+          "photoBytes" to p[0].toDouble(),
+          "photoCount" to p[1].toDouble(),
+          "videoBytes" to v[0].toDouble(),
+          "videoCount" to v[1].toDouble()
+        )
+      } finally {
+        pool.shutdown()
+      }
+    }
+  }
+
+  /**
+   * Fill `out` with {id: bytes} for whichever of `ids` exist in `collection`.
+   *
+   * The 500-id chunks run in PARALLEL: ContentResolver is thread-safe, and a
+   * large selection needs dozens of cursors that used to be issued one after
+   * another on a single background thread.
+   */
+  private fun querySizesInto(
+    context: Context,
+    collection: Uri,
+    ids: List<Long>,
+    out: ConcurrentHashMap<String, Double>
+  ) {
+    val chunks = ids.chunked(500)
+    if (chunks.isEmpty()) return
+    if (chunks.size == 1) {
+      querySizeChunkInto(context, collection, chunks[0], out)
+      return
+    }
+    val threads = minOf(
+      chunks.size,
+      maxOf(1, minOf(4, Runtime.getRuntime().availableProcessors()))
+    )
+    val pool = Executors.newFixedThreadPool(threads)
+    try {
+      chunks
+        // Explicit Runnable: a bare lambda returning Unit is ambiguous
+        // between submit(Runnable) and submit(Callable<Unit>).
+        .map { c ->
+          pool.submit(Runnable { querySizeChunkInto(context, collection, c, out) })
+        }
+        .forEach { it.get() }
+    } finally {
+      pool.shutdown()
+    }
+  }
+
+  private fun querySizeChunkInto(
+    context: Context,
+    collection: Uri,
+    chunk: List<Long>,
+    out: ConcurrentHashMap<String, Double>
+  ) {
+    val placeholders = chunk.joinToString(",") { "?" }
+    try {
+      context.contentResolver.query(
+        collection,
+        arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.SIZE),
+        "${MediaStore.MediaColumns._ID} IN ($placeholders)",
+        chunk.map { it.toString() }.toTypedArray(),
+        null
+      )?.use { c ->
+        while (c.moveToNext()) {
+          val size = c.getLong(1)
+          // A 0 is "unknown", not "empty file" — leaving the id out lets the
+          // next collection (or the stat fallback) answer for it.
+          if (size > 0) out[c.getLong(0).toString()] = size.toDouble()
+        }
+      }
+    } catch (e: Exception) {
+      // One unreadable collection must not kill the whole batch: the caller
+      // still gets everything the other collections returned.
+    }
+  }
+
+  /**
+   * Stat the real files for ids MediaStore has no SIZE for. Only called with
+   * "All files access" — without it File.length() returns 0 under scoped
+   * storage, which is the very problem this module exists to avoid.
+   */
+  private fun statSizesInto(
+    context: Context,
+    ids: List<Long>,
+    out: ConcurrentHashMap<String, Double>
+  ) {
+    val filesUri = MediaStore.Files.getContentUri("external")
+    ids.chunked(500).forEach { chunk ->
+      val placeholders = chunk.joinToString(",") { "?" }
+      try {
         context.contentResolver.query(
           filesUri,
-          arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.SIZE),
+          arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DATA),
           "${MediaStore.MediaColumns._ID} IN ($placeholders)",
           chunk.map { it.toString() }.toTypedArray(),
           null
         )?.use { c ->
           while (c.moveToNext()) {
-            out[c.getLong(0).toString()] = c.getLong(1).toDouble()
+            val path = c.getString(1) ?: continue
+            val len = File(path).length()
+            if (len > 0) out[c.getLong(0).toString()] = len.toDouble()
           }
         }
+      } catch (e: Exception) {
+        // best effort — a missing id just stays "unknown size" for the caller
       }
-      out
     }
+  }
+
+  /** [totalBytes, count] for one MediaStore collection. */
+  private fun sumCollection(context: Context, collection: Uri): LongArray {
+    var bytes = 0L
+    var count = 0L
+    try {
+      context.contentResolver.query(
+        collection,
+        arrayOf(MediaStore.MediaColumns.SIZE),
+        null,
+        null,
+        null
+      )?.use { c ->
+        while (c.moveToNext()) {
+          count++
+          bytes += c.getLong(0)
+        }
+      }
+    } catch (e: Exception) {
+      // Permission revoked mid-flight — report what we have rather than
+      // failing the whole call and leaving the UI with no number at all.
+    }
+    return longArrayOf(bytes, count)
   }
 
   /**
