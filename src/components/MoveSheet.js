@@ -13,19 +13,31 @@ import { useSettings } from '../context/SettingsContext';
 
 /**
  * Bottom sheet listing target albums for "Move to Album".
+ *
+ * `albums` overrides the library lookup — the onboarding drill passes its own
+ * list so the sheet can never come up empty (a user with no albums yet would
+ * otherwise be stuck on a step with nothing to tap).
  */
-export default function MoveSheet({ visible, excludeAlbumId, onClose, onSelect }) {
+export default function MoveSheet({
+  visible,
+  excludeAlbumId,
+  onClose,
+  onSelect,
+  albums: albumsOverride = null,
+}) {
   const { colors, t } = useSettings();
   const [albums, setAlbums] = useState([]);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || albumsOverride) return;
     MediaLibrary.getAlbumsAsync()
       .then((all) =>
         setAlbums(all.filter((a) => a.id !== excludeAlbumId))
       )
       .catch(() => setAlbums([]));
-  }, [visible, excludeAlbumId]);
+  }, [visible, excludeAlbumId, albumsOverride]);
+
+  const data = albumsOverride || albums;
 
   return (
     <Modal visible={visible} transparent animationType="fade">
@@ -38,7 +50,7 @@ export default function MoveSheet({ visible, excludeAlbumId, onClose, onSelect }
             {t('move_to_album')}
           </Text>
           <FlatList
-            data={albums}
+            data={data}
             keyExtractor={(item) => item.id}
             style={{ maxHeight: 380 }}
             renderItem={({ item }) => (

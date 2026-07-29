@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export const APP_VERSION = '1.0.1';
+export const APP_VERSION = '1.0.2';
 const RELEASES_API =
   'https://api.github.com/repos/youmikk/media-cleaner/releases/latest';
 const LAST_CHECK_KEY = '@mediacleaner/last_update_check';

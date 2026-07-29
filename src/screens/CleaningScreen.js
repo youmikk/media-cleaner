@@ -727,10 +727,16 @@ export default function CleaningScreen({ route, navigation }) {
   // (Assigned every render below, after nextGroup exists.)
   const endOfGroupRef = useRef(() => {});
 
+  // Marking a photo ends the group the moment there is nothing left AFTER
+  // it. Stepping back onto an already-reviewed photo (what this used to do
+  // when earlier photos had been KEPT) made the user swipe forward through
+  // the keepers again just to reach the confirmation.
+  //
+  // `remainingCount` is what `visible` will hold once React commits, so
+  // `pi >= remainingCount` means "the removed photo was the last one".
   const afterRemovalAdvance = useCallback(
     (remainingCount) => {
-      if (remainingCount === 0) endOfGroupRef.current();
-      else if (pi >= remainingCount) setPi(remainingCount - 1);
+      if (pi >= remainingCount) endOfGroupRef.current();
     },
     [pi]
   );
@@ -1191,17 +1197,15 @@ export default function CleaningScreen({ route, navigation }) {
     }
   };
 
+  // Backing out of the sheet (X / backdrop / Android back) is NOT a decision:
+  // the marks stay and so does the group. It used to treat "everything in
+  // this group is marked" as "keep all" — clearing every mark AND jumping to
+  // the next group, so one stray tap threw away the whole group's work.
+  // Only the explicit "keep all" button does that now.
   const closeConfirmOnly = () => {
     if (deleting) return;
-    if (visible.length === 0) {
-      // Every photo in the group is marked and the user backed out —
-      // treat it as "keep all" so nothing is deleted silently later.
-      clearGroupMarks();
-      nextGroup();
-      return;
-    }
     setShowConfirm(false);
-    if (pi >= visible.length) setPi(visible.length - 1);
+    if (pi >= visible.length) setPi(Math.max(0, visible.length - 1));
   };
 
   // ---- Completion / exit ----
@@ -1390,6 +1394,25 @@ export default function CleaningScreen({ route, navigation }) {
               </StackLayer>
             );
           })}
+          {/* Every photo in the group is marked, so the strip is empty.
+              Without this the screen was a dead end: closing the sheet left a
+              blank card area with no way back to it. */}
+          {stack.length === 0 && markedAssets.length > 0 && (
+            <View style={styles.allMarked}>
+              <Ionicons name="trash-outline" size={46} color={colors.subtext} />
+              <Text style={[styles.allMarkedText, { color: colors.subtext }]}>
+                {t('all_marked_hint')}
+              </Text>
+              <Pressable
+                style={[styles.doneBtn, { backgroundColor: colors.accent }]}
+                onPress={() => setShowConfirm(true)}
+              >
+                <Text style={styles.doneBtnText}>
+                  {t('review_marked', { count: markedAssets.length })}
+                </Text>
+              </Pressable>
+            </View>
+          )}
         </View>
       </GestureDetector>
 
@@ -1512,6 +1535,13 @@ const styles = StyleSheet.create({
   topSub: { fontSize: 12, marginTop: 2 },
   exitBtn: { borderRadius: 18, padding: 8 },
   photoArea: { flex: 1, marginBottom: 8 },
+  allMarked: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+  },
+  allMarkedText: { fontSize: 14, textAlign: 'center', paddingHorizontal: 24 },
   // Sits ABOVE the album-chip row (chips: bottom+80, ~36 tall) — no overlap.
   indicatorWrap: { paddingVertical: 8, marginBottom: 158 },
   chipsWrap: { position: 'absolute', left: 0, right: 0 },

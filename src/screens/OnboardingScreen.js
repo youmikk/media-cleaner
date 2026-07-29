@@ -1,29 +1,47 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
   Pressable,
   StyleSheet,
-  Animated,
-  PanResponder,
   AppState,
   Linking,
   Platform,
   useWindowDimensions,
 } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  useDerivedValue,
+  withRepeat,
+  withSpring,
+  withTiming,
+  runOnJS,
+  interpolate,
+} from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
+import * as MediaLibrary from 'expo-media-library';
 import { useSettings } from '../context/SettingsContext';
 import { ensureMediaPermission, getMediaPermission } from '../utils/permissions';
 import * as PhotoMove from '../../modules/photo-move';
+import GlowingTrashBar from '../components/GlowingTrashBar';
+import PageIndicator from '../components/PageIndicator';
+import BottomInfoBar from '../components/BottomInfoBar';
+import AlbumChips from '../components/AlbumChips';
+import MoveSheet from '../components/MoveSheet';
 
-// Page 0 is the permission step; pages 1..3 are the gesture drills, in the
-// same order the user will meet them in the cleaning flow.
+// Page 0 is the permission step; pages 1..4 are the drills, in the same order
+// the user will meet them in the cleaning flow. `sheet` and `chip` steps are
+// not swipes: they teach the two ways to CHOOSE a category, which is where
+// people got stuck — the swipe alone only opens the picker.
 const GESTURE_STEPS = [
-  { key: 'tutorial_step1', icon: 'swap-horizontal', axis: 'x', dir: 0 },
-  { key: 'tutorial_step2', icon: 'trash', axis: 'y', dir: -1 },
-  { key: 'tutorial_step3', icon: 'albums', axis: 'y', dir: 1 },
+  { key: 'tutorial_step1', axis: 'x', dir: 0 },
+  { key: 'tutorial_step2', axis: 'y', dir: -1 },
+  { key: 'tutorial_step3', axis: 'y', dir: 1, sheet: true },
+  { key: 'tutorial_step4', axis: null, dir: 0, chip: true },
 ];
 const TOTAL_PAGES = GESTURE_STEPS.length + 1;
 const PASS_X = 60; // horizontal travel that counts as "browsed"
@@ -38,11 +56,16 @@ const isGranted = (s) => s === 'granted' || s === 'limited';
  * Step 1 asks for photo-library access (and, on Android native builds, the
  * "All files access" that in-place categorizing needs) — the app cannot do
  * anything useful before that, so nothing else is shown until it is granted.
- * Steps 2-4 are hands-on: the user must actually perform each swipe on a
- * dummy card to move on, so the gesture is learned rather than read.
+ * The rest are hands-on: the user must actually perform each swipe (and pick
+ * a real category) to move on, so it is learned rather than read.
+ *
+ * The drill pages deliberately render the SAME chrome as CleaningScreen —
+ * the glowing trash bar, the top bar, the page dots, the album chip row and
+ * the floating info bar are the real components, not lookalikes. A tutorial
+ * that teaches a screen the user never sees teaches nothing.
  *
  * `mode="permissions"` reuses only the first page — used after an OTA update
- * lands to re-check access without repeating the gesture drills.
+ * lands to re-check access without repeating the drills.
  *
  * Rendered by App.js INSTEAD of the navigator, so no alert or background
  * work can appear on top of it.
@@ -58,6 +81,8 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
   const [busy, setBusy] = useState(false);
   const [files, setFiles] = useState(false);
   const [passed, setPassed] = useState(false);
+  const [showSheet, setShowSheet] = useState(false);
+  const [realAlbums, setRealAlbums] = useState([]);
 
   // Android-only, and only in builds that actually contain the module.
   const showFilesRow = Platform.OS === 'android' && PhotoMove.isAvailable();
@@ -94,16 +119,35 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
     }
   };
 
+  // The user's OWN albums, so the chips and the picker look exactly like they
+  // will in daily use. Nothing is moved here — selecting only passes a step.
+  useEffect(() => {
+    if (permissionsOnly || !isGranted(media)) return;
+    MediaLibrary.getAlbumsAsync()
+      .then((all) => setRealAlbums(all.filter((a) => a.assetCount > 0)))
+      .catch(() => setRealAlbums([]));
+  }, [media, permissionsOnly]);
+
+  // A brand-new phone can legitimately have no albums, and an empty chip row
+  // (or an empty picker) leaves the step impossible to complete.
+  const albums = useMemo(() => {
+    if (realAlbums.length >= 2) return realAlbums.slice(0, 8);
+    const demo = [
+      { id: '__demo_a', title: t('tutorial_demo_album_a'), assetCount: 0 },
+      { id: '__demo_b', title: t('tutorial_demo_album_b'), assetCount: 0 },
+    ];
+    return [...realAlbums, ...demo].slice(0, 8);
+  }, [realAlbums, t]);
+
   // ---- Gesture drill ----------------------------------------------------
-  const pos = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
-  const hint = useRef(new Animated.Value(0)).current;
+  const tx = useSharedValue(0);
+  const ty = useSharedValue(0);
   const timerRef = useRef(null);
-  // PanResponder is created once; its callbacks would otherwise capture the
-  // first render's page/passed forever.
-  const liveRef = useRef({ page, passed });
-  liveRef.current = { page, passed };
-  const releaseRef = useRef(() => {});
-  const moveRef = useRef(() => {});
+  const demoAsset = useRef({ id: '__demo', creationTime: Date.now() }).current;
+  // The advance callback must not read `page` from a stale closure — it is
+  // fired from a timer and from gesture callbacks.
+  const pageRef = useRef(page);
+  pageRef.current = page;
 
   const finish = useCallback(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
@@ -111,169 +155,169 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
   }, [onDone]);
 
   const advance = useCallback(() => {
-    const current = liveRef.current.page;
+    const current = pageRef.current;
     if (current >= GESTURE_STEPS.length) {
       finish();
       return;
     }
-    pos.setValue({ x: 0, y: 0 });
     setPassed(false);
+    setShowSheet(false);
+    tx.value = 0;
+    ty.value = 0;
     setPage(current + 1);
-  }, [finish, pos]);
+  }, [finish, tx, ty]);
 
-  const springBack = useCallback(() => {
-    Animated.spring(pos, {
-      toValue: { x: 0, y: 0 },
-      // JS-driven on purpose: `pos` is also setValue()'d from the pan
-      // handler and read back through interpolations for the trash bar —
-      // mixing that with the native driver is exactly the combination RN
-      // refuses at runtime.
-      useNativeDriver: false,
-      friction: 7,
-      tension: 70,
-    }).start();
-  }, [pos]);
-
-  moveRef.current = (g) => {
-    const s = GESTURE_STEPS[liveRef.current.page - 1];
-    if (!s || liveRef.current.passed) return;
-    // Movement off the drilled axis is damped — the card visibly prefers the
-    // direction being taught.
-    if (s.axis === 'x') pos.setValue({ x: g.dx, y: g.dy * 0.15 });
-    else pos.setValue({ x: g.dx * 0.15, y: g.dy });
-  };
-
-  releaseRef.current = (g) => {
-    const s = GESTURE_STEPS[liveRef.current.page - 1];
-    if (!s || liveRef.current.passed) return;
-    const horizontal = Math.abs(g.dx) > Math.abs(g.dy);
-    let ok;
-    if (s.axis === 'x') ok = horizontal && Math.abs(g.dx) > PASS_X;
-    else if (s.dir < 0) ok = !horizontal && g.dy < -PASS_Y;
-    else ok = !horizontal && g.dy > PASS_Y;
-
-    if (!ok) {
-      springBack();
-      return;
-    }
+  /** Mark the current step done, celebrate, move on. */
+  const completeStep = useCallback(() => {
     setPassed(true);
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
       () => {}
     );
-    const fly =
-      s.axis === 'x'
-        ? { x: Math.sign(g.dx) * width, y: 0 }
-        : { x: 0, y: s.dir * height };
-    Animated.timing(pos, {
-      toValue: fly,
-      duration: 220,
-      useNativeDriver: false,
-    }).start(() => {
-      timerRef.current = setTimeout(advance, CELEBRATE_MS);
-    });
-  };
+    timerRef.current = setTimeout(advance, CELEBRATE_MS);
+  }, [advance]);
 
-  const pan = useRef(
-    PanResponder.create({
-      onMoveShouldSetPanResponder: (_, g) =>
-        Math.abs(g.dx) > 8 || Math.abs(g.dy) > 8,
-      onPanResponderMove: (_, g) => moveRef.current(g),
-      onPanResponderRelease: (_, g) => releaseRef.current(g),
-      onPanResponderTerminate: () => springBack(),
-    })
-  ).current;
+  /** The swipe itself landed. For the move drill that only OPENS the picker —
+   *  the step is not done until a category is actually chosen. */
+  const onSwipeLanded = useCallback(
+    (opensSheet) => {
+      if (opensSheet) setShowSheet(true);
+      else completeStep();
+    },
+    [completeStep]
+  );
+
+  /** Picker dismissed without choosing: bring the card back so they retry. */
+  const cancelSheet = useCallback(() => {
+    setShowSheet(false);
+    tx.value = withSpring(0, { damping: 16 });
+    ty.value = withSpring(0, { damping: 16 });
+  }, [tx, ty]);
 
   useEffect(() => () => clearTimeout(timerRef.current), []);
 
-  // Looping direction hint. It fades out at the end of each cycle so the
-  // reset to the start position is never visible.
+  const axis = step ? step.axis : null;
+  const dir = step ? step.dir : 0;
+  const opensSheet = !!(step && step.sheet);
+  const swipeEnabled = !!axis && !passed && !showSheet;
+
+  const pan = Gesture.Pan()
+    .enabled(swipeEnabled)
+    .onUpdate((e) => {
+      'worklet';
+      // Movement off the drilled axis is damped — the card visibly prefers
+      // the direction being taught.
+      if (axis === 'x') {
+        tx.value = e.translationX;
+        ty.value = e.translationY * 0.15;
+      } else {
+        tx.value = e.translationX * 0.15;
+        ty.value = e.translationY;
+      }
+    })
+    .onEnd((e) => {
+      'worklet';
+      const horizontal = Math.abs(e.translationX) > Math.abs(e.translationY);
+      let ok;
+      if (axis === 'x') ok = horizontal && Math.abs(e.translationX) > PASS_X;
+      else if (dir < 0) ok = !horizontal && e.translationY < -PASS_Y;
+      else ok = !horizontal && e.translationY > PASS_Y;
+
+      if (!ok) {
+        tx.value = withSpring(0, { damping: 16 });
+        ty.value = withSpring(0, { damping: 16 });
+        return;
+      }
+      if (axis === 'x') {
+        const to = e.translationX < 0 ? -width : width;
+        tx.value = withTiming(to, { duration: 220 }, (finished) => {
+          if (finished) runOnJS(onSwipeLanded)(opensSheet);
+        });
+      } else {
+        ty.value = withTiming(dir * height, { duration: 220 }, (finished) => {
+          if (finished) runOnJS(onSwipeLanded)(opensSheet);
+        });
+      }
+    });
+
+  const cardStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: tx.value }, { translateY: ty.value }],
+    opacity: interpolate(Math.abs(tx.value), [0, width], [1, 0.4], 'clamp'),
+  }));
+
+  // Same shape the cleaning screen feeds GlowingTrashBar, so the bar behaves
+  // identically here: full glow exactly when the swipe would delete.
+  const trashProgress = useDerivedValue(() =>
+    Math.min(1, Math.max(0, -ty.value / PASS_Y))
+  );
+
+  // Looping direction hint, drawn over the card like a coach mark. It fades
+  // out at the end of each cycle so the reset to the start is never visible.
+  const hint = useSharedValue(0);
   useEffect(() => {
     if (!step) return undefined;
-    hint.setValue(0);
-    const loop = Animated.loop(
-      Animated.timing(hint, {
-        toValue: 1,
-        duration: 1100,
-        useNativeDriver: true,
-      })
-    );
-    loop.start();
-    return () => loop.stop();
+    hint.value = 0;
+    hint.value = withRepeat(withTiming(1, { duration: 1100 }), -1, false);
+    return () => {
+      hint.value = 0;
+    };
   }, [step, hint]);
 
-  const hintStyle = {
-    opacity: hint.interpolate({
-      inputRange: [0, 0.15, 0.75, 1],
-      outputRange: [0, 1, 1, 0],
-    }),
-    transform: [
-      step && step.axis === 'x'
-        ? {
-            translateX: hint.interpolate({
-              inputRange: [0, 1],
-              outputRange: [-16, 16],
-            }),
-          }
-        : {
-            translateY: hint.interpolate({
-              inputRange: [0, 1],
-              outputRange: [0, (step ? step.dir : 1) * 26],
-            }),
-          },
-    ],
-  };
-
-  // Delete drill: the red bar tracks the upward drag, exactly like the real
-  // GlowingTrashBar in the cleaning screen.
-  const trashProgress = pos.y.interpolate({
-    inputRange: [-PASS_Y * 2, 0],
-    outputRange: [1, 0],
-    extrapolate: 'clamp',
-  });
+  const hintStyle = useAnimatedStyle(() => {
+    const fade = interpolate(hint.value, [0, 0.15, 0.75, 1], [0, 1, 1, 0], 'clamp');
+    const travel = interpolate(hint.value, [0, 1], [0, 26]);
+    return {
+      opacity: fade,
+      transform:
+        axis === 'x'
+          ? [{ translateX: interpolate(hint.value, [0, 1], [-16, 16]) }]
+          : [{ translateY: (axis === 'y' ? dir : 1) * travel }],
+    };
+  }, [axis, dir]);
 
   const canContinue = isGranted(media);
 
-  return (
-    <View
-      style={[
-        styles.root,
-        {
-          backgroundColor: colors.background,
-          paddingTop: insets.top + 12,
-          paddingBottom: insets.bottom + 20,
-        },
-      ]}
-    >
-      <View style={styles.topBar}>
-        <View style={styles.dots}>
-          {permissionsOnly
-            ? null
-            : Array.from({ length: TOTAL_PAGES }).map((_, i) => (
-                <View
-                  key={i}
-                  style={[
-                    styles.dot,
-                    {
-                      backgroundColor:
-                        i === page ? colors.accent : colors.chartTrack,
-                      width: i === page ? 20 : 6,
-                    },
-                  ]}
-                />
-              ))}
+  // ---- Page 0: permissions ----------------------------------------------
+  if (page === 0) {
+    return (
+      <SafeAreaView
+        edges={['top', 'left', 'right']}
+        style={[
+          styles.root,
+          {
+            backgroundColor: colors.background,
+            paddingBottom: insets.bottom + 20,
+          },
+        ]}
+      >
+        <View style={styles.topBar}>
+          <View style={styles.dots}>
+            {permissionsOnly
+              ? null
+              : Array.from({ length: TOTAL_PAGES }).map((_, i) => (
+                  <View
+                    key={i}
+                    style={[
+                      styles.dot,
+                      {
+                        backgroundColor:
+                          i === page ? colors.accent : colors.chartTrack,
+                        width: i === page ? 20 : 6,
+                      },
+                    ]}
+                  />
+                ))}
+          </View>
+          {permissionsOnly ? (
+            <Pressable onPress={finish} hitSlop={12} style={styles.skip}>
+              <Text style={[styles.skipText, { color: colors.subtext }]}>
+                {t('skip')}
+              </Text>
+            </Pressable>
+          ) : (
+            <View style={styles.skip} />
+          )}
         </View>
-        {page > 0 || permissionsOnly ? (
-          <Pressable onPress={finish} hitSlop={12} style={styles.skip}>
-            <Text style={[styles.skipText, { color: colors.subtext }]}>
-              {t('skip')}
-            </Text>
-          </Pressable>
-        ) : (
-          <View style={styles.skip} />
-        )}
-      </View>
 
-      {page === 0 ? (
         <View style={styles.body}>
           <View style={[styles.hero, { backgroundColor: colors.accentSoft }]}>
             <Ionicons
@@ -338,98 +382,13 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
             </Text>
           ) : null}
         </View>
-      ) : (
-        <View style={styles.body} {...pan.panHandlers}>
-          {step.dir < 0 ? (
-            <Animated.View
-              style={[
-                styles.trashBar,
-                {
-                  backgroundColor: colors.danger,
-                  opacity: trashProgress,
-                  transform: [
-                    {
-                      translateY: trashProgress.interpolate({
-                        inputRange: [0, 1],
-                        outputRange: [-70, 0],
-                      }),
-                    },
-                  ],
-                },
-              ]}
-            >
-              <Ionicons name="trash" size={22} color="#fff" />
-            </Animated.View>
-          ) : null}
 
-          <Animated.View
-            style={[
-              styles.card,
-              {
-                backgroundColor: colors.card,
-                borderColor: colors.border,
-                transform: pos.getTranslateTransform(),
-              },
-            ]}
-          >
-            <View
-              style={[
-                styles.cardIcon,
-                {
-                  backgroundColor: passed
-                    ? 'rgba(48,209,88,0.15)'
-                    : step.icon === 'trash'
-                      ? colors.dangerSoft
-                      : colors.accentSoft,
-                },
-              ]}
-            >
-              <Ionicons
-                name={passed ? 'checkmark' : step.icon}
-                size={40}
-                color={
-                  passed
-                    ? colors.success
-                    : step.icon === 'trash'
-                      ? colors.danger
-                      : colors.accent
-                }
-              />
-            </View>
-            <Text style={[styles.cardHint, { color: colors.subtext }]}>
-              {passed ? t('onboarding_nice') : t('onboarding_try')}
-            </Text>
-          </Animated.View>
-
-          <Animated.View style={[styles.arrow, hintStyle]}>
-            <Ionicons
-              name={
-                step.axis === 'x'
-                  ? 'swap-horizontal'
-                  : step.dir < 0
-                    ? 'arrow-up'
-                    : 'arrow-down'
-              }
-              size={26}
-              color={colors.accent}
-            />
-          </Animated.View>
-
-          <Text style={[styles.stepText, { color: colors.text }]}>
-            {t(step.key)}
-          </Text>
-        </View>
-      )}
-
-      {page === 0 ? (
         <Pressable
           disabled={!canContinue}
           onPress={() => (permissionsOnly ? finish() : setPage(1))}
           style={[
             styles.cta,
-            {
-              backgroundColor: canContinue ? colors.accent : colors.chartTrack,
-            },
+            { backgroundColor: canContinue ? colors.accent : colors.chartTrack },
           ]}
         >
           <Text
@@ -443,11 +402,158 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
               : t(permissionsOnly ? 'done' : 'onboarding_continue')}
           </Text>
         </Pressable>
-      ) : (
-        <Text style={[styles.footNote, { color: colors.subtext }]}>
-          {t('onboarding_gesture_foot')}
-        </Text>
-      )}
+      </SafeAreaView>
+    );
+  }
+
+  // ---- Pages 1..4: the drill, wearing the cleaning screen's clothes ------
+  return (
+    <SafeAreaView
+      edges={['top', 'left', 'right']}
+      style={[styles.screen, { backgroundColor: colors.background }]}
+    >
+      <GlowingTrashBar progress={trashProgress} />
+
+      <View style={styles.cleanTopBar}>
+        <View>
+          <Text
+            style={[styles.topTitle, { color: colors.text }]}
+            numberOfLines={1}
+          >
+            {t('all_photos')}
+          </Text>
+          <Text style={[styles.topSub, { color: colors.subtext }]}>
+            {t('group_of', { current: 1, total: 1 })} ·{' '}
+            {t('photo_of', { current: page, total: GESTURE_STEPS.length })}
+          </Text>
+        </View>
+        <Pressable
+          onPress={finish}
+          hitSlop={10}
+          style={[
+            styles.exitBtn,
+            {
+              backgroundColor: colors.chartTrack,
+              borderWidth: StyleSheet.hairlineWidth,
+              borderColor: colors.border,
+            },
+          ]}
+        >
+          <Text style={[styles.skipText, { color: colors.text }]}>
+            {t('skip')}
+          </Text>
+        </Pressable>
+      </View>
+
+      <GestureDetector gesture={pan}>
+        <View style={styles.photoArea}>
+          <Animated.View style={[StyleSheet.absoluteFill, cardStyle]}>
+            <DemoCard
+              colors={colors}
+              t={t}
+              passed={passed}
+              marked={dir < 0}
+              ty={ty}
+            />
+          </Animated.View>
+
+          <View style={styles.coach} pointerEvents="none">
+            <View style={styles.coachScrim}>
+              <Animated.View style={hintStyle}>
+                <Ionicons
+                  name={
+                    axis === 'x'
+                      ? 'swap-horizontal'
+                      : axis === 'y'
+                        ? dir < 0
+                          ? 'arrow-up'
+                          : 'arrow-down'
+                        : 'hand-left'
+                  }
+                  size={28}
+                  color="#fff"
+                />
+              </Animated.View>
+              <Text style={styles.coachText}>{t(step.key)}</Text>
+              <Text style={styles.coachSub}>
+                {passed
+                  ? t('onboarding_nice')
+                  : t(axis ? 'onboarding_try' : 'onboarding_tap')}
+              </Text>
+            </View>
+          </View>
+        </View>
+      </GestureDetector>
+
+      <View style={styles.indicatorWrap}>
+        <PageIndicator total={GESTURE_STEPS.length} index={page - 1} />
+      </View>
+
+      {/* The chip row is always on screen — that is what the real flow looks
+          like — but only accepts taps on the step that teaches it. */}
+      <View
+        style={[styles.chipsWrap, { bottom: Math.max(insets.bottom, 12) + 80 }]}
+        pointerEvents={step.chip && !passed ? 'box-none' : 'none'}
+      >
+        <AlbumChips
+          albums={albums}
+          currentAlbumId={null}
+          onSelect={() => completeStep()}
+          onCreate={() => completeStep()}
+        />
+      </View>
+
+      <BottomInfoBar
+        asset={demoAsset}
+        isFavorite={false}
+        onToggleFavorite={() => {}}
+        onPressDate={() => {}}
+        undoCount={0}
+        onUndo={() => {}}
+      />
+
+      <MoveSheet
+        visible={showSheet}
+        albums={albums}
+        onClose={cancelSheet}
+        onSelect={() => {
+          setShowSheet(false);
+          completeStep();
+        }}
+      />
+    </SafeAreaView>
+  );
+}
+
+/**
+ * Stand-in for a real photo. Same frame, radius and badge placement as
+ * PhotoCard so the drill and the cleaning screen read as the same surface.
+ */
+function DemoCard({ colors, t, passed, marked, ty }) {
+  const badgeStyle = useAnimatedStyle(() => ({
+    opacity: marked ? Math.min(1, Math.max(0, -ty.value / 40)) : 0,
+  }));
+  return (
+    <View style={styles.card}>
+      <View
+        style={[
+          styles.photo,
+          { backgroundColor: colors.chartTrack, borderColor: colors.border },
+        ]}
+      >
+        <Ionicons
+          name={passed ? 'checkmark-circle' : 'image-outline'}
+          size={72}
+          color={passed ? colors.success : colors.subtext}
+        />
+      </View>
+      <Animated.View
+        pointerEvents="none"
+        style={[styles.markBadge, { backgroundColor: colors.danger }, badgeStyle]}
+      >
+        <Ionicons name="trash" size={13} color="#fff" />
+        <Text style={styles.markText}>{t('marked_for_deletion')}</Text>
+      </Animated.View>
     </View>
   );
 }
@@ -501,6 +607,7 @@ function PermRow({
 }
 
 const styles = StyleSheet.create({
+  // ---- permission page ----
   root: { flex: 1, paddingHorizontal: 22 },
   topBar: {
     flexDirection: 'row',
@@ -520,12 +627,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  title: {
-    fontSize: 24,
-    fontWeight: '800',
-    marginTop: 20,
-    textAlign: 'center',
-  },
+  title: { fontSize: 24, fontWeight: '800', marginTop: 20, textAlign: 'center' },
   subtitle: {
     fontSize: 14,
     lineHeight: 21,
@@ -555,47 +657,70 @@ const styles = StyleSheet.create({
   rowBtn: { borderRadius: 12, paddingHorizontal: 14, paddingVertical: 8 },
   rowBtnText: { color: '#fff', fontSize: 13, fontWeight: '700' },
   warn: { fontSize: 13, lineHeight: 19, textAlign: 'center', marginTop: 16 },
-  card: {
-    width: 200,
-    height: 260,
-    borderRadius: 24,
+  cta: { borderRadius: 16, paddingVertical: 15, alignItems: 'center' },
+  ctaText: { fontSize: 16, fontWeight: '700' },
+
+  // ---- drill pages: mirrors CleaningScreen's layout ----
+  screen: { flex: 1, paddingHorizontal: 16 },
+  cleanTopBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+  },
+  topTitle: { fontSize: 18, fontWeight: '800', maxWidth: 260 },
+  topSub: { fontSize: 12, marginTop: 2 },
+  exitBtn: { borderRadius: 18, paddingHorizontal: 14, paddingVertical: 7 },
+  photoArea: { flex: 1, marginBottom: 8 },
+  indicatorWrap: { paddingVertical: 8, marginBottom: 158 },
+  chipsWrap: { position: 'absolute', left: 0, right: 0 },
+  card: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  photo: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 14,
     borderWidth: StyleSheet.hairlineWidth,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 14,
   },
-  cardIcon: {
-    width: 84,
-    height: 84,
-    borderRadius: 42,
+  markBadge: {
+    position: 'absolute',
+    top: 14,
+    right: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  markText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  coach: {
+    ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 20,
   },
-  cardHint: { fontSize: 14, fontWeight: '600' },
-  arrow: { marginTop: 22, height: 30 },
-  stepText: {
+  // Dark scrim, same reasoning as the album chips: the coach mark floats over
+  // whatever the card happens to be, so theme colors can't guarantee contrast.
+  coachScrim: {
+    alignItems: 'center',
+    gap: 10,
+    borderRadius: 20,
+    paddingHorizontal: 22,
+    paddingVertical: 18,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
+  coachText: {
+    color: '#fff',
     fontSize: 16,
     lineHeight: 24,
-    fontWeight: '600',
+    fontWeight: '700',
     textAlign: 'center',
-    marginTop: 18,
-    minHeight: 72,
   },
-  trashBar: {
-    position: 'absolute',
-    top: 0,
-    left: -22,
-    right: -22,
-    height: 62,
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    paddingBottom: 10,
+  coachSub: {
+    color: 'rgba(255,255,255,0.85)',
+    fontSize: 13,
+    fontWeight: '600',
   },
-  cta: {
-    borderRadius: 16,
-    paddingVertical: 15,
-    alignItems: 'center',
-  },
-  ctaText: { fontSize: 16, fontWeight: '700' },
-  footNote: { fontSize: 13, textAlign: 'center' },
 });
