@@ -1,6 +1,7 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Modal,
+  Platform,
   View,
   Text,
   Pressable,
@@ -38,7 +39,15 @@ export default function OptionPicker({ label, value, options, onChange }) {
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState(null); // {top} | {bottom} | null
   const rowRef = useRef(null);
+  const changeTimerRef = useRef(null);
   const current = options.find((o) => o.value === value);
+
+  useEffect(
+    () => () => {
+      if (changeTimerRef.current) clearTimeout(changeTimerRef.current);
+    },
+    []
+  );
 
   const openMenu = (pressEvent) => {
     // Press-point fallback: measureInWindow can fail silently on some
@@ -84,7 +93,19 @@ export default function OptionPicker({ label, value, options, onChange }) {
       } catch (e) {
         // haptics unavailable
       }
-      onChange(opt.value);
+      // UIMenu is still performing its dismissal morph when its action
+      // handler fires. Updating MenuView's `actions` during that morph makes
+      // iOS briefly detach and reattach the native view, which shows up as a
+      // flash in the selected-value label. Let the dismissal finish first.
+      if (MenuView && Platform.OS === 'ios') {
+        if (changeTimerRef.current) clearTimeout(changeTimerRef.current);
+        changeTimerRef.current = setTimeout(() => {
+          changeTimerRef.current = null;
+          onChange(opt.value);
+        }, 220);
+      } else {
+        onChange(opt.value);
+      }
     }
   };
 

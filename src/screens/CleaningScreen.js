@@ -144,7 +144,7 @@ export default function CleaningScreen({ route, navigation }) {
     sizesById = null,
     timeRange = null, // {start, end} — year / year-month scope
   } = route.params;
-  const { colors, t, settings, recycleBinActive, language } = useSettings();
+  const { colors, t, settings, setSetting, recycleBinActive, language } = useSettings();
   const { recordCleaned, recordViewed, toggleFavorite, isFavorite } = useApp();
   const { width: SCREEN_W, height: SCREEN_H } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -187,7 +187,10 @@ export default function CleaningScreen({ route, navigation }) {
   const viewedRef = useRef(new Set());
   const markStackRef = useRef([]); // mark order, for undo
   const frozenAssetRef = useRef(null);
+  const extraAssetsRef = useRef({}); // marked id -> asset outside active group
   const orderRef = useRef([]); // asset ids in cleaning order
+  const orderModeRef = useRef(settings.order);
+  const orderPromptRef = useRef(false);
   // Lazy segment loading: only ~3 groups ahead are fetched; more pages load
   // AFTER the user confirms a group.
   const allRef = useRef([]);
@@ -558,7 +561,6 @@ export default function CleaningScreen({ route, navigation }) {
   // Assets selected in the Similar modal can live OUTSIDE the current
   // group — keep their full objects so the confirm sheet can show and
   // delete them together with the group's marks.
-  const extraAssetsRef = useRef({}); // id -> asset
   const deletedIdsRef = useRef(new Set()); // already deleted this session
   const visible = useMemo(
     () =>
@@ -1153,6 +1155,77 @@ export default function CleaningScreen({ route, navigation }) {
   // shown yet got recorded as reviewed.
   const [deleting, setDeleting] = useState(false);
   const deletingRef = useRef(false);
+
+  // The settings tab stays mounted alongside this screen. Apply an order
+  // change to the in-memory queue immediately instead of waiting until the
+  // current group is confirmed. Marks are retained as extra assets, so a
+  // photo selected for deletion cannot disappear merely because it moved to
+  // a different group.
+  useEffect(() => {
+    if (orderModeRef.current === settings.order) return;
+    if (
+      !initializedRef.current ||
+      loading ||
+      showConfirm ||
+      deleting ||
+      allRef.current.length === 0
+    ) {
+      return;
+    }
+
+    if (markedIds.size > 0) {
+      if (orderPromptRef.current) return;
+      orderPromptRef.current = true;
+      Alert.alert(
+        t('discard_selection_title'),
+        t('discard_selection_message'),
+        [
+          {
+            text: t('cancel'),
+            style: 'cancel',
+            onPress: () => {
+              orderPromptRef.current = false;
+              setSetting('order', orderModeRef.current);
+            },
+          },
+          {
+            text: t('discard_selection_confirm'),
+            style: 'destructive',
+            onPress: () => {
+              orderPromptRef.current = false;
+              clearGroupMarks();
+            },
+          },
+        ]
+      );
+      return;
+    }
+
+    const reordered =
+      settings.order === 'random'
+        ? shuffle(allRef.current)
+        : [...allRef.current].sort(
+            (a, b) => (b.creationTime || 0) - (a.creationTime || 0)
+          );
+    orderModeRef.current = settings.order;
+    allRef.current = reordered;
+    orderRef.current = reordered.map((asset) => asset.id);
+    setGroups(makeGroups(reordered, groupSize));
+    setGi(0);
+    setPi(0);
+    if (!assetIds && sessionRef.current) {
+      sessionManager.saveOrder(orderRef.current);
+    }
+  }, [
+    settings.order,
+    loading,
+    showConfirm,
+    deleting,
+    markedIds,
+    groupSize,
+    assetIds,
+  ]);
+
   const deleteMarkedNow = async () => {
     if (deletingRef.current) return;
     deletingRef.current = true;

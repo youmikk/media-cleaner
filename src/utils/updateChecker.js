@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Platform } from 'react-native';
 
-export const APP_VERSION = '1.0.2';
+export const APP_VERSION = '1.0.3';
 const RELEASES_API =
   'https://api.github.com/repos/youmikk/media-cleaner/releases/latest';
 const LAST_CHECK_KEY = '@mediacleaner/last_update_check';
@@ -50,15 +51,9 @@ export async function checkOTA() {
       await Updates.fetchUpdateAsync();
       return 'applied';
     }
-    // The launch-time auto-check may have ALREADY downloaded the newest
-    // update — the server then reports "nothing newer", but a restart is
-    // still needed. Surface that as ready-to-apply instead of "latest".
-    try {
-      const fetched = await Updates.fetchUpdateAsync();
-      if (fetched && fetched.isNew) return 'applied';
-    } catch (e) {
-      // nothing pending
-    }
+    // Only fetch after a positive availability check. Calling fetch after a
+    // negative result races the native update controller and can make a later
+    // manual check miss an available update.
     return 'none';
   } catch (e) {
     return 'unavailable';
@@ -134,20 +129,25 @@ export async function fetchLatestChangelog() {
  * Returns { hasUpdate, version, url } — url prefers the APK asset,
  * falling back to the release page.
  */
-export async function checkGitHubRelease() {
+export async function checkGitHubRelease(platform = Platform.OS) {
   const res = await fetch(RELEASES_API, {
     headers: { Accept: 'application/vnd.github+json' },
   });
   if (!res.ok) throw new Error(`GitHub API ${res.status}`);
   const release = await res.json();
   const version = release.tag_name || release.name || '';
-  const apk = (release.assets || []).find((a) =>
-    (a.name || '').toLowerCase().endsWith('.apk')
-  );
+  const extension =
+    platform === 'ios' ? '.ipa' : platform === 'android' ? '.apk' : null;
+  const packageAsset = extension
+    ? (release.assets || []).find((a) =>
+        (a.name || '').toLowerCase().endsWith(extension)
+      )
+    : null;
   return {
-    hasUpdate: isNewer(version, APP_VERSION),
+    // Do not offer an Android-only release to iOS (or vice versa).
+    hasUpdate: isNewer(version, APP_VERSION) && (!extension || !!packageAsset),
     version,
-    url: (apk && apk.browser_download_url) || release.html_url,
+    url: (packageAsset && packageAsset.browser_download_url) || release.html_url,
   };
 }
 
@@ -155,7 +155,7 @@ export async function checkGitHubRelease() {
  * Silent daily auto-check (call on app launch). Invokes `onUpdate(info)`
  * only when a newer release exists. Never throws.
  */
-export async function autoCheckDaily(onUpdate) {
+export async function autoCheckDaily(onUpdate, platform = Platform.OS) {
   try {
     const last = parseInt(
       (await AsyncStorage.getItem(LAST_CHECK_KEY)) || '0',
@@ -163,8 +163,10 @@ export async function autoCheckDaily(onUpdate) {
     );
     const now = new Date().getTime();
     if (now - last < CHECK_INTERVAL) return;
+    const info = await checkGitHubRelease(platform);
+    // Only record a completed request. Previously a temporary offline or
+    // GitHub-rate-limit failure suppressed all automatic checks for 24 hours.
     await AsyncStorage.setItem(LAST_CHECK_KEY, String(now));
-    const info = await checkGitHubRelease();
     if (info.hasUpdate && onUpdate) onUpdate(info);
   } catch (e) {
     // offline / rate-limited — try again another day

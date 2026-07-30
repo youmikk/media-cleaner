@@ -135,6 +135,10 @@ const translations = {
     dupes_keep_hint: 'One copy of each group is kept — the rest are pre-selected.',
     time_all: 'All time',
     time_title: 'Clean by time',
+    discard_selection_title: 'Discard selected photos?',
+    discard_selection_message:
+      'Changing the cleanup order clears the photos selected for deletion. They will remain unreviewed.',
+    discard_selection_confirm: 'Discard and continue',
     suggestion_lowquality: 'Low-Quality Photos',
     suggestion_lowquality_desc: 'Blurry, under- or over-exposed shots',
     lowquality_need_analysis: 'Run album analysis on the Photos tab first',
