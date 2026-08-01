@@ -32,6 +32,7 @@ import {
 } from '../utils/albumHelpers';
 import analyzer from '../utils/chunkedAnalyzer';
 import * as statsManager from '../utils/statsManager';
+import * as cacheManager from '../utils/cacheManager';
 import { groupBursts } from '../utils/burstDetection';
 import {
   enableDailyReminder,
@@ -348,7 +349,47 @@ export default function ProfileScreen({ navigation }) {
     }
   };
 
-  // ---- Log export: flush, then hand the file to the system share sheet --
+  // ---- Cache housekeeping ----------------------------------------------
+  // Size is computed ON TAP, never on render: reading it pulls the whole
+  // analysis cache (megabytes) through JSON, which is exactly the kind of
+  // work that makes this screen janky.
+  const [clearingCache, setClearingCache] = useState(false);
+  const onClearCache = async () => {
+    if (clearingCache) return;
+    setClearingCache(true);
+    let info = { bytes: 0, entries: 0 };
+    try {
+      info = await cacheManager.getCacheSize();
+    } catch (e) {
+      info = { bytes: 0, entries: 0 };
+    }
+    setClearingCache(false);
+    if (info.entries === 0) {
+      Alert.alert(t('clear_cache'), t('clear_cache_none'));
+      return;
+    }
+    Alert.alert(
+      t('clear_cache'),
+      t('clear_cache_message', { size: formatBytes(info.bytes) }),
+      [
+        { text: t('cancel'), style: 'cancel' },
+        {
+          text: t('clear_cache_confirm'),
+          style: 'destructive',
+          onPress: async () => {
+            setClearingCache(true);
+            const freed = await cacheManager.clearCaches();
+            setClearingCache(false);
+            Alert.alert(
+              t('clear_cache'),
+              t('clear_cache_done', { size: formatBytes(freed.bytes) })
+            );
+          },
+        },
+      ]
+    );
+  };
+
   const onExportLog = async () => {
     try {
       const uri = await getLogFileUri();
@@ -591,7 +632,7 @@ export default function ProfileScreen({ navigation }) {
             <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
           </Pressable>
           <Pressable
-            style={[styles.binRow, { backgroundColor: colors.card }]}
+            style={[styles.binRow, { backgroundColor: colors.card, marginBottom: 10 }]}
             onPress={onExportLog}
           >
             <Ionicons name="document-text-outline" size={22} color={colors.accent} />
@@ -604,6 +645,21 @@ export default function ProfileScreen({ navigation }) {
               </Text>
             </View>
             <Ionicons name="share-outline" size={18} color={colors.subtext} />
+          </Pressable>
+          <Pressable
+            style={[styles.binRow, { backgroundColor: colors.card }]}
+            onPress={onClearCache}
+          >
+            <Ionicons name="trash-bin-outline" size={22} color={colors.accent} />
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowLabel, { color: colors.text }]}>
+                {clearingCache ? t('clear_cache_working') : t('clear_cache')}
+              </Text>
+              <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
+                {t('clear_cache_desc')}
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
           </Pressable>
         </Section>
 

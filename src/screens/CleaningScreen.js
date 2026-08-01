@@ -259,7 +259,16 @@ export default function CleaningScreen({ route, navigation }) {
           cursorRef.current.hasNext &&
           allRef.current.length < Math.min(minCount, 20000)
         ) {
-          const page = await getAssetsPage(albumId, 'photo', cursorRef.current.after);
+          // The range is pushed down to the media store, so a "clean March
+          // 2023" session no longer has to page through everything newer
+          // just to throw it away. The JS filter below stays as a guard for
+          // boundary handling.
+          const page = await getAssetsPage(
+            albumId,
+            'photo',
+            cursorRef.current.after,
+            rangeRef.current
+          );
           if (!aliveRef.current) return;
           fetchedPagesRef.current = true;
           const r = rangeRef.current;
@@ -344,7 +353,7 @@ export default function CleaningScreen({ route, navigation }) {
         let after;
         let hasNext = true;
         while (hasNext && all.length < 20000) {
-          const page = await getAssetsPage(albumId, 'photo', after);
+          const page = await getAssetsPage(albumId, 'photo', after, range);
           if (!alive) return;
           all = [...all, ...page.assets.filter(inRange)];
           hasNext = page.hasNext;
@@ -506,6 +515,10 @@ export default function CleaningScreen({ route, navigation }) {
           groupSize,
           assetIds,
           timeRange,
+          // Record the mode the queue was built for, so flipping the setting
+          // from the home/settings tab can invalidate this session instead
+          // of silently resuming the old order.
+          order: settings.order,
           before,
         });
         sessionManager.saveOrder(orderRef.current);
@@ -1215,6 +1228,9 @@ export default function CleaningScreen({ route, navigation }) {
     setPi(0);
     if (!assetIds && sessionRef.current) {
       sessionManager.saveOrder(orderRef.current);
+      // Keep the stored mode in step, or the home screen would drop this
+      // session as stale the next time it looks at it.
+      sessionManager.saveProgress({ order: settings.order });
     }
   }, [
     settings.order,

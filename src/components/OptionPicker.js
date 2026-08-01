@@ -1,7 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   Modal,
-  Platform,
   View,
   Text,
   Pressable,
@@ -39,14 +38,19 @@ export default function OptionPicker({ label, value, options, onChange }) {
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState(null); // {top} | {bottom} | null
   const rowRef = useRef(null);
-  const changeTimerRef = useRef(null);
   const current = options.find((o) => o.value === value);
 
-  useEffect(
-    () => () => {
-      if (changeTimerRef.current) clearTimeout(changeTimerRef.current);
-    },
-    []
+  // Memoized: a fresh array on every render makes the bridge push new props
+  // to the native view, and iOS rebuilds the whole UIMenu each time. Only a
+  // real change of options or selection should touch the native menu.
+  const menuActions = useMemo(
+    () =>
+      options.map((o) => ({
+        id: String(o.value),
+        title: o.label,
+        state: o.value === value ? 'on' : 'off',
+      })),
+    [options, value]
   );
 
   const openMenu = (pressEvent) => {
@@ -87,26 +91,18 @@ export default function OptionPicker({ label, value, options, onChange }) {
 
   const select = (opt) => {
     setOpen(false);
-    if (opt.value !== value) {
-      try {
-        Haptics.selectionAsync();
-      } catch (e) {
-        // haptics unavailable
-      }
-      // UIMenu is still performing its dismissal morph when its action
-      // handler fires. Updating MenuView's `actions` during that morph makes
-      // iOS briefly detach and reattach the native view, which shows up as a
-      // flash in the selected-value label. Let the dismissal finish first.
-      if (MenuView && Platform.OS === 'ios') {
-        if (changeTimerRef.current) clearTimeout(changeTimerRef.current);
-        changeTimerRef.current = setTimeout(() => {
-          changeTimerRef.current = null;
-          onChange(opt.value);
-        }, 220);
-      } else {
-        onChange(opt.value);
-      }
+    if (opt.value === value) return;
+    try {
+      Haptics.selectionAsync();
+    } catch (e) {
+      // haptics unavailable
     }
+    // Commit IMMEDIATELY and let UIKit's own menu-dismissal animation cover
+    // the swap. This used to be deferred by 220ms to dodge a repaint, which
+    // only traded one artefact for a worse one: the menu closed, the row sat
+    // on the OLD value for a fifth of a second, then snapped — read by the
+    // user as the value "flashing" after every change.
+    onChange(opt.value);
   };
 
   const rowContent = (
@@ -121,25 +117,19 @@ export default function OptionPicker({ label, value, options, onChange }) {
     </>
   );
 
-  // Builds WITH the native module: a real system menu (UIMenu / PopupMenu).
-  // Two tricks combined:
-  // - the visible texts live OUTSIDE the MenuView (its children get
-  //   re-attached natively on change, which flashes)
-  // - the invisible MenuView overlays ONLY the value area, so UIMenu's
-  //   dismiss morph animation is scoped to that small region (like an iOS
-  //   Settings pull-down button) and never disturbs the row label.
+  // Builds WITH the native module: a real system menu (UIMenu / PopupMenu),
+  // so the open/dismiss animation is UIKit's own — nothing is hand-rolled.
+  //
+  // Layering matters: the MenuView is an INVISIBLE tap target rendered FIRST,
+  // and the value label sits on top of it with pointerEvents="none" (touches
+  // fall straight through). When iOS rebuilds the menu's host view it can
+  // repaint underneath the text but never over it, which is what used to
+  // show up as a flash in the selected value.
   if (MenuView) {
     return (
       <View style={[styles.row, { borderColor: colors.border }]}>
         <Text style={[styles.label, { color: colors.text }]}>{label}</Text>
         <View style={styles.valueWrap}>
-          <Text
-            style={[styles.value, { color: colors.subtext }]}
-            numberOfLines={1}
-          >
-            {current ? current.label : '—'}
-          </Text>
-          <Ionicons name="chevron-expand" size={15} color={colors.subtext} />
           <MenuView
             style={styles.menuOverlay}
             title={label}
@@ -149,15 +139,20 @@ export default function OptionPicker({ label, value, options, onChange }) {
               );
               if (opt) select(opt);
             }}
-            actions={options.map((o) => ({
-              id: String(o.value),
-              title: o.label,
-              state: o.value === value ? 'on' : 'off',
-            }))}
+            actions={menuActions}
             shouldOpenOnLongPress={false}
           >
             <View style={StyleSheet.absoluteFill} />
           </MenuView>
+          <View style={styles.valueContent} pointerEvents="none">
+            <Text
+              style={[styles.value, { color: colors.subtext }]}
+              numberOfLines={1}
+            >
+              {current ? current.label : '—'}
+            </Text>
+            <Ionicons name="chevron-expand" size={15} color={colors.subtext} />
+          </View>
         </View>
       </View>
     );
@@ -267,6 +262,8 @@ const styles = StyleSheet.create({
   },
   label: { fontSize: 14, fontWeight: '600', flexShrink: 1 },
   valueWrap: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  // The label row that paints ON TOP of the invisible native menu view.
+  valueContent: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   menuOverlay: {
     ...StyleSheet.absoluteFillObject,
     // slightly larger than the value area for a comfortable tap target

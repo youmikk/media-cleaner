@@ -1,18 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  View,
-  Text,
-  Pressable,
-  StyleSheet,
-  useWindowDimensions,
-} from 'react-native';
-import { Image } from 'expo-image';
+import { View, Text, StyleSheet, useWindowDimensions } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
 import AlbumPicker from '../components/AlbumPicker';
 import TimePicker from '../components/TimePicker';
+import StackedCards from '../components/StackedCards';
 import AnalysisProgress from '../components/AnalysisProgress';
 import analyzer from '../utils/chunkedAnalyzer';
 import * as sessionManager from '../utils/sessionManager';
@@ -21,12 +14,24 @@ import {
   getAlbums,
   getAssetsPage,
   getAssetsByIds,
+  getRangeThumbs,
   getAlbumFingerprint,
   getAlbumSummary,
   saveAlbumSummary,
   buildYearHistogram,
   ALL_ALBUM_ID,
 } from '../utils/albumHelpers';
+
+// Preview pool cached per album. Three are shown; the extras exist so
+// "random" order can show a DIFFERENT three without a rescan.
+const THUMB_POOL = 12;
+// Everything below the cached summary reads BIG AsyncStorage values and
+// JSON.parses them on the JS thread: the saved session order (up to 20k
+// ids), the reviewed set (another 20k) and the analysis cache (megabytes).
+// Doing that the instant the tab appears blocks the very thread the three
+// preview images need to attach and decode — on Android the cards sat
+// blank for seconds. Let the cached summary paint first, then catch up.
+const DEFER_MS = 450;
 
 /**
  * Photos tab entry. Renders INSTANTLY from a cached album summary (count,
@@ -47,6 +52,8 @@ export default function AlbumSelectScreen({ navigation }) {
   // When an unfinished photo session exists for this album, the three
   // preview cards show the CURRENT GROUP's photos (and tapping resumes).
   const [sessionPreview, setSessionPreview] = useState(null); // {thumbs} | null
+  // Preview for the picked year/month — one scoped media-store query.
+  const [rangeThumbs, setRangeThumbs] = useState(null);
 
   const albumTitle = useMemo(() => {
     const a = albums.find((x) => x.id === albumId);
@@ -70,43 +77,70 @@ export default function AlbumSelectScreen({ navigation }) {
   useFocusEffect(
     useCallback(() => {
       let alive = true;
-      (async () => {
-        try {
-          const pending = await sessionManager.getPendingSession();
-          if (
-            !pending ||
-            pending.type !== 'photo' ||
-            pending.albumId !== albumId
-          ) {
+      const timer = setTimeout(() => {
+        (async () => {
+          try {
+            // The cleaning-order setting can be flipped from the Profile tab
+            // while this screen is mounted. A paused session froze its queue
+            // under the OLD mode, so honour the new setting by dropping it —
+            // otherwise the preview and the resume both ignore the change.
+            await sessionManager.dropSessionIfOrderChanged(settings.order);
+            const pending = await sessionManager.getPendingSession();
+            if (
+              !pending ||
+              pending.type !== 'photo' ||
+              pending.albumId !== albumId
+            ) {
+              if (alive) setSessionPreview(null);
+              return;
+            }
+            const order = (await sessionManager.getOrder()) || [];
+            const gs = pending.groupSize || 5;
+            // SAME rule as resume: confirmed (reviewed) ids are dropped, the
+            // interrupted group is the first gs unreviewed ids — the cards
+            // show exactly what re-entering will show.
+            const reviewed = await reviewedStore.getReviewed(pending.albumId);
+            const ids = order.filter((id) => !reviewed.has(id)).slice(0, gs);
+            if (ids.length === 0) {
+              if (alive) setSessionPreview(null);
+              return;
+            }
+            const assets = await getAssetsByIds(ids);
+            const thumbs = [...assets]
+              .sort((a, b) => (b.creationTime || 0) - (a.creationTime || 0))
+              .slice(0, 3)
+              .map((a) => ({ id: a.id, uri: a.uri }));
+            if (alive) setSessionPreview(thumbs.length ? { thumbs } : null);
+          } catch (e) {
             if (alive) setSessionPreview(null);
-            return;
           }
-          const order = (await sessionManager.getOrder()) || [];
-          const gs = pending.groupSize || 5;
-          // SAME rule as resume: confirmed (reviewed) ids are dropped, the
-          // interrupted group is the first gs unreviewed ids — the cards
-          // show exactly what re-entering will show.
-          const reviewed = await reviewedStore.getReviewed(pending.albumId);
-          const ids = order.filter((id) => !reviewed.has(id)).slice(0, gs);
-          if (ids.length === 0) {
-            if (alive) setSessionPreview(null);
-            return;
-          }
-          const assets = await getAssetsByIds(ids);
-          const thumbs = [...assets]
-            .sort((a, b) => (b.creationTime || 0) - (a.creationTime || 0))
-            .slice(0, 3)
-            .map((a) => ({ id: a.id, uri: a.uri }));
-          if (alive) setSessionPreview(thumbs.length ? { thumbs } : null);
-        } catch (e) {
-          if (alive) setSessionPreview(null);
-        }
-      })();
+        })();
+      }, DEFER_MS);
       return () => {
         alive = false;
+        clearTimeout(timer);
       };
-    }, [albumId])
+    }, [albumId, settings.order])
   );
+
+  // Time-scoped preview. createdAfter/createdBefore let the media store do
+  // the filtering, so picking a month is one query instead of paging the
+  // whole library — that walk is why the cards used to sit empty for
+  // seconds after switching the time.
+  useEffect(() => {
+    if (!timeFilter) {
+      setRangeThumbs(null);
+      return undefined;
+    }
+    let alive = true;
+    setRangeThumbs([]); // clear immediately: never show another range's photos
+    getRangeThumbs(albumId, 'photo', timeFilter, 3)
+      .then((list) => alive && setRangeThumbs(list))
+      .catch(() => alive && setRangeThumbs([]));
+    return () => {
+      alive = false;
+    };
+  }, [albumId, timeFilter]);
 
   // Summary: cached-first, rescan ONLY when the album actually changed.
   // Runs on EVERY focus (not just album switches): coming back from a
@@ -147,7 +181,7 @@ export default function AlbumSelectScreen({ navigation }) {
           if (first) {
             setSummary((s) => ({
               count: fp.assetCount || all.length,
-              thumbs: all.slice(0, 3).map((a) => ({ id: a.id, uri: a.uri })),
+              thumbs: all.slice(0, THUMB_POOL).map((a) => ({ id: a.id, uri: a.uri })),
               years: s ? s.years : [],
             }));
             first = false;
@@ -156,7 +190,7 @@ export default function AlbumSelectScreen({ navigation }) {
         const fresh = {
           // REAL total from the media store — never the scan cap.
           count: fp.assetCount || all.length,
-          thumbs: all.slice(0, 3).map((a) => ({ id: a.id, uri: a.uri })),
+          thumbs: all.slice(0, THUMB_POOL).map((a) => ({ id: a.id, uri: a.uri })),
           years: buildYearHistogram(all),
         };
         if (!alive) return;
@@ -175,23 +209,28 @@ export default function AlbumSelectScreen({ navigation }) {
   useEffect(() => analyzer.subscribe(setAnalysisState), []);
 
   // Missing/stale analysis: SILENT, delayed, incremental background refresh.
+  // checkCache() itself is the expensive part — it JSON.parses the whole
+  // analysis cache — so even the CHECK waits for the cards to paint.
   useEffect(() => {
-    if (!settings.similarDetection) return;
+    if (!settings.similarDetection) return undefined;
     let alive = true;
-    let timer;
-    (async () => {
-      const { cache, stale } = await analyzer.checkCache(albumId, 'photo');
-      if (!alive) return;
-      if (!cache || stale) {
-        timer = setTimeout(() => {
-          if (alive)
-            analyzer.analyzeAlbum(albumId, { mediaType: 'photo', force: true });
-        }, 2500);
-      }
-    })();
+    let startTimer;
+    const checkTimer = setTimeout(() => {
+      (async () => {
+        const { cache, stale } = await analyzer.checkCache(albumId, 'photo');
+        if (!alive) return;
+        if (!cache || stale) {
+          startTimer = setTimeout(() => {
+            if (alive)
+              analyzer.analyzeAlbum(albumId, { mediaType: 'photo', force: true });
+          }, 2500);
+        }
+      })();
+    }, DEFER_MS);
     return () => {
       alive = false;
-      if (timer) clearTimeout(timer);
+      clearTimeout(checkTimer);
+      if (startTimer) clearTimeout(startTimer);
     };
   }, [albumId, settings.similarDetection]);
 
@@ -215,6 +254,10 @@ export default function AlbumSelectScreen({ navigation }) {
     let resume = false;
     if (!timeFilter) {
       try {
+        // Same invalidation as the preview effect — a session built for the
+        // other order mode must not be resumed just because the tap beat the
+        // effect to it.
+        await sessionManager.dropSessionIfOrderChanged(settings.order);
         const pending = await sessionManager.getPendingSession();
         resume = !!(
           pending &&
@@ -235,13 +278,36 @@ export default function AlbumSelectScreen({ navigation }) {
     });
   };
 
-  const thumbs = sessionPreview
-    ? sessionPreview.thumbs
-    : summary
-    ? summary.thumbs
-    : [];
-  const cardW = (width - 16 * 2 - 12 * 2) / 3;
-  const cardHeights = [cardW * 1.5, cardW * 1.9, cardW * 1.5];
+  // Preview precedence: an explicit time scope wins, then the paused
+  // session's real group, then a plain album preview.
+  //
+  // The plain preview follows the ORDER setting: date mode shows the newest
+  // three, random mode picks three out of the cached pool. Without that the
+  // cards looked identical in both modes and switching the setting seemed
+  // to do nothing at all.
+  const poolThumbs = summary ? summary.thumbs || [] : [];
+  const previewThumbs = useMemo(() => {
+    if (settings.order !== 'random' || poolThumbs.length <= 3) {
+      return poolThumbs.slice(0, 3);
+    }
+    const pool = [...poolThumbs];
+    for (let i = pool.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [pool[i], pool[j]] = [pool[j], pool[i]];
+    }
+    return pool.slice(0, 3);
+    // Re-picked when the album, the pool or the mode changes — NOT on every
+    // render, or the cards would reshuffle while the user looks at them.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [albumId, settings.order, poolThumbs.length, poolThumbs[0]?.id]);
+
+  const thumbs = timeFilter
+    ? rangeThumbs || []
+    : sessionPreview
+      ? sessionPreview.thumbs
+      : previewThumbs;
+  // Front card is the hero — the stack reads as depth, not as a row.
+  const cardW = Math.min(Math.round(width * 0.5), 220);
 
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
@@ -267,35 +333,11 @@ export default function AlbumSelectScreen({ navigation }) {
       </View>
 
       <View style={styles.centerArea}>
-        <View style={styles.cards}>
-          {[0, 1, 2].map((i) => (
-            <Pressable
-              key={i}
-              onPress={startCleaning}
-              style={[
-                styles.card,
-                {
-                  width: cardW,
-                  height: cardHeights[i],
-                  backgroundColor: colors.card,
-                },
-              ]}
-            >
-              {thumbs[i] ? (
-                <Image
-                  source={{ uri: thumbs[i].uri }}
-                  style={styles.cardImage}
-                  cachePolicy="memory-disk"
-                  recyclingKey={thumbs[i].id}
-                />
-              ) : (
-                <View style={styles.cardEmpty}>
-                  <Ionicons name="image-outline" size={28} color={colors.subtext} />
-                </View>
-              )}
-            </Pressable>
-          ))}
-        </View>
+        <StackedCards
+          items={thumbs}
+          cardWidth={cardW}
+          onPress={startCleaning}
+        />
         <Text style={[styles.count, { color: colors.subtext }]}>
           {filteredCount === 0
             ? t('no_photos')
@@ -332,23 +374,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginBottom: 90,
   },
-  cards: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12,
-  },
-  card: {
-    borderRadius: 20,
-    overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOpacity: 0.15,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 4,
-  },
-  cardImage: { width: '100%', height: '100%' },
-  cardEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  count: { marginTop: 18, fontSize: 15, fontWeight: '700' },
+  count: { marginTop: 26, fontSize: 15, fontWeight: '700' },
   hint: { marginTop: 6, fontSize: 12 },
 });

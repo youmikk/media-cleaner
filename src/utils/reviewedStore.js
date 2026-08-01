@@ -10,9 +10,23 @@ import { readJSON, withLock } from './safeStore';
 const KEY = (albumId) => `@mediacleaner/reviewed_${albumId}`;
 const CAP = 20000;
 
+// Parsed ids per album. The stored value reaches CAP entries (~400 KB of
+// JSON), and both the home screen and the cleaning screen read it on every
+// entry — that JSON.parse ran on the JS thread while the preview images were
+// trying to decode. Every write below goes through this module, so the memo
+// cannot drift from disk.
+const memo = new Map(); // albumId -> string[]
+
 export async function getReviewed(albumId) {
-  const { value } = await readJSON(KEY(albumId));
-  return new Set(Array.isArray(value) ? value : []);
+  let ids = memo.get(albumId);
+  if (!ids) {
+    const { value } = await readJSON(KEY(albumId));
+    ids = Array.isArray(value) ? value : [];
+    memo.set(albumId, ids);
+  }
+  // A FRESH Set per call: CleaningScreen adds to the set it gets back, and
+  // handing out the cached one would let that mutation rewrite history.
+  return new Set(ids);
 }
 
 /**
@@ -38,12 +52,14 @@ export async function addReviewed(albumId, ids) {
     } catch (e) {
       return null;
     }
+    memo.set(albumId, list);
     return new Set(list);
   });
 }
 
 export async function clearReviewed(albumId) {
   return withLock(KEY(albumId), async () => {
+    memo.delete(albumId);
     try {
       await AsyncStorage.removeItem(KEY(albumId));
     } catch (e) {

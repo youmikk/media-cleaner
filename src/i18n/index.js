@@ -152,6 +152,24 @@ const translations = {
     update_restart_manual: 'Update downloaded — close and reopen the app to apply it.',
     export_log: 'Export logs',
     export_log_desc: 'Share the diagnostic log file',
+    clear_cache: 'Clear cache',
+    clear_cache_desc: 'Free up space used by scan and preview caches',
+    clear_cache_working: 'Working…',
+    clear_cache_none: 'There is no cache to clear right now.',
+    clear_cache_confirm: 'Clear',
+    clear_cache_done: 'Freed about {size}. Albums will be re-scanned the next time you open them.',
+    clear_cache_message:
+      'This clears about {size}:\n' +
+      '· Album index and home preview caches\n' +
+      '· Similar / burst / low-quality analysis results\n' +
+      '· Image and video thumbnail caches\n' +
+      '\nWhat happens next:\n' +
+      '· Albums are re-scanned and re-analyzed on next open — a large library can take several minutes\n' +
+      '· The home cards and full-size photos load more slowly the first time\n' +
+      '\nNOT touched:\n' +
+      '· Your photos and videos — nothing is deleted\n' +
+      '· Recycle bin, favorites, usage statistics, all settings\n' +
+      '· A paused cleaning session and its reviewed history',
     update_checking: 'Checking…',
     insights_title: 'Photography Profile',
     insights_desc: 'Your shooting habits at a glance',
@@ -377,6 +395,24 @@ const translations = {
     update_restart_manual: '更新已下载,手动关闭并重新打开应用即可生效。',
     export_log: '导出日志',
     export_log_desc: '通过系统分享发送诊断日志',
+    clear_cache: '清理缓存',
+    clear_cache_desc: '释放扫描与预览缓存占用的空间',
+    clear_cache_working: '处理中…',
+    clear_cache_none: '目前没有可清理的缓存。',
+    clear_cache_confirm: '清理',
+    clear_cache_done: '已释放约 {size}。下次打开相册时会重新扫描。',
+    clear_cache_message:
+      '将清理约 {size}：\n' +
+      '· 相册索引与首页预览缓存\n' +
+      '· 相似 / 连拍 / 低质量的分析结果\n' +
+      '· 图片与视频的缩略图缓存\n' +
+      '\n清理之后：\n' +
+      '· 下次打开相册需要重新扫描并重新分析，大相册可能要几分钟\n' +
+      '· 首页卡片和大图第一次加载会慢一些\n' +
+      '\n不会动的：\n' +
+      '· 你的照片和视频，一张都不会删\n' +
+      '· 回收站、收藏、使用统计、全部设置\n' +
+      '· 暂停中的清理进度和已审阅记录',
     update_checking: '检查中…',
     insights_title: '摄影画像',
     insights_desc: '你的拍摄习惯一目了然',

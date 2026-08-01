@@ -45,8 +45,13 @@ export async function getAlbums(mediaType, allLabel) {
 /**
  * Fetch ONE page of assets (for progressive loading — first page shows
  * immediately, the rest streams in the background).
+ *
+ * `range` ({start, end} in ms) is pushed down to the MEDIA STORE via
+ * createdAfter/createdBefore instead of being filtered in JS. Paging the
+ * whole library just to keep one month of it is why time-scoped screens
+ * took many seconds to show anything on a large library.
  */
-export async function getAssetsPage(albumId, mediaType, after) {
+export async function getAssetsPage(albumId, mediaType, after, range = null) {
   const options = {
     first: PAGE_SIZE,
     mediaType,
@@ -54,12 +59,37 @@ export async function getAssetsPage(albumId, mediaType, after) {
   };
   if (after) options.after = after;
   if (albumId && albumId !== ALL_ALBUM_ID) options.album = albumId;
+  if (range && range.start) options.createdAfter = range.start;
+  // createdBefore is exclusive of the boundary in practice; the callers'
+  // own `< end` filter still runs, so an off-by-one here can't leak.
+  if (range && range.end) options.createdBefore = range.end;
   const page = await MediaLibrary.getAssetsAsync(options);
   return {
     assets: page.assets,
     hasNext: page.hasNextPage && page.assets.length > 0,
     endCursor: page.endCursor,
   };
+}
+
+/**
+ * A handful of preview assets for a time range — ONE scoped media-store
+ * query, no paging. Used by the home cards when a year/month is picked.
+ */
+export async function getRangeThumbs(albumId, mediaType, range, count = 3) {
+  try {
+    const options = {
+      first: count,
+      mediaType,
+      sortBy: [[MediaLibrary.SortBy.creationTime, false]],
+    };
+    if (albumId && albumId !== ALL_ALBUM_ID) options.album = albumId;
+    if (range && range.start) options.createdAfter = range.start;
+    if (range && range.end) options.createdBefore = range.end;
+    const page = await MediaLibrary.getAssetsAsync(options);
+    return page.assets.map((a) => ({ id: a.id, uri: a.uri }));
+  } catch (e) {
+    return [];
+  }
 }
 
 /**

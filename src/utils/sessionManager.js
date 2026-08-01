@@ -20,6 +20,7 @@ export async function startSession({
   groupSize,
   assetIds = null,
   timeRange = null,
+  order = null, // 'random' | 'date' — the queue was built for THIS mode
   before,
 }) {
   const session = {
@@ -30,6 +31,7 @@ export async function startSession({
     groupSize,
     assetIds,
     timeRange,
+    order,
     before,
     groupIndex: 0,
     photoIndex: 0,
@@ -41,7 +43,10 @@ export async function startSession({
   });
   // The saved random ORDER belongs to photo sessions only — starting a
   // VIDEO session must not touch it.
-  if (type === 'photo') await AsyncStorage.removeItem(ORDER_KEY);
+  if (type === 'photo') {
+    orderMemo = null;
+    await AsyncStorage.removeItem(ORDER_KEY);
+  }
   return session;
 }
 
@@ -53,8 +58,15 @@ export async function getPendingSession(type = 'photo') {
 /**
  * Persist the exact (possibly shuffled) cleaning order so resume restores
  * the same sequence. Stored separately — it's large and rarely changes.
+ *
+ * Kept in memory as well: the list runs to 20k ids, and both the home
+ * preview and the resume path parse it on entry. That parse landed on the
+ * JS thread right when the preview images needed it.
  */
+let orderMemo = null; // string[] | null
+
 export async function saveOrder(assetIds) {
+  orderMemo = assetIds;
   try {
     await AsyncStorage.setItem(ORDER_KEY, JSON.stringify(assetIds));
   } catch (e) {
@@ -63,8 +75,11 @@ export async function saveOrder(assetIds) {
 }
 
 export async function getOrder() {
+  if (orderMemo) return [...orderMemo];
   const { value } = await readJSON(ORDER_KEY);
-  return Array.isArray(value) ? value : null;
+  if (!Array.isArray(value)) return null;
+  orderMemo = value;
+  return [...value];
 }
 
 /**
@@ -93,8 +108,35 @@ export async function saveProgress(patch, type = 'photo') {
 export async function discardSession(type = 'photo') {
   return withLock(SESSION_KEY(type), async () => {
     await AsyncStorage.removeItem(SESSION_KEY(type));
-    if (type === 'photo') await AsyncStorage.removeItem(ORDER_KEY);
+    if (type === 'photo') {
+      orderMemo = null;
+      await AsyncStorage.removeItem(ORDER_KEY);
+    }
   });
+}
+
+/**
+ * A paused session holds a FROZEN queue — the shuffled (or date-sorted)
+ * order it was built with. Flipping the cleaning-order setting outside the
+ * cleaning screen left that queue untouched, so the home preview kept
+ * showing the old group and tapping it resumed the old order: the setting
+ * looked broken. Drop the session instead, so the next start rebuilds the
+ * queue under the new rule.
+ *
+ * Sessions saved before `order` was recorded have no mode to compare and
+ * are left alone rather than silently thrown away.
+ *
+ * @returns {Promise<boolean>} true when a session was dropped
+ */
+export async function dropSessionIfOrderChanged(order, type = 'photo') {
+  try {
+    const pending = await getPendingSession(type);
+    if (!pending || !pending.order || pending.order === order) return false;
+    await discardSession(type);
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 /**

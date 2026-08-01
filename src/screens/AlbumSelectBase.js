@@ -3,7 +3,6 @@ import {
   View,
   Text,
   Pressable,
-  Image,
   StyleSheet,
   useWindowDimensions,
 } from 'react-native';
@@ -12,10 +11,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
 import AlbumPicker from '../components/AlbumPicker';
+import StackedCards from '../components/StackedCards';
 import AnalysisProgress from '../components/AnalysisProgress';
 import CacheStalePrompt from '../components/CacheStalePrompt';
 import analyzer from '../utils/chunkedAnalyzer';
-import { getAlbums, getAssets, ALL_ALBUM_ID } from '../utils/albumHelpers';
+import { getAlbums, getAssetsPage, ALL_ALBUM_ID } from '../utils/albumHelpers';
 
 const MIN_GROUP = 2;
 const MAX_GROUP = 20;
@@ -56,11 +56,13 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
     }, [mediaType, t, isVideo])
   );
 
-  // Thumbnails for the three preview cards.
+  // Thumbnails for the three preview cards. ONE page — this used to page the
+  // whole library (up to 20k assets, 200 at a time) just to keep the first
+  // three, which is why the cards took seconds to appear.
   useEffect(() => {
     let alive = true;
-    getAssets(albumId, mediaType)
-      .then((assets) => alive && setThumbs(assets.slice(0, 3)))
+    getAssetsPage(albumId, mediaType)
+      .then((page) => alive && setThumbs(page.assets.slice(0, 3)))
       .catch(() => alive && setThumbs([]));
     return () => {
       alive = false;
@@ -97,8 +99,7 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
     });
   };
 
-  const cardW = (width - 16 * 2 - 12 * 2) / 3;
-  const cardHeights = [cardW * 1.5, cardW * 1.9, cardW * 1.5];
+  const cardW = Math.min(Math.round(width * 0.5), 220);
 
   return (
     <SafeAreaView style={[styles.screen, { backgroundColor: colors.background }]}>
@@ -142,37 +143,12 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
       </View>
 
       <View style={styles.cards}>
-        {[0, 1, 2].map((i) => (
-          <Pressable
-            key={i}
-            onPress={startCleaning}
-            style={[
-              styles.card,
-              {
-                width: cardW,
-                height: cardHeights[i],
-                backgroundColor: colors.card,
-              },
-            ]}
-          >
-            {thumbs[i] ? (
-              <Image source={{ uri: thumbs[i].uri }} style={styles.cardImage} />
-            ) : (
-              <View style={styles.cardEmpty}>
-                <Ionicons
-                  name={isVideo ? 'videocam-outline' : 'image-outline'}
-                  size={28}
-                  color={colors.subtext}
-                />
-              </View>
-            )}
-            {isVideo && thumbs[i] && (
-              <View style={styles.playBadge}>
-                <Ionicons name="play" size={18} color="#fff" />
-              </View>
-            )}
-          </Pressable>
-        ))}
+        <StackedCards
+          items={thumbs}
+          cardWidth={cardW}
+          isVideo={isVideo}
+          onPress={startCleaning}
+        />
       </View>
 
       <Text style={[styles.hint, { color: colors.subtext }]}>
@@ -221,30 +197,10 @@ const styles = StyleSheet.create({
   stepperValue: { fontSize: 17, fontWeight: '800' },
   stepperLabel: { fontSize: 10 },
   cards: {
-    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
     flexGrow: 0,
     minHeight: 260,
-  },
-  card: {
-    borderRadius: 20,
-    overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOpacity: 0.15,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 4,
-  },
-  cardImage: { width: '100%', height: '100%' },
-  cardEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  playBadge: {
-    position: 'absolute',
-    alignSelf: 'center',
-    top: '42%',
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    borderRadius: 20,
-    padding: 8,
   },
   hint: { textAlign: 'center', marginTop: 24, fontSize: 13 },
 });
