@@ -2,7 +2,7 @@ import { Platform } from 'react-native';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as trashManager from './trashManager';
-import { getAssetSizes } from './albumHelpers';
+import { getAssetSizes, invalidateLibraryIndex } from './albumHelpers';
 import { log } from './logger';
 
 /**
@@ -97,6 +97,8 @@ export async function batchDelete(assets, { useRecycleBin = false } = {}) {
   }
 
   const bytes = deletable.reduce((sum, a) => sum + sizeOf(a), 0);
+  // The cached library scan now describes a library that no longer exists.
+  invalidateLibraryIndex();
   return { count: deletable.length, bytes, deletedIds: ids, skipped };
 }
 

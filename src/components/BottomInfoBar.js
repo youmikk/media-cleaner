@@ -21,6 +21,7 @@ export default function BottomInfoBar({
   isFavorite,
   onToggleFavorite,
   onPressDate,
+  onShare = null,
   undoCount = 0,
   onUndo,
   hideFavorite = false,
@@ -81,22 +82,42 @@ export default function BottomInfoBar({
         overlayColor={colors.barOverlay}
       >
         <View style={styles.row}>
-          {hideFavorite ? (
-            <View style={styles.side} />
-          ) : (
-            <Pressable
-              onPress={onToggleFavorite}
-              hitSlop={10}
-              style={styles.side}
-              accessibilityLabel={t('favorite')}
-            >
-              <Ionicons
-                name={isFavorite ? 'heart' : 'heart-outline'}
-                size={24}
-                color={isFavorite ? colors.heart : colors.subtext}
-              />
-            </Pressable>
-          )}
+          {/* Left group: the things you can do TO this photo. Undo stays
+              alone on the right — it reverses a decision rather than acting
+              on the current item, and keeping it off on its own means it
+              never gets hit while reaching for share. */}
+          <View style={styles.sideGroup}>
+            {hideFavorite ? (
+              <View style={styles.side} />
+            ) : (
+              <Pressable
+                onPress={onToggleFavorite}
+                hitSlop={10}
+                style={styles.side}
+                accessibilityLabel={t('favorite')}
+              >
+                <Ionicons
+                  name={isFavorite ? 'heart' : 'heart-outline'}
+                  size={24}
+                  color={isFavorite ? colors.heart : colors.subtext}
+                />
+              </Pressable>
+            )}
+            {!!onShare && (
+              <Pressable
+                onPress={onShare}
+                hitSlop={10}
+                style={styles.side}
+                accessibilityLabel={t('share')}
+              >
+                <Ionicons
+                  name="share-outline"
+                  size={22}
+                  color={colors.subtext}
+                />
+              </Pressable>
+            )}
+          </View>
 
           <Pressable onPress={onPressDate} style={styles.center} hitSlop={6}>
             <View style={styles.centerText}>
@@ -139,6 +160,8 @@ export default function BottomInfoBar({
               </View>
             )}
           </Pressable>
+          {/* Balances the extra left slot so the date stays centred. */}
+          {!!onShare && <View style={styles.side} />}
         </View>
       </GlassSurface>
     </View>
@@ -160,6 +183,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   side: { width: 44, alignItems: 'center', justifyContent: 'center' },
+  sideGroup: { flexDirection: 'row', alignItems: 'center' },
   center: {
     flex: 1,
     alignItems: 'center',

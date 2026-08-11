@@ -5,41 +5,42 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
 
 /**
- * 3D layered card stack for the home preview.
+ * Fanned card stack for the home preview.
  *
- * Three rounded cards share one absolute frame. The front one is untouched;
- * the two behind step to the RIGHT, shrink, and rotate on Y behind a shared
- * perspective, so they read as receding into the screen rather than merely
- * sliding sideways. Depth is sold by three cues at once — offset, scale and
- * rotation — plus a darkening scrim and a softening blur that both grow with
- * depth.
+ * Three rounded cards share one frame. The front one sits square and sharp;
+ * the other two splay out to either side — tilted in the picture plane, not
+ * turned in 3D — the way a hand of cards spreads. Each is nudged down a
+ * little so their corners break the front card's outline at top and bottom,
+ * which is what makes the pile read as physical rather than as three images
+ * pasted together.
  *
  * Everything here is STATIC and native:
- * - the transforms are fixed values on plain Views, so there is no animation
- *   driver, no worklet and no per-frame work at all;
- * - the blur is expo-image's `blurRadius`, applied once by the native
- *   decoder (SDWebImage / Glide) as part of producing the bitmap — unlike a
- *   BlurView it costs nothing to keep on screen;
- * - the scrim is a flat colour layer, not an opacity animation.
+ * - the transforms are fixed values on plain Views: no animation driver, no
+ *   worklet, no per-frame work at all. A flat rotate is also cheaper than the
+ *   perspective rotateY this replaced, which forced 3D layer handling;
+ * - the blur is expo-image's `blurRadius`, applied once by the native decoder
+ *   (SDWebImage / Glide) while producing the bitmap — unlike a BlurView it
+ *   costs nothing to keep on screen;
+ * - the haze is a flat colour layer, not an opacity animation.
  */
 
-// index 0 is the front card. `x` is a fraction of the card width.
+// index 0 is the front card. `x`/`y` are fractions of the card's own size.
 //
-// `res` is the fraction of the full card size the view is actually LAID OUT
-// at. expo-image sizes its decode from the layout box, not from the final
-// transform, so a back card laid out full-size would decode a full-size
-// bitmap only to have the GPU shrink it — for a sliver that is 85% hidden.
-// Laying it out smaller and scaling back up by the same factor is pixel-for
-// -pixel identical on screen at ~36% of the decoded pixels.
+// `res` is the fraction of full size the view is LAID OUT at. expo-image
+// sizes its decode from the layout box, not from the final transform, so a
+// back card laid out full-size would decode a full-size bitmap for a sliver
+// that is mostly hidden. Laying it out smaller and scaling back up by the
+// same factor is identical on screen at about half the decoded pixels.
 const LEVELS = [
-  { x: 0, scale: 1, rotate: '0deg', dim: 0, blur: 0, res: 1 },
-  { x: 0.17, scale: 0.93, rotate: '11deg', dim: 0.24, blur: 2, res: 0.6 },
-  { x: 0.32, scale: 0.86, rotate: '18deg', dim: 0.4, blur: 4, res: 0.6 },
+  { x: 0, y: 0, rotate: '0deg', scale: 1, haze: 0, blur: 0, res: 1 },
+  { x: -0.1, y: 0.035, rotate: '-6deg', scale: 0.97, haze: 0.42, blur: 3, res: 0.7 },
+  { x: 0.105, y: 0.05, rotate: '6.5deg', scale: 0.97, haze: 0.5, blur: 4, res: 0.7 },
 ];
-// Shallow enough to keep the cards readable; deeper values skew the far
-// edge so hard the thumbnail stops looking like a photo.
-const PERSPECTIVE = 900;
-const RADIUS = 22;
+// Room for the fan: a card rotated by θ needs W·cosθ + H·sinθ, plus the
+// sideways nudge, plus a little for the shadow.
+const FRAME_W = 1.38;
+const FRAME_H = 1.2;
+const RADIUS = 20;
 
 export default function StackedCards({
   items = [],
@@ -50,22 +51,19 @@ export default function StackedCards({
 }) {
   const { colors } = useSettings();
   const cardHeight = Math.round(cardWidth * ratio);
-  const last = LEVELS[LEVELS.length - 1];
-  // Room for the deepest card plus a little for its shadow.
-  const width = Math.round(cardWidth * (1 + last.x) + 10);
+  const frameW = Math.round(cardWidth * FRAME_W);
+  const frameH = Math.round(cardHeight * FRAME_H);
 
   return (
-    <Pressable onPress={onPress} style={{ width, height: cardHeight }}>
+    <Pressable onPress={onPress} style={{ width: frameW, height: frameH }}>
       {/* Painted back-to-front: later siblings draw on top, which is the one
           stacking rule that behaves the same on both platforms (zIndex and
           elevation disagree on Android). */}
       {[2, 1, 0].map((i) => {
         const level = LEVELS[i];
         const item = items[i];
-        // Shrinking the layout box moves its centre, and scale pivots on
-        // that centre — so both axes need the offset added back, or the
-        // card would drift up and left out of the stack.
-        const recentre = 0.5 - level.res / 2;
+        const laidW = Math.round(cardWidth * level.res);
+        const laidH = Math.round(cardHeight * level.res);
         return (
           <View
             key={i}
@@ -73,16 +71,19 @@ export default function StackedCards({
               styles.card,
               depthShadow(i),
               {
-                width: cardWidth * level.res,
-                height: cardHeight * level.res,
+                width: laidW,
+                height: laidH,
                 borderRadius: RADIUS * level.res,
                 backgroundColor: colors.card,
+                // Centred in the frame, so scaling about the centre needs no
+                // correction — the offsets below are the only displacement.
+                left: Math.round((frameW - laidW) / 2),
+                top: Math.round((frameH - laidH) / 2),
                 transform: [
-                  { perspective: PERSPECTIVE },
-                  { translateX: level.x * cardWidth + recentre * cardWidth },
-                  { translateY: recentre * cardHeight },
+                  { translateX: level.x * cardWidth },
+                  { translateY: level.y * cardHeight },
                   { scale: level.scale / level.res },
-                  { rotateY: level.rotate },
+                  { rotate: level.rotate },
                 ],
               },
             ]}
@@ -111,12 +112,15 @@ export default function StackedCards({
                   />
                 </View>
               )}
-              {level.dim > 0 && (
+              {level.haze > 0 && (
+                // Hazing TOWARD the page colour, not toward black: the back
+                // cards should recede into the background in either theme,
+                // and a fixed dark scrim only reads as depth on a dark one.
                 <View
                   pointerEvents="none"
                   style={[
                     StyleSheet.absoluteFill,
-                    { backgroundColor: `rgba(0,0,0,${level.dim})` },
+                    { backgroundColor: colors.background, opacity: level.haze },
                   ]}
                 />
               )}
@@ -133,23 +137,19 @@ export default function StackedCards({
   );
 }
 
-/** Deeper cards sit further from the surface, so their shadow spreads. */
+/** The front card is the one lifted off the pile, so it casts the most. */
 function depthShadow(i) {
-  if (Platform.OS === 'android') return { elevation: 10 - i * 3 };
+  if (Platform.OS === 'android') return { elevation: i === 0 ? 12 : 5 };
   return {
     shadowColor: '#000',
-    shadowOpacity: 0.28 - i * 0.06,
-    shadowRadius: 14 - i * 3,
-    shadowOffset: { width: -2 - i, height: 6 },
+    shadowOpacity: i === 0 ? 0.34 : 0.2,
+    shadowRadius: i === 0 ? 18 : 10,
+    shadowOffset: { width: 0, height: i === 0 ? 10 : 5 },
   };
 }
 
 const styles = StyleSheet.create({
-  card: {
-    position: 'absolute',
-    left: 0,
-    top: 0,
-  },
+  card: { position: 'absolute' },
   clip: {
     ...StyleSheet.absoluteFillObject,
     overflow: 'hidden',

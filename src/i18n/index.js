@@ -146,6 +146,7 @@ const translations = {
     check_update: 'Check for updates',
     update_available: 'New version {version} available',
     update_download: 'Download',
+    update_download_mirror: 'Download (mirror)',
     update_latest: "You're up to date",
     update_ota_ready: 'Update downloaded — restart now?',
     update_restart: 'Restart',
@@ -253,6 +254,7 @@ const translations = {
     videos_watched: 'Video {current} of {total}',
     keep: 'Keep',
     favorite: 'Favorite',
+    share: 'Share',
   },
   zh: {
     tab_photos: '照片',
@@ -382,6 +384,10 @@ const translations = {
     dupes_keep_hint: '每组默认保留一份，其余已选中待删。',
     time_all: '全部时间',
     time_title: '按时间清理',
+    discard_selection_title: '放弃已选中的照片？',
+    discard_selection_message:
+      '更改清理顺序会清空已选中待删除的照片，它们将保持未审阅状态。',
+    discard_selection_confirm: '放弃并继续',
     suggestion_lowquality: '低质量照片',
     suggestion_lowquality_desc: '模糊、欠曝或过曝的照片',
     lowquality_need_analysis: '先在照片页完成相册分析',
@@ -389,6 +395,7 @@ const translations = {
     check_update: '检查更新',
     update_available: '发现新版本 {version}',
     update_download: '前往下载',
+    update_download_mirror: '加速下载（国内推荐）',
     update_latest: '已是最新版本',
     update_ota_ready: '更新已下载完成，立即重启生效？',
     update_restart: '立即重启',
@@ -488,6 +495,7 @@ const translations = {
     videos_watched: '视频 {current} / {total}',
     keep: '保留',
     favorite: '收藏',
+    share: '分享',
   },
 };
 

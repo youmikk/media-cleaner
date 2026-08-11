@@ -85,6 +85,28 @@ export function hasLibrarySize() {
   return !!(native && native.librarySize);
 }
 
+/** True when the one-shot library scan is available. */
+export function hasScanLibrary() {
+  return !!(native && native.scanLibrary);
+}
+
+/**
+ * Read the whole library in ONE native call.
+ *
+ * `mediaType` is 'photo' | 'video' | 'all'; `limit` of 0 means everything.
+ * Returns PARALLEL ARRAYS ({ids, creationTime, width, size, …, total}) rather
+ * than an array of objects — the point of this call is to stop paying for
+ * tens of thousands of object crossings, so the caller builds only the
+ * objects it actually needs.
+ *
+ * Note this carries the byte SIZE of every asset, which expo-media-library
+ * does not expose at all.
+ */
+export async function scanLibrary(mediaType = 'photo', limit = 0) {
+  if (!native || !native.scanLibrary) throw new Error('unavailable');
+  return native.scanLibrary(mediaType, limit);
+}
+
 /**
  * photoo-style subsampled decode: base64 of size*size grayscale bytes.
  * Much faster and lighter than a full-resolution decode.

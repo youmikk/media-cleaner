@@ -43,6 +43,8 @@ import {
   checkOTA,
   reloadWithUpdate,
   checkGitHubRelease,
+  canMirror,
+  mirrorUrl,
   fetchLatestChangelog,
 } from '../utils/updateChecker';
 
@@ -332,13 +334,21 @@ export default function ProfileScreen({ navigation }) {
       }
       const info = await checkGitHubRelease();
       if (info.hasUpdate) {
-        Alert.alert(t('update_available', { version: info.version }), '', [
-          { text: t('cancel'), style: 'cancel' },
-          {
-            text: t('update_download'),
-            onPress: () => Linking.openURL(info.url),
-          },
-        ]);
+        // GitHub downloads crawl (or stall outright) on mainland networks,
+        // so the accelerated link is offered first and the direct one kept
+        // as the fallback for anyone the proxy fails.
+        const buttons = [{ text: t('cancel'), style: 'cancel' }];
+        if (canMirror(info.url)) {
+          buttons.push({
+            text: t('update_download_mirror'),
+            onPress: () => Linking.openURL(mirrorUrl(info.url)),
+          });
+        }
+        buttons.push({
+          text: t('update_download'),
+          onPress: () => Linking.openURL(info.url),
+        });
+        Alert.alert(t('update_available', { version: info.version }), '', buttons);
       } else {
         Alert.alert(t('check_update'), t('update_latest'));
       }

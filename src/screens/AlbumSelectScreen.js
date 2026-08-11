@@ -306,8 +306,8 @@ export default function AlbumSelectScreen({ navigation }) {
     : sessionPreview
       ? sessionPreview.thumbs
       : previewThumbs;
-  // Front card is the hero — the stack reads as depth, not as a row.
-  const cardW = Math.min(Math.round(width * 0.5), 220);
+  // Front card is the hero; the fan needs ~1.4x this much width around it.
+  const cardW = Math.min(Math.round(width * 0.58), 250);
 
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>

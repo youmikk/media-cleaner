@@ -94,12 +94,17 @@ export async function getRangeThumbs(albumId, mediaType, range, count = 3) {
 
 /**
  * Fetch all assets of an album (paginated), newest first.
+ *
+ * `limit` stops the paging early. Callers that only want the newest N (the
+ * analyzer wants 3000) were otherwise walking the entire library — 79 native
+ * round trips on a 15k-photo device — and throwing most of it away.
  */
-export async function getAssets(albumId, mediaType) {
+export async function getAssets(albumId, mediaType, limit = MAX_ASSETS) {
   const assets = [];
+  const cap = Math.min(limit, MAX_ASSETS);
   let after;
   let hasNext = true;
-  while (hasNext && assets.length < MAX_ASSETS) {
+  while (hasNext && assets.length < cap) {
     const options = {
       first: PAGE_SIZE,
       mediaType,
@@ -107,12 +112,13 @@ export async function getAssets(albumId, mediaType) {
     };
     if (after) options.after = after;
     if (albumId && albumId !== ALL_ALBUM_ID) options.album = albumId;
+    // eslint-disable-next-line no-await-in-loop
     const page = await MediaLibrary.getAssetsAsync(options);
     assets.push(...page.assets);
     hasNext = page.hasNextPage;
     after = page.endCursor;
   }
-  return assets;
+  return assets.length > cap ? assets.slice(0, cap) : assets;
 }
 
 export async function getAssetsByIds(ids) {
@@ -186,14 +192,97 @@ export async function getAssetSize(asset) {
 }
 
 /**
+ * Whole-library index from ONE native scan: ids, timestamps, dimensions and
+ * — the part expo-media-library cannot give us — the byte size of every
+ * asset. Held in memory briefly so the several callers that all want some
+ * slice of it during one screen visit share a single scan.
+ */
+let scanCache = null; // {at, mediaType, index}
+const SCAN_TTL_MS = 60000;
+
+function buildIndex(raw) {
+  const ids = raw.ids || [];
+  const sizes = raw.size || [];
+  const sizeById = new Map();
+  for (let i = 0; i < ids.length; i++) {
+    if (sizes[i] > 0) sizeById.set(ids[i], sizes[i]);
+  }
+  return {
+    ids,
+    creationTime: raw.creationTime || [],
+    mediaType: raw.mediaType || [],
+    sizeById,
+    total: raw.total || ids.length,
+  };
+}
+
+/** The cached scan if it is warm — never triggers one. */
+function peekLibraryIndex(mediaType = 'all') {
+  if (!scanCache) return null;
+  if (scanCache.mediaType !== mediaType && scanCache.mediaType !== 'all') {
+    return null;
+  }
+  if (new Date().getTime() - scanCache.at > SCAN_TTL_MS) return null;
+  return scanCache.index;
+}
+
+/**
+ * Read (or reuse) the whole-library scan. Returns null when the native
+ * module can't do it — Expo Go and binaries built before scanLibrary existed
+ * keep working through the per-query paths.
+ */
+export async function getLibraryIndex(mediaType = 'all', { force = false } = {}) {
+  if (!force) {
+    const warm = peekLibraryIndex(mediaType);
+    if (warm) return warm;
+  }
+  // eslint-disable-next-line global-require
+  const PhotoMove = require('../../modules/photo-move');
+  if (!PhotoMove.hasScanLibrary()) return null;
+  try {
+    const started = new Date().getTime();
+    const raw = await PhotoMove.scanLibrary(mediaType, 0);
+    const index = buildIndex(raw);
+    scanCache = { at: new Date().getTime(), mediaType, index };
+    log(
+      'size',
+      `scan ${mediaType}: ${index.ids.length}/${index.total} in ` +
+        `${new Date().getTime() - started}ms`
+    );
+    return index;
+  } catch (e) {
+    log('size', `scan failed: ${(e && e.message) || e}`);
+    return null;
+  }
+}
+
+/** Drop the cached scan — call after deleting or moving assets. */
+export function invalidateLibraryIndex() {
+  scanCache = null;
+}
+
+/**
  * Ask the native module for {id: bytes} over an arbitrarily long id list.
  * Returns null when the module can't answer at all, so callers can tell
  * "unavailable" apart from "answered, some ids unknown".
  */
 async function nativeSizes(ids) {
+  if (ids.length === 0) return null;
+  // A warm library scan already holds every size, so the fastest query is
+  // no query. Only *warm* — scanning on demand to answer a five-id question
+  // would cost far more than it saves.
+  const index = peekLibraryIndex('all');
+  if (index) {
+    const out = {};
+    for (const id of ids) {
+      const s = index.sizeById.get(String(id).split('/')[0]);
+      if (s > 0) out[String(id).split('/')[0]] = s;
+    }
+    return out;
+  }
   // eslint-disable-next-line global-require
   const PhotoMove = require('../../modules/photo-move');
-  if (!PhotoMove.hasNativeSizes() || ids.length === 0) return null;
+  if (!PhotoMove.hasNativeSizes()) return null;
   const out = {};
   try {
     for (let i = 0; i < ids.length; i += SIZE_QUERY_CHUNK) {
@@ -261,15 +350,40 @@ function spread(list, n) {
 /**
  * Compute a storage snapshot {count, bytes} for an album.
  *
- * With the native size query up to EXACT_SIZE_CAP assets are measured for
- * real — one batched system-index query, no per-file I/O — so most albums
- * come out exact. Only without the native module does this drop to sizing
- * SNAPSHOT_SAMPLE assets, which is where the wildly-off "original gallery
- * size" numbers came from.
+ * Preferred path: the whole-library scan already carries every size, so the
+ * album is summed EXACTLY with no query of its own. That also retires the
+ * old "measure 4000 of them and extrapolate" compromise, which on a 15k
+ * library meant a 4000-id batch query every time a cleaning session started.
+ *
+ * Without the scan it falls back to a batched size query over an evenly
+ * spread subset, and without that to per-file stats.
  */
 export async function getAlbumSnapshot(albumId, mediaType, precomputedAssets) {
   const assets = precomputedAssets || (await getAssets(albumId, mediaType));
   if (assets.length === 0) return { count: 0, bytes: 0 };
+
+  const index = await getLibraryIndex('all');
+  if (index) {
+    let bytes = 0;
+    let measured = 0;
+    for (const a of assets) {
+      const s = index.sizeById.get(String(a.id).split('/')[0]);
+      if (s > 0) {
+        bytes += s;
+        measured++;
+      }
+    }
+    if (measured > 0) {
+      // Ids the scan couldn't size (iCloud-only originals) must not shrink
+      // the total — spread the measured average over them.
+      const total =
+        measured === assets.length
+          ? bytes
+          : Math.round((bytes / measured) * assets.length);
+      log('size', `${albumId}/${mediaType}: scan ${measured}/${assets.length}`);
+      return { count: assets.length, bytes: total };
+    }
+  }
 
   const capped = assets.slice(0, MAX_ASSETS);
   const target = spread(capped, EXACT_SIZE_CAP);
@@ -285,9 +399,6 @@ export async function getAlbumSnapshot(albumId, mediaType, precomputedAssets) {
       }
     }
     if (measured > 0) {
-      // Ids we couldn't read (iCloud-only originals, a file the scanner
-      // hasn't indexed) must not shrink the total — spread the measured
-      // average over them, and over anything past the cap.
       const total = Math.round((bytes / measured) * assets.length);
       log('size', `${albumId}/${mediaType}: native ${measured}/${assets.length}`);
       return { count: assets.length, bytes: total };
@@ -363,9 +474,40 @@ export async function getLibrarySize({
   }
 
   let value = null;
+  // The library scan already holds every size — summing it beats a second
+  // whole-library query.
+  const index = await getLibraryIndex('all');
+  if (index && index.sizeById.size > 0) {
+    let photoBytes = 0;
+    let videoBytes = 0;
+    let photoCount = 0;
+    let videoCount = 0;
+    for (let i = 0; i < index.ids.length; i++) {
+      const bytes = index.sizeById.get(index.ids[i]) || 0;
+      if (index.mediaType[i] === 1) {
+        videoBytes += bytes;
+        videoCount++;
+      } else {
+        photoBytes += bytes;
+        photoCount++;
+      }
+    }
+    if (photoBytes + videoBytes > 0) {
+      value = {
+        bytes: photoBytes + videoBytes,
+        photoBytes,
+        videoBytes,
+        photoCount,
+        videoCount,
+        exact: true,
+      };
+      log('size', `library: scan ${value.bytes}B`);
+    }
+  }
+
   // eslint-disable-next-line global-require
   const PhotoMove = require('../../modules/photo-move');
-  if (PhotoMove.hasLibrarySize()) {
+  if (!value && PhotoMove.hasLibrarySize()) {
     try {
       const r = await PhotoMove.librarySize();
       const photoBytes = r.photoBytes || 0;

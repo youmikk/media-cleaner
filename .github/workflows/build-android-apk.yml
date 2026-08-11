@@ -54,11 +54,13 @@ jobs:
           VERSION=$(node -p "require('./app.json').expo.version")
           PKG=$(node -p "require('./package.json').version")
           APPV=$(sed -n "s/.*APP_VERSION = '\([^']*\)'.*/\1/p" src/utils/updateChecker.js)
-          echo "app.json=$VERSION package.json=$PKG APP_VERSION=$APPV"
-          # 三处必须一致,否则打出来的包会汇报一个它自己都不是的版本号,
-          # 在线更新检查也会拿错的号去比较。
-          if [ "$VERSION" != "$PKG" ] || [ "$VERSION" != "$APPV" ]; then
-            echo "::error::版本号不一致:app.json / package.json / APP_VERSION 三者必须相同"
+          RELV=$(node -p "require('./release.json').version")
+          echo "app.json=$VERSION package.json=$PKG APP_VERSION=$APPV release.json=$RELV"
+          # 四处必须一致,否则打出来的包会汇报一个它自己都不是的版本号,
+          # 在线更新检查也会拿错的号去比较。release.json 是 GitHub API
+          # 不通时(国内)唯一的版本来源,漏改会让国内用户永远收不到更新。
+          if [ "$VERSION" != "$PKG" ] || [ "$VERSION" != "$APPV" ] || [ "$VERSION" != "$RELV" ]; then
+            echo "::error::版本号不一致:app.json / package.json / APP_VERSION / release.json 四者必须相同"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"

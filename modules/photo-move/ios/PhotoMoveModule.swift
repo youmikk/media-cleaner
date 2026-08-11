@@ -175,9 +175,110 @@ public class PhotoMoveModule: Module {
         "videoCount": video.count,
       ]
     }
+
+    // ONE PhotoKit fetch for the whole library, carrying every field the app
+    // needs — including the byte size, which expo-media-library does not
+    // expose. That omission is the only reason a separate size query existed.
+    //
+    // Returned as PARALLEL ARRAYS, not an array of objects: a 15k-photo
+    // library would otherwise put 15k dictionaries of nine keys each across
+    // the bridge, and that crossing is the cost being removed here.
+    AsyncFunction("scanLibrary") { (mediaType: String, limit: Int) -> [String: Any] in
+      var assets: [PHAsset] = []
+      let options = PHFetchOptions()
+      options.includeHiddenAssets = false
+      options.sortDescriptors = [
+        NSSortDescriptor(key: "creationDate", ascending: false)
+      ]
+      for type in PhotoMoveModule.mediaTypes(for: mediaType) {
+        let result = PHAsset.fetchAssets(with: type, options: options)
+        assets.reserveCapacity(assets.count + result.count)
+        result.enumerateObjects { asset, _, _ in assets.append(asset) }
+      }
+      // Two collections come back individually sorted; merge them.
+      if PhotoMoveModule.mediaTypes(for: mediaType).count > 1 {
+        assets.sort {
+          ($0.creationDate?.timeIntervalSince1970 ?? 0)
+            > ($1.creationDate?.timeIntervalSince1970 ?? 0)
+        }
+      }
+      let total = assets.count
+      if limit > 0 && total > limit { assets = Array(assets[0..<limit]) }
+
+      let count = assets.count
+      var ids = [String](repeating: "", count: count)
+      var created = [Double](repeating: 0, count: count)
+      var modified = [Double](repeating: 0, count: count)
+      var widths = [Int](repeating: 0, count: count)
+      var heights = [Int](repeating: 0, count: count)
+      var sizes = [Double](repeating: 0, count: count)
+      var durations = [Double](repeating: 0, count: count)
+      var kinds = [Int](repeating: 0, count: count)
+
+      for (i, asset) in assets.enumerated() {
+        ids[i] = asset.localIdentifier.components(separatedBy: "/").first
+          ?? asset.localIdentifier
+        created[i] = (asset.creationDate?.timeIntervalSince1970 ?? 0) * 1000
+        modified[i] = (asset.modificationDate?.timeIntervalSince1970 ?? 0) * 1000
+        widths[i] = asset.pixelWidth
+        heights[i] = asset.pixelHeight
+        durations[i] = asset.duration
+        kinds[i] = asset.mediaType == .video ? 1 : 0
+      }
+      // Resource metadata is the expensive half — fan it out.
+      let lock = NSLock()
+      PhotoMoveModule.forEachIndexChunk(count) { range in
+        var local: [(Int, Double)] = []
+        for i in range { local.append((i, PhotoMoveModule.assetBytes(assets[i]))) }
+        lock.lock()
+        for (i, b) in local { sizes[i] = b }
+        lock.unlock()
+      }
+
+      return [
+        "ids": ids,
+        "creationTime": created,
+        "modificationTime": modified,
+        "width": widths,
+        "height": heights,
+        "size": sizes,
+        "duration": durations,
+        "albumId": [String](),  // iOS albums are collections, not a column
+        "mediaType": kinds,
+        "total": total,
+      ]
+    }
   }
 
   // ---- helpers ----
+
+  private static func mediaTypes(for kind: String) -> [PHAssetMediaType] {
+    switch kind {
+    case "photo": return [.image]
+    case "video": return [.video]
+    default: return [.image, .video]
+    }
+  }
+
+  /** Split an index range across cores and run every slice concurrently. */
+  private static func forEachIndexChunk(
+    _ count: Int,
+    _ body: (Range<Int>) -> Void
+  ) {
+    if count == 0 { return }
+    let cores = max(1, ProcessInfo.processInfo.activeProcessorCount)
+    // Below this the thread hand-off costs more than the work itself.
+    let chunkSize = max(64, (count + cores - 1) / cores)
+    let starts = stride(from: 0, to: count, by: chunkSize).map { $0 }
+    if starts.count == 1 {
+      body(0..<count)
+      return
+    }
+    DispatchQueue.concurrentPerform(iterations: starts.count) { i in
+      let start = starts[i]
+      body(start..<min(start + chunkSize, count))
+    }
+  }
 
   /**
    * Total bytes of an asset the way the Photos app counts it: every

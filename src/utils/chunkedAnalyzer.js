@@ -1,8 +1,9 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { InteractionManager, Platform } from 'react-native';
-import { getAssets, getAssetSize, getAlbumFingerprint } from './albumHelpers';
+import { getAssets, getAssetSizes, getAlbumFingerprint } from './albumHelpers';
 import { analyzePixels, hammingDistance } from './imageHashing';
 import { groupBursts } from './burstDetection';
+import { log } from './logger';
 import {
   subscribeLowPower,
   subscribeMemoryWarning,
@@ -33,9 +34,25 @@ try {
 } catch (e) {
   // keep the static default
 }
-// Cap the global metric store: Android's AsyncStorage rejects values >2MB,
-// which would silently lose the WHOLE cache. ~6000 entries stays well under.
-const MAX_METRIC_ENTRIES = 6000;
+// Budget for the global metric store. Android's AsyncStorage rejects values
+// over ~2 MB and loses the WHOLE entry, so stay well under.
+//
+// This used to be a flat entry COUNT with blind insertion-order eviction,
+// which can thrash: once the store is full, finishing a pass evicts the
+// entries the SAME pass analysed earlier, so the next run re-decodes them,
+// evicts others, and never converges — the device just stays hot. Eviction
+// is now (a) driven by actual bytes and (b) forbidden from touching ids the
+// running job still depends on.
+const MAX_METRIC_BYTES = 1200000;
+// Writing the whole store is O(store); doing it every 50 photos meant ~60
+// full serialisations per pass. Time-based instead, and only when dirty.
+const PERSIST_INTERVAL_MS = 8000;
+// Floor on how long one photo may take. Decoding flat out for the length of
+// a 3000-photo pass heats the device until the SoC throttles, which slows
+// everything down INCLUDING the UI — pacing is faster in wall-clock terms
+// than running hot. Slightly looser when only one decode runs at a time.
+const TARGET_MS_PER_PHOTO = CONCURRENCY > 1 ? 28 : 40;
+const MAX_COOLDOWN_MS = 120; // never stall a batch longer than this
 
 // Low-quality thresholds
 const BLUR_THRESHOLD = 45;
@@ -76,6 +93,8 @@ class ChunkedAnalyzer {
     this.memoryPaused = false;
     this.suspended = false; // e.g. while a cleaning session is active
     this.metrics = null; // id -> {hash, sharpness, brightness}
+    this._metricsDirty = false;
+    this._lastPersist = 0;
     this.state = {
       running: false,
       albumId: null,
@@ -95,19 +114,55 @@ class ChunkedAnalyzer {
     } catch (e) {
       this.metrics = {};
     }
+    log('analysis', `metrics loaded: ${Object.keys(this.metrics).length}`);
     return this.metrics;
   }
 
-  async _persistMetrics() {
+  /**
+   * Write the store, trimming to the byte budget first.
+   *
+   * `keep` is the id set the running job still needs. Evicting those is what
+   * turns a full store into a treadmill — the pass would re-decode them
+   * immediately — so they are only sacrificed if nothing else is left and
+   * the value would otherwise be rejected outright.
+   */
+  async _persistMetrics(keep = null) {
+    if (!this.metrics || !this._metricsDirty) return;
+    this._metricsDirty = false;
+    this._lastPersist = new Date().getTime();
     try {
-      // FIFO eviction: JS object keys keep insertion order, so the first
-      // keys are the oldest metrics.
-      const keys = Object.keys(this.metrics);
-      if (keys.length > MAX_METRIC_ENTRIES) {
-        const drop = keys.length - MAX_METRIC_ENTRIES;
-        for (let i = 0; i < drop; i++) delete this.metrics[keys[i]];
+      let json = JSON.stringify(this.metrics);
+      if (json.length > MAX_METRIC_BYTES) {
+        const keys = Object.keys(this.metrics);
+        const perEntry = json.length / Math.max(1, keys.length);
+        let toDrop = keys.length - Math.floor(MAX_METRIC_BYTES / perEntry);
+        let dropped = 0;
+        // Pass 1: oldest first, but never something in active use.
+        for (const k of keys) {
+          if (toDrop <= 0) break;
+          if (keep && keep.has(k)) continue;
+          delete this.metrics[k];
+          toDrop--;
+          dropped++;
+        }
+        // Pass 2: still over budget because everything is in use. Dropping
+        // in-use entries costs a re-decode, but writing an oversized value
+        // loses the ENTIRE store, which costs all of them.
+        if (toDrop > 0) {
+          for (const k of Object.keys(this.metrics)) {
+            if (toDrop <= 0) break;
+            delete this.metrics[k];
+            toDrop--;
+            dropped++;
+          }
+        }
+        json = JSON.stringify(this.metrics);
+        log(
+          'analysis',
+          `metrics evicted ${dropped}, kept ${Object.keys(this.metrics).length}`
+        );
       }
-      await AsyncStorage.setItem(METRICS_KEY, JSON.stringify(this.metrics));
+      await AsyncStorage.setItem(METRICS_KEY, json);
     } catch (e) {
       // best effort
     }
@@ -119,7 +174,13 @@ class ChunkedAnalyzer {
     if (store[asset.id]) return store[asset.id];
     const m = await analyzePixels(asset.localUri || asset.uri);
     store[asset.id] = m;
-    this._persistMetrics(); // fire & forget
+    this._metricsDirty = true;
+    // Throttled: this is called in a loop by the burst screen, and an
+    // unconditional write there meant one full-store serialisation PER PHOTO.
+    const now = new Date().getTime();
+    if (now - (this._lastPersist || 0) > PERSIST_INTERVAL_MS) {
+      this._persistMetrics(); // fire & forget
+    }
     return m;
   }
 
@@ -263,29 +324,39 @@ class ChunkedAnalyzer {
   async _run(job) {
     const { albumId, mediaType } = job;
     let finished = false;
+    const startedAt = new Date().getTime();
     try {
       const store = await this._loadMetrics();
-      const assets = await getAssets(albumId, mediaType);
-      const scope = assets.slice(0, MAX_HASHED);
+      // Only the newest MAX_HASHED are ever analysed, so only fetch that
+      // many. This used to page the ENTIRE library and discard the tail.
+      const scope = await getAssets(albumId, mediaType, MAX_HASHED);
+      // Ids this pass depends on — eviction must not take them out from
+      // under us (see _persistMetrics).
+      const scopeIds = new Set(scope.map((a) => a.id));
 
       // Only photos we have NOT seen before need pixel work — everything
       // already in the global store is free.
       const targets =
         mediaType === 'photo' ? scope.filter((a) => !store[a.id]) : [];
       const total = targets.length;
+      log(
+        'analysis',
+        `start ${albumId}/${mediaType} scope=${scope.length} todo=${total}`
+      );
       this._emit({ running: true, albumId, done: 0, total });
 
       let i = 0;
-      let sinceSave = 0;
       while (i < total) {
         if (job.cancelled) {
-          await this._persistMetrics(); // keep what we got
+          await this._persistMetrics(scopeIds); // keep what we got
+          log('analysis', `cancelled ${albumId} at ${i}/${total}`);
           job.resolvers.forEach((r) => r(null));
           finished = true;
           return;
         }
         if (job.pauseRequested) {
-          await this._persistMetrics();
+          await this._persistMetrics(scopeIds);
+          log('analysis', `paused ${albumId} at ${i}/${total}`);
           finished = true; // re-queued by analyzeAlbum
           return;
         }
@@ -298,6 +369,7 @@ class ChunkedAnalyzer {
         // never hold the thread long enough for touches to feel laggy.
         while (i < end && !job.cancelled && !job.pauseRequested) {
           if (this.suspended || this.memoryPaused) break;
+          const batchStart = new Date().getTime();
           const batch = targets.slice(i, Math.min(i + CONCURRENCY, end));
           await Promise.all(
             batch.map(async (a) => {
@@ -308,19 +380,26 @@ class ChunkedAnalyzer {
               }
             })
           );
+          this._metricsDirty = true;
           i += batch.length;
-          await sleep(0); // give the UI thread a turn between batches
+          // THERMAL DUTY CYCLE, not just a yield. Decoding back-to-back keeps
+          // every core busy for as long as the pass lasts, and on a large
+          // library that is long enough to heat the device until it throttles
+          // itself — at which point everything, including the UI, gets slower.
+          // Hold each batch to a floor of TARGET_MS_PER_PHOTO and sleep the
+          // remainder, so the CPU gets idle gaps to shed heat.
+          const budget = TARGET_MS_PER_PHOTO * batch.length;
+          const spent = new Date().getTime() - batchStart;
+          await sleep(Math.min(MAX_COOLDOWN_MS, Math.max(0, budget - spent)));
         }
-        sinceSave += chunk;
-        if (sinceSave >= 50) {
-          sinceSave = 0;
-          await this._persistMetrics(); // INCREMENTAL: survive app kills
+        if (new Date().getTime() - this._lastPersist > PERSIST_INTERVAL_MS) {
+          await this._persistMetrics(scopeIds); // INCREMENTAL: survive kills
         }
         this._emit({ done: i });
         job.progressCbs.forEach((cb) => cb(i, total));
         await yieldToUI();
       }
-      await this._persistMetrics();
+      await this._persistMetrics(scopeIds);
 
       // ---- Aggregate derived results for THIS album ----
       const clusters = mediaType === 'photo' ? this._cluster(scope, store) : [];
@@ -355,16 +434,20 @@ class ChunkedAnalyzer {
           if (!buckets.has(key)) buckets.set(key, []);
           buckets.get(key).push(a);
         }
+        // ONE batched size query for every candidate. This was a serial
+        // getAssetSize per member — a native round trip each, awaited one
+        // after another, at the tail end of an already expensive pass.
+        const candidates = [];
+        for (const members of buckets.values()) {
+          if (members.length >= 2) candidates.push(...members);
+        }
+        const sizeMap =
+          candidates.length > 0 ? await getAssetSizes(candidates) : {};
         for (const members of buckets.values()) {
           if (members.length < 2) continue;
           const bySize = new Map();
           for (const a of members) {
-            let size = 0;
-            try {
-              size = await getAssetSize(a);
-            } catch (e) {
-              size = 0;
-            }
+            const size = sizeMap[a.id] || 0;
             if (!bySize.has(size)) bySize.set(size, []);
             bySize.get(size).push(a.id);
           }
@@ -390,9 +473,15 @@ class ChunkedAnalyzer {
         this.cacheKey(albumId, mediaType),
         JSON.stringify(result)
       );
+      log(
+        'analysis',
+        `done ${albumId} in ${Math.round((new Date().getTime() - startedAt) / 1000)}s ` +
+          `clusters=${clusters.length} low=${lowQuality.length} dupes=${duplicates.length}`
+      );
       job.resolvers.forEach((r) => r(result));
       finished = true;
     } catch (e) {
+      log('analysis', `failed ${albumId}: ${(e && e.message) || e}`);
       job.resolvers.forEach((r) => r(null));
       finished = true;
     } finally {

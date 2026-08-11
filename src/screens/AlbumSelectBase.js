@@ -99,7 +99,7 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
     });
   };
 
-  const cardW = Math.min(Math.round(width * 0.5), 220);
+  const cardW = Math.min(Math.round(width * 0.58), 250);
 
   return (
     <SafeAreaView style={[styles.screen, { backgroundColor: colors.background }]}>

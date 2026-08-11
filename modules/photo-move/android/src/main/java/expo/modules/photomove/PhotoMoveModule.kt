@@ -234,6 +234,134 @@ class PhotoMoveModule : Module() {
         pool.shutdown()
       }
     }
+
+    // ONE cursor per collection for the ENTIRE library, carrying every column
+    // the app needs — crucially including SIZE, which expo-media-library does
+    // not expose at all. That omission is the only reason a separate batched
+    // size query had to exist; with this, sizes come for free.
+    //
+    // Results come back as PARALLEL ARRAYS rather than a list of objects: a
+    // 15k-photo library would otherwise put 15k maps of nine keys each across
+    // the bridge, and that crossing is precisely the cost being removed here.
+    AsyncFunction("scanLibrary") { mediaType: String, limit: Int ->
+      val context = appContext.reactContext ?: throw Exception("NO_CONTEXT")
+      val rows = ArrayList<ScanRow>(4096)
+      if (mediaType != "video") {
+        scanCollection(context, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, 0, rows)
+      }
+      if (mediaType != "photo") {
+        scanCollection(context, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, 1, rows)
+      }
+      // Newest first — every existing caller assumes that ordering.
+      rows.sortByDescending { it.creationTime }
+      val total = rows.size
+      val take: List<ScanRow> =
+        if (limit > 0 && total > limit) rows.subList(0, limit) else rows
+
+      mapOf(
+        "ids" to take.map { it.id },
+        "creationTime" to take.map { it.creationTime },
+        "modificationTime" to take.map { it.modificationTime },
+        "width" to take.map { it.width },
+        "height" to take.map { it.height },
+        "size" to take.map { it.size },
+        "duration" to take.map { it.duration },
+        "albumId" to take.map { it.albumId },
+        "mediaType" to take.map { it.mediaType },
+        "total" to total
+      )
+    }
+  }
+
+  private class ScanRow(
+    val id: String,
+    val creationTime: Double,
+    val modificationTime: Double,
+    val width: Int,
+    val height: Int,
+    val size: Double,
+    val duration: Double,
+    val albumId: String,
+    val mediaType: Int
+  )
+
+  /**
+   * Read one MediaStore collection into `out`.
+   *
+   * Images and Video are queried separately rather than through
+   * MediaStore.Files, for the same reason getSizes does it: those are the
+   * collections the granular Android 13+ permissions actually cover.
+   */
+  private fun scanCollection(
+    context: Context,
+    collection: Uri,
+    mediaType: Int,
+    out: MutableList<ScanRow>
+  ) {
+    // MediaColumns.DATE_TAKEN / BUCKET_ID / DURATION only exist on the
+    // generic column set from API 29. Naming a column the provider does not
+    // know throws on query, so pre-Q devices ask for less rather than crash.
+    val isQ = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+    val projection = mutableListOf(
+      MediaStore.MediaColumns._ID,
+      MediaStore.MediaColumns.DATE_ADDED,
+      MediaStore.MediaColumns.DATE_MODIFIED,
+      MediaStore.MediaColumns.SIZE,
+      MediaStore.MediaColumns.WIDTH,
+      MediaStore.MediaColumns.HEIGHT
+    )
+    if (isQ) {
+      projection.add(MediaStore.MediaColumns.DATE_TAKEN)
+      projection.add(MediaStore.MediaColumns.BUCKET_ID)
+    }
+    // Video.Media.DURATION predates the generic column and is safe anywhere.
+    if (mediaType == 1) projection.add(MediaStore.Video.Media.DURATION)
+
+    try {
+      context.contentResolver.query(
+        collection,
+        projection.toTypedArray(),
+        null,
+        null,
+        null
+      )?.use { c ->
+        val idC = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+        val addedC = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED)
+        val modC = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
+        val sizeC = c.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+        val wC = c.getColumnIndexOrThrow(MediaStore.MediaColumns.WIDTH)
+        val hC = c.getColumnIndexOrThrow(MediaStore.MediaColumns.HEIGHT)
+        val bucketC = if (isQ) c.getColumnIndex(MediaStore.MediaColumns.BUCKET_ID) else -1
+        val takenC = if (isQ) c.getColumnIndex(MediaStore.MediaColumns.DATE_TAKEN) else -1
+        val durC = if (mediaType == 1) {
+          c.getColumnIndex(MediaStore.Video.Media.DURATION)
+        } else {
+          -1
+        }
+
+        while (c.moveToNext()) {
+          // DATE_ADDED is in SECONDS, DATE_TAKEN in MILLISECONDS — mixing the
+          // two silently files half the library under 1970.
+          val taken = if (takenC >= 0 && !c.isNull(takenC)) c.getLong(takenC) else 0L
+          val created = if (taken > 0) taken else c.getLong(addedC) * 1000L
+          out.add(
+            ScanRow(
+              id = c.getLong(idC).toString(),
+              creationTime = created.toDouble(),
+              modificationTime = c.getLong(modC) * 1000.0,
+              width = c.getInt(wC),
+              height = c.getInt(hC),
+              size = c.getLong(sizeC).toDouble(),
+              duration = if (durC >= 0) c.getLong(durC) / 1000.0 else 0.0,
+              albumId = if (bucketC >= 0) (c.getString(bucketC) ?: "") else "",
+              mediaType = mediaType
+            )
+          )
+        }
+      }
+    } catch (e: Exception) {
+      // An unreadable collection yields nothing rather than failing the scan.
+    }
   }
 
   /**

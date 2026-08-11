@@ -13,6 +13,7 @@ import {
   ActivityIndicator,
   useWindowDimensions,
   Platform,
+  Share,
   Alert,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -61,6 +62,17 @@ import {
   formatBytes,
   ALL_ALBUM_ID,
 } from '../utils/albumHelpers';
+
+// expo-sharing gives the real system share sheet for a FILE. Guarded: Expo
+// Go and binaries built before it was added fall back to RN's Share, which
+// can only pass a url/string.
+let Sharing = null;
+try {
+  // eslint-disable-next-line global-require
+  Sharing = require('expo-sharing');
+} catch (e) {
+  Sharing = null;
+}
 
 const SWIPE_X = 70;
 const MOVE_THRESHOLD = 120;
@@ -783,6 +795,31 @@ export default function CleaningScreen({ route, navigation }) {
   const onSwipeDown = useCallback(() => {
     if (current) setShowMove(true);
   }, [current]);
+
+  // ---- System share sheet for the photo on screen ----
+  // getAssetInfoAsync first: `asset.uri` can be a ph:// or content:// handle
+  // that other apps cannot open, while localUri is a real file path.
+  const shareCurrent = async () => {
+    const asset = displayAsset;
+    if (!asset) return;
+    try {
+      const info = await MediaLibrary.getAssetInfoAsync(asset.id);
+      const uri = info.localUri || info.uri || asset.uri;
+      if (Sharing && (await Sharing.isAvailableAsync())) {
+        // Android picks the target apps from the mime type; without it a
+        // HEIC/HEIF shot can come back as "no app can handle this".
+        await Sharing.shareAsync(uri, {
+          mimeType: asset.mediaType === 'video' ? 'video/*' : 'image/*',
+        });
+      } else if (Platform.OS === 'ios') {
+        await Share.share({ url: uri });
+      } else {
+        await Share.share({ message: uri });
+      }
+    } catch (e) {
+      // user dismissed the sheet / sharing unavailable
+    }
+  };
 
   const handlersRef = useRef({});
   handlersRef.current = {
@@ -1562,6 +1599,7 @@ export default function CleaningScreen({ route, navigation }) {
         isFavorite={displayAsset ? isFavorite(displayAsset.id) : false}
         onToggleFavorite={() => displayAsset && toggleFavorite(displayAsset.id)}
         onPressDate={() => displayAsset && setShowExif(true)}
+        onShare={shareCurrent}
         undoCount={undoCount || 0}
         onUndo={undo}
       />
