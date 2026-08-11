@@ -100,7 +100,9 @@ jobs:
           chmod +x ./gradlew
           # Expo/RN 默认会为 4 个 ABI 编译原生 C++ 模块；发布包只面向
           # 64 位真机，避免 x86 模拟器和 32 位 ABI 消耗大量 CI 时间。
-          ./gradlew assembleRelease --no-daemon --stacktrace --parallel --build-cache -PreactNativeArchitectures=arm64-v8a
+          ./gradlew assembleRelease --no-daemon --stacktrace --parallel --build-cache --max-workers=2 \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
+            -PreactNativeArchitectures=arm64-v8a
 
       - name: 收集产物
         id: apk
