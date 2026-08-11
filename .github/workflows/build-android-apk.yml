@@ -21,7 +21,7 @@ jobs:
   build:
     # Linux runner 按 1 倍计费,macOS 是 10 倍 —— 安卓不需要 macOS。
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: write # 仅发布 Release 时需要
     env:
@@ -30,23 +30,24 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 安装 Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
 
       # RN 0.81 / AGP 8.x 需要 JDK 17;runner 默认版本更高,Gradle 会拒绝。
       - name: 安装 JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
 
       - name: 安装依赖
-        run: npm ci
+        # npm 缓存已由 setup-node 恢复；CI 不需要重新请求 audit/fund 接口。
+        run: npm ci --prefer-offline --no-audit --fund=false
 
       - name: 校验版本号一致
         id: meta
@@ -73,7 +74,7 @@ jobs:
       # 不传 build-root-directory —— 该 action 不认这个输入,只会打一条
       # "unexpected input" 警告;缓存本来就是全局配置的,我们手动 cd android 编译。
       - name: 配置 Gradle 缓存
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       # 可选。没有这些 secret 时会用 Expo 模板自带的 keystore:一样能装、
       # 一样能覆盖升级(那把 key 是固定的,不是每次构建现生成),只是不能上架 Play。
@@ -97,7 +98,9 @@ jobs:
         run: |
           cd android
           chmod +x ./gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace
+          # Expo/RN 默认会为 4 个 ABI 编译原生 C++ 模块；发布包只面向
+          # 64 位真机，避免 x86 模拟器和 32 位 ABI 消耗大量 CI 时间。
+          ./gradlew assembleRelease --no-daemon --stacktrace --parallel --build-cache -PreactNativeArchitectures=arm64-v8a
 
       - name: 收集产物
         id: apk
