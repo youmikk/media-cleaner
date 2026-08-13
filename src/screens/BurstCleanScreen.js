@@ -54,13 +54,20 @@ export default function BurstCleanScreen({ route, navigation }) {
     (async () => {
       const total = groups.reduce((n, g) => n + g.ids.length, 0);
       setProgress({ done: 0, total });
+      // Resolve every member in one batched MediaLibrary request. The old
+      // per-group loop repeated native lookups whenever this screen opened.
+      const allIds = [...new Set(groups.flatMap((g) => g.ids))];
+      const resolved = await getAssetsByIds(allIds);
+      const byId = new Map(resolved.map((a) => [a.id, a]));
       const out = [];
       const autoSel = {};
       let done = 0;
       let sectionNo = 0;
 
       for (let gi = 0; gi < groups.length; gi++) {
-        const assets = await getAssetsByIds(groups[gi].ids);
+        const assets = groups[gi].ids
+          .map((id) => byId.get(id))
+          .filter(Boolean);
         if (!alive) return;
 
         let members;

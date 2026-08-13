@@ -16,11 +16,12 @@ import { useSettings } from '../context/SettingsContext';
  * The backdrop FADES in while the sheet springs up separately — avoids the
  * ugly "black sheet sliding up" artifact of animationType="slide".
  */
-export default function AlbumPicker({ albums, selected, onSelect }) {
+export default function AlbumPicker({ albums, selected, onSelect, progressByAlbum = {} }) {
   const { colors, t } = useSettings();
   const [open, setOpen] = useState(false);
   const slide = useRef(new Animated.Value(80)).current;
   const current = albums.find((a) => a.id === selected);
+  const currentProgress = progressByAlbum[selected];
 
   useEffect(() => {
     if (open) {
@@ -44,6 +45,14 @@ export default function AlbumPicker({ albums, selected, onSelect }) {
         <Text style={[styles.buttonText, { color: colors.text }]} numberOfLines={1}>
           {current ? current.title : '…'}
         </Text>
+        {currentProgress && (
+          <View style={styles.buttonProgress}>
+            <View style={[styles.progressTrack, { backgroundColor: colors.chartTrack }]}>
+              <View style={[styles.progressFill, { width: `${currentProgress.percent}%`, backgroundColor: colors.accent }]} />
+            </View>
+            <Text style={[styles.progressText, { color: colors.subtext }]}>{currentProgress.percent}%</Text>
+          </View>
+        )}
         <Ionicons name="chevron-down" size={16} color={colors.subtext} />
       </Pressable>
 
@@ -91,6 +100,16 @@ export default function AlbumPicker({ albums, selected, onSelect }) {
                         {item.assetCount}
                       </Text>
                     )}
+                    {progressByAlbum[item.id] && (
+                      <View style={styles.rowProgress}>
+                        <View style={[styles.progressTrack, { backgroundColor: colors.chartTrack }]}>
+                          <View style={[styles.progressFill, { width: `${progressByAlbum[item.id].percent}%`, backgroundColor: colors.accent }]} />
+                        </View>
+                        <Text style={[styles.progressText, { color: colors.subtext }]}>
+                          {progressByAlbum[item.id].percent}%
+                        </Text>
+                      </View>
+                    )}
                     {item.id === selected && (
                       <Ionicons name="checkmark" size={18} color={colors.accent} />
                     )}
@@ -117,6 +136,11 @@ const styles = StyleSheet.create({
     maxWidth: 200,
   },
   buttonText: { fontSize: 14, fontWeight: '600', flexShrink: 1 },
+  buttonProgress: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  rowProgress: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  progressTrack: { width: 36, height: 4, borderRadius: 2, overflow: 'hidden' },
+  progressFill: { height: '100%', borderRadius: 2 },
+  progressText: { fontSize: 10, minWidth: 30, textAlign: 'right' },
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.35)',

@@ -30,6 +30,7 @@ import AlbumPicker from '../components/AlbumPicker';
 import AlbumChips from '../components/AlbumChips';
 import GroupConfirmSheet from '../components/GroupConfirmSheet';
 import { incrementUsage } from '../utils/albumUsage';
+import * as reviewedStore from '../utils/reviewedStore';
 import * as MediaLibrary from 'expo-media-library';
 import { getVideoThumbnail } from '../utils/thumbCache';
 import { log, logSync } from '../utils/logger';
@@ -394,6 +395,7 @@ export default function VideoCleaningScreen({ navigation, route }) {
     const id = current.id;
     try {
       await moveAssetsToAlbum([current], album);
+      await reviewedStore.addReviewed(albumId, [id]);
       incrementUsage(album.id);
       setAlbumOverrides((m) => ({ ...m, [id]: album.id }));
     } catch (e) {
@@ -407,6 +409,7 @@ export default function VideoCleaningScreen({ navigation, route }) {
     try {
       const album = await MediaLibrary.createAlbumAsync(name, current, false);
       if (album) {
+        await reviewedStore.addReviewed(albumId, [id]);
         incrementUsage(album.id);
         setAlbumOverrides((m) => ({ ...m, [id]: album.id }));
       }

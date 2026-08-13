@@ -16,7 +16,15 @@ import StackedCards from '../components/StackedCards';
 import AnalysisProgress from '../components/AnalysisProgress';
 import CacheStalePrompt from '../components/CacheStalePrompt';
 import analyzer from '../utils/chunkedAnalyzer';
-import { getAlbums, getAssetsPage, ALL_ALBUM_ID } from '../utils/albumHelpers';
+import * as reviewedStore from '../utils/reviewedStore';
+import {
+  getAlbums,
+  getAssetsPage,
+  getCachedPreview,
+  saveCachedPreview,
+  getAlbumFingerprint,
+  ALL_ALBUM_ID,
+} from '../utils/albumHelpers';
 import { log } from '../utils/logger';
 
 const MIN_GROUP = 2;
@@ -38,6 +46,7 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
   const [groupSize, setGroupSize] = useState(DEFAULT_GROUP);
   const [thumbs, setThumbs] = useState([]);
   const [analysisState, setAnalysisState] = useState(null);
+  const [progressByAlbum, setProgressByAlbum] = useState({});
   const [stalePrompt, setStalePrompt] = useState(false);
   const focusStartedAt = useRef(0);
   const firstThumbLogged = useRef(false);
@@ -72,6 +81,26 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
     }, [isVideo])
   );
 
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const entries = await Promise.all(
+        albums.map(async (album) => {
+          let total = album.assetCount;
+          if (!total && album.id === ALL_ALBUM_ID) {
+            total = (await getAlbumFingerprint(ALL_ALBUM_ID, mediaType)).assetCount;
+          }
+          if (!total) return [album.id, null];
+          return [album.id, await reviewedStore.getProgress(album.id, total)];
+        })
+      );
+      if (alive) setProgressByAlbum(Object.fromEntries(entries.filter(([, value]) => value)));
+    })().catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [albums]);
+
   const albumTitle = useMemo(() => {
     const a = albums.find((x) => x.id === albumId);
     return a ? a.title : '';
@@ -99,22 +128,38 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
   // three, which is why the cards took seconds to appear.
   useEffect(() => {
     let alive = true;
-    getAssetsPage(albumId, mediaType)
-      .then((page) => {
-        if (!alive) return;
-        const first = page.assets.slice(0, 3);
-        setThumbs(first);
-        if (!firstThumbLogged.current && first.length > 0) {
+    (async () => {
+      const cached = await getCachedPreview(albumId, mediaType);
+      if (!alive) return;
+      if (cached?.length) {
+        setThumbs(cached);
+        if (!firstThumbLogged.current) {
           firstThumbLogged.current = true;
           log(
             'perf',
             `home first-thumbnails ${Date.now() - focusStartedAt.current}ms ` +
-              `screen=${isVideo ? 'videos' : 'photos-base'} source=media-library ` +
-              `count=${first.length}`
+              `screen=${isVideo ? 'videos' : 'photos-base'} source=cache count=${cached.length}`
           );
         }
-      })
-      .catch(() => alive && setThumbs([]));
+        // Let the cached cards paint before asking MediaStore for freshness.
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        if (!alive) return;
+      }
+      const page = await getAssetsPage(albumId, mediaType);
+      if (!alive) return;
+      const first = page.assets.slice(0, 3);
+      saveCachedPreview(albumId, mediaType, first);
+      setThumbs(first);
+      if (!firstThumbLogged.current && first.length > 0) {
+        firstThumbLogged.current = true;
+        log(
+          'perf',
+          `home first-thumbnails ${Date.now() - focusStartedAt.current}ms ` +
+            `screen=${isVideo ? 'videos' : 'photos-base'} source=media-library ` +
+            `count=${first.length}`
+        );
+      }
+    })().catch(() => alive && setThumbs([]));
     return () => {
       alive = false;
     };
@@ -165,6 +210,7 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
         <AlbumPicker
           albums={albums}
           selected={albumId}
+          progressByAlbum={progressByAlbum}
           onSelect={(a) => setAlbumId(a.id)}
         />
         <View

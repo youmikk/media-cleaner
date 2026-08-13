@@ -21,6 +21,8 @@ const CACHE_PATTERNS = [
   /^analysis_metrics_v2$/, // the global per-asset metric store
   /^analysis_suggestions_v2$/, // home suggestion cards
   /^album_summary_/, //       count + preview thumbs + time histogram
+  /^@mediacleaner\/albums_v1_/, // persisted album picker list
+  /^@mediacleaner\/preview_v1_/, // first preview cards
   /^asset_list_v1_/, //       local asset index
   /^@mediacleaner\/library_size$/, // measured gallery size
   /^@mediacleaner\/video_thumbs_v1$/, // generated video thumbnail map

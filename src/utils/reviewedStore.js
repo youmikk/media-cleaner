@@ -67,3 +67,15 @@ export async function clearReviewed(albumId) {
     }
   });
 }
+
+/** Progress for the album picker. Moving/categorizing also adds to reviewed. */
+export async function getProgress(albumId, total) {
+  const reviewed = await getReviewed(albumId);
+  const safeTotal = Number(total) || 0;
+  const done = safeTotal > 0 ? Math.min(reviewed.size, safeTotal) : 0;
+  return {
+    done,
+    total: safeTotal,
+    percent: safeTotal > 0 ? Math.min(100, Math.round((done / safeTotal) * 100)) : 0,
+  };
+}

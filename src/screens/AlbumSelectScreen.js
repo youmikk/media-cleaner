@@ -25,7 +25,7 @@ import {
   getAlbumSummary,
   peekAlbumSummary,
   saveAlbumSummary,
-  buildYearHistogram,
+          buildYearHistogram,
   ALL_ALBUM_ID,
 } from '../utils/albumHelpers';
 import { log } from '../utils/logger';
@@ -64,6 +64,7 @@ export default function AlbumSelectScreen({ navigation }) {
   const [sessionPreview, setSessionPreview] = useState(null); // {thumbs} | null
   // Preview for the picked year/month — one scoped media-store query.
   const [rangeThumbs, setRangeThumbs] = useState(null);
+  const [progressByAlbum, setProgressByAlbum] = useState({});
   const focusStartedAt = useRef(0);
   const firstThumbLogged = useRef(false);
 
@@ -93,6 +94,26 @@ export default function AlbumSelectScreen({ navigation }) {
     const a = albums.find((x) => x.id === albumId);
     return a ? a.title : '';
   }, [albums, albumId]);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const entries = await Promise.all(
+        albums.map(async (album) => {
+          let total = album.assetCount;
+          if (!total && album.id === ALL_ALBUM_ID) {
+            total = (await getAlbumFingerprint(ALL_ALBUM_ID, 'photo')).assetCount;
+          }
+          if (!total) return [album.id, null];
+          return [album.id, await reviewedStore.getProgress(album.id, total)];
+        })
+      );
+      if (alive) setProgressByAlbum(Object.fromEntries(entries.filter(([, value]) => value)));
+    })().catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [albums]);
 
   useFocusEffect(
     useCallback(() => {
@@ -409,6 +430,7 @@ export default function AlbumSelectScreen({ navigation }) {
         <AlbumPicker
           albums={albums}
           selected={albumId}
+          progressByAlbum={progressByAlbum}
           onSelect={(a) => {
             if (a.id !== albumId) setSummary(null); // don't show stale thumbs
             setAlbumId(a.id);

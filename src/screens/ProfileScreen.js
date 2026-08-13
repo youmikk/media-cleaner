@@ -489,6 +489,96 @@ export default function ProfileScreen({ navigation }) {
     },
   ];
 
+  // Keep cards with a usable thumbnail first. This makes the suggestions
+  // feel immediately actionable while empty-result cards remain available
+  // after them.
+  const suggestionCards = [
+    {
+      key: 'largest',
+      thumb: suggestions.largest[0]?.uri,
+      node: (
+        <SuggestionCard
+          icon="albums-outline"
+          title={t('suggestion_largest')}
+          description={t('suggestion_largest_desc')}
+          thumbnailUri={suggestions.largest[0]?.uri}
+          count={suggestions.largest.length}
+          onClean={() => cleanAssets(suggestions.largest.map((a) => a.id), t('suggestion_largest'), Object.fromEntries(suggestions.largest.map((a) => [a.id, a.size])))}
+        />
+      ),
+    },
+    {
+      key: 'burst',
+      thumb: suggestions.bursts[0]?.thumb,
+      node: (
+        <SuggestionCard
+          icon="camera-outline"
+          title={t('suggestion_burst')}
+          description={t('suggestion_burst_desc')}
+          thumbnailUri={suggestions.bursts[0]?.thumb}
+          count={suggestions.bursts.length}
+          onClean={() => navigation.navigate('BurstClean', { groups: suggestions.bursts.map((b) => ({ ids: b.ids })) })}
+        />
+      ),
+    },
+    {
+      key: 'screenshots',
+      thumb: suggestions.screenshots[0]?.uri,
+      node: (
+        <SuggestionCard
+          icon="phone-portrait-outline"
+          title={t('suggestion_screenshots')}
+          description={t('suggestion_screenshots_desc')}
+          thumbnailUri={suggestions.screenshots[0]?.uri}
+          count={suggestions.screenshots.length}
+          onClean={() => cleanAssets(suggestions.screenshots.map((a) => a.id), t('suggestion_screenshots'))}
+        />
+      ),
+    },
+    {
+      key: 'dupes',
+      thumb: photoDupes.thumb,
+      node: (
+        <SuggestionCard
+          icon="copy-outline"
+          title={t('suggestion_dupes')}
+          description={photoDupes.groups.length > 0 ? t('suggestion_dupes_desc') : t('lowquality_need_analysis')}
+          thumbnailUri={photoDupes.thumb}
+          count={photoDupes.groups.length}
+          onClean={() => navigation.navigate('BurstClean', { groups: photoDupes.groups.map((ids) => ({ ids })), mode: 'duplicate' })}
+        />
+      ),
+    },
+    {
+      key: 'video-dupes',
+      thumb: null,
+      node: (
+        <SuggestionCard
+          icon="film-outline"
+          title={t('suggestion_video_dupes')}
+          description={t('suggestion_video_dupes_desc')}
+          thumbnailUri={null}
+          count={(suggestions.videoDupes || []).length}
+          onClean={() => navigation.navigate('BurstClean', { groups: suggestions.videoDupes, mode: 'duplicate' })}
+        />
+      ),
+    },
+    {
+      key: 'low-quality',
+      thumb: lowQuality.thumb,
+      node: (
+        <SuggestionCard
+          icon="eye-off-outline"
+          title={t('suggestion_lowquality')}
+          description={lowQuality.ids.length > 0 ? t('suggestion_lowquality_desc') : t('lowquality_need_analysis')}
+          thumbnailUri={lowQuality.thumb}
+          count={lowQuality.ids.length}
+          onClean={() => cleanAssets(lowQuality.ids.slice(0, 500), t('suggestion_lowquality'))}
+        />
+      ),
+    },
+  ].sort((a, b) => Number(!b.thumb) - Number(!a.thumb));
+
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
       <ScrollView
@@ -502,95 +592,7 @@ export default function ProfileScreen({ navigation }) {
         {/* Smart suggestions */}
         <Section title={t('suggestions_title')}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-            <SuggestionCard
-              icon="albums-outline"
-              title={t('suggestion_largest')}
-              description={t('suggestion_largest_desc')}
-              thumbnailUri={suggestions.largest[0]?.uri}
-              count={suggestions.largest.length}
-              onClean={() =>
-                cleanAssets(
-                  suggestions.largest.map((a) => a.id),
-                  t('suggestion_largest'),
-                  Object.fromEntries(
-                    suggestions.largest.map((a) => [a.id, a.size])
-                  )
-                )
-              }
-            />
-            <SuggestionCard
-              icon="camera-outline"
-              title={t('suggestion_burst')}
-              description={t('suggestion_burst_desc')}
-              thumbnailUri={suggestions.bursts[0]?.thumb}
-              count={suggestions.bursts.length}
-              onClean={() =>
-                navigation.navigate('BurstClean', {
-                  groups: suggestions.bursts.map((b) => ({ ids: b.ids })),
-                })
-              }
-            />
-            <SuggestionCard
-              icon="phone-portrait-outline"
-              title={t('suggestion_screenshots')}
-              description={t('suggestion_screenshots_desc')}
-              thumbnailUri={suggestions.screenshots[0]?.uri}
-              count={suggestions.screenshots.length}
-              onClean={() =>
-                cleanAssets(
-                  suggestions.screenshots.map((a) => a.id),
-                  t('suggestion_screenshots')
-                )
-              }
-            />
-            <SuggestionCard
-              icon="copy-outline"
-              title={t('suggestion_dupes')}
-              description={
-                photoDupes.groups.length > 0
-                  ? t('suggestion_dupes_desc')
-                  : t('lowquality_need_analysis')
-              }
-              thumbnailUri={photoDupes.thumb}
-              count={photoDupes.groups.length}
-              onClean={() =>
-                navigation.navigate('BurstClean', {
-                  groups: photoDupes.groups.map((ids) => ({ ids })),
-                  mode: 'duplicate',
-                })
-              }
-            />
-            <SuggestionCard
-              icon="film-outline"
-              title={t('suggestion_video_dupes')}
-              description={t('suggestion_video_dupes_desc')}
-              thumbnailUri={null}
-              count={(suggestions.videoDupes || []).length}
-              onClean={() =>
-                navigation.navigate('BurstClean', {
-                  groups: suggestions.videoDupes,
-                  mode: 'duplicate',
-                })
-              }
-            />
-            <SuggestionCard
-              icon="eye-off-outline"
-              title={t('suggestion_lowquality')}
-              description={
-                lowQuality.ids.length > 0
-                  ? t('suggestion_lowquality_desc')
-                  : t('lowquality_need_analysis')
-              }
-              thumbnailUri={lowQuality.thumb}
-              count={lowQuality.ids.length}
-              onClean={() =>
-                // cap: huge lists made the cleaning screen appear stuck
-                cleanAssets(
-                  lowQuality.ids.slice(0, 500),
-                  t('suggestion_lowquality')
-                )
-              }
-            />
+            {suggestionCards.map(({ key, node }) => React.cloneElement(node, { key }))}
           </ScrollView>
         </Section>
 

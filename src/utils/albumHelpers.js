@@ -12,6 +12,9 @@ const ALBUMS_TTL_MS = 30000;
 const FINGERPRINT_TTL_MS = 5000;
 const albumsMemoryCache = new Map();
 const fingerprintMemoryCache = new Map();
+const ALBUMS_CACHE_PREFIX = '@mediacleaner/albums_v1_';
+const PREVIEW_CACHE_PREFIX = '@mediacleaner/preview_v1_';
+const assetInfoMemoryCache = new Map();
 const SNAPSHOT_SAMPLE = 60; // size sampling cap when there is no native query
 const SNAPSHOT_CONCURRENCY = 6;
 // Assets measured for real per album snapshot. Cheap on Android (a cursor),
@@ -34,7 +37,9 @@ export const MAX_ASSETS_BY_IDS = 600;
  * "All Photos"/"All Videos" entry.
  */
 export async function getAlbums(mediaType, allLabel) {
-  const cacheKey = mediaType;
+  // getAlbumsAsync returns the same mixed album directory for photos and
+  // videos; only the synthetic "All" label differs by tab.
+  const cacheKey = 'library';
   const cached = albumsMemoryCache.get(cacheKey);
   if (cached && Date.now() - cached.at < ALBUMS_TTL_MS) {
     // Keep the synthetic "All" label in the current locale when the user
@@ -43,6 +48,29 @@ export async function getAlbums(mediaType, allLabel) {
     log('perf', `getAlbumsAsync ${mediaType} cache ${Date.now() - cached.at}ms count=${cached.value.length}`);
     return cached.value;
   }
+  // Android's MediaStore album query can take several seconds on large
+  // libraries. Use the last known list immediately, then refresh it for the
+  // next visit in the background.
+  try {
+    const raw = await AsyncStorage.getItem(`${ALBUMS_CACHE_PREFIX}library`);
+    const stored = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(stored) && stored.length > 0) {
+      const result = stored.map((a) =>
+        a.id === ALL_ALBUM_ID ? { ...a, title: allLabel } : a
+      );
+      albumsMemoryCache.set(cacheKey, { at: Date.now(), value: result });
+      refreshAlbums(mediaType, allLabel).catch(() => {});
+      log('perf', `getAlbumsAsync ${mediaType} persisted-cache count=${result.length}`);
+      return result;
+    }
+  } catch (e) {
+    // Fall through to the native query.
+  }
+  return refreshAlbums(mediaType, allLabel);
+}
+
+async function refreshAlbums(mediaType, allLabel) {
+  const cacheKey = 'library';
   const startedAt = Date.now();
   try {
     const albums = await MediaLibrary.getAlbumsAsync({
@@ -59,6 +87,10 @@ export async function getAlbums(mediaType, allLabel) {
       `getAlbumsAsync ${mediaType} ${Date.now() - startedAt}ms count=${result.length}`
     );
     albumsMemoryCache.set(cacheKey, { at: Date.now(), value: result });
+    AsyncStorage.setItem(
+      `${ALBUMS_CACHE_PREFIX}library`,
+      JSON.stringify(result)
+    ).catch(() => {});
     return result;
   } catch (e) {
     log('perf', `getAlbumsAsync ${mediaType} failed ${Date.now() - startedAt}ms`);
@@ -113,6 +145,33 @@ export async function getAssetsPage(albumId, mediaType, after, range = null) {
  * A handful of preview assets for a time range — ONE scoped media-store
  * query, no paging. Used by the home cards when a year/month is picked.
  */
+/** Cached first preview used by album selectors while MediaStore warms up. */
+export async function getCachedPreview(albumId, mediaType) {
+  try {
+    const raw = await AsyncStorage.getItem(
+      `${PREVIEW_CACHE_PREFIX}${mediaType}_${albumId || ALL_ALBUM_ID}`
+    );
+    const assets = raw ? JSON.parse(raw) : null;
+    return Array.isArray(assets) ? assets : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+export function saveCachedPreview(albumId, mediaType, assets) {
+  if (!Array.isArray(assets) || assets.length === 0) return;
+  AsyncStorage.setItem(
+    `${PREVIEW_CACHE_PREFIX}${mediaType}_${albumId || ALL_ALBUM_ID}`,
+    JSON.stringify(assets.slice(0, 3).map((a) => ({
+      id: a.id,
+      uri: a.uri,
+      mediaType: a.mediaType,
+      width: a.width,
+      height: a.height,
+    })))
+  ).catch(() => {});
+}
+
 export async function getRangeThumbs(albumId, mediaType, range, count = 3) {
   try {
     const options = {
@@ -165,20 +224,34 @@ export async function getAssetsByIds(ids) {
   // looked like "the screen won't open").
   const capped = ids.slice(0, MAX_ASSETS_BY_IDS);
   const out = [];
+  const missing = [];
+  for (const id of capped) {
+    const cached = assetInfoMemoryCache.get(id);
+    if (cached) out.push(cached);
+    else missing.push(id);
+  }
   const CONC = 8;
-  for (let i = 0; i < capped.length; i += CONC) {
-    const batch = capped.slice(i, i + CONC);
+  for (let i = 0; i < missing.length; i += CONC) {
+    const batch = missing.slice(i, i + CONC);
     // eslint-disable-next-line no-await-in-loop
     const infos = await Promise.all(
       batch.map(async (id) => {
         try {
-          return await MediaLibrary.getAssetInfoAsync(id);
+          const info = await MediaLibrary.getAssetInfoAsync(id);
+          if (info) assetInfoMemoryCache.set(id, info);
+          return info;
         } catch (e) {
           return null; // asset may have been deleted meanwhile
         }
       })
     );
     for (const info of infos) if (info) out.push(info);
+  }
+  const byId = new Map(out.map((a) => [a.id, a]));
+  out.length = 0;
+  for (const id of capped) {
+    const asset = byId.get(id) || assetInfoMemoryCache.get(id);
+    if (asset) out.push(asset);
   }
   // Non-enumerable so existing `.map`/`.length` callers are unaffected, but
   // a caller that cares can tell the user "600 of 1500 shown" instead of

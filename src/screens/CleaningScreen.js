@@ -969,6 +969,8 @@ export default function CleaningScreen({ route, navigation }) {
         await moveAssetsToAlbum([current], album);
         overrideHistoryRef.current[id] = { fromAlbumId, toAlbumId: album.id };
       }
+      // Categorizing counts as completing this item in the current album.
+      await reviewedStore.addReviewed(albumId, [id]);
       incrementUsage(album.id);
       setAlbumOverrides((m) => ({ ...m, [id]: album.id }));
       showToast(t('moved_to', { album: album.title }));
@@ -1009,6 +1011,7 @@ export default function CleaningScreen({ route, navigation }) {
         setRealAlbums(list.filter((a) => a.assetCount > 0));
         const album = list.find((a) => a.title === name);
         if (album) incrementUsage(album.id);
+        await reviewedStore.addReviewed(albumId, [id]);
         overrideHistoryRef.current[id] = {
           fromAlbumId,
           toAlbumId: album ? album.id : name,
@@ -1033,6 +1036,7 @@ export default function CleaningScreen({ route, navigation }) {
         const list = await MediaLibrary.getAlbumsAsync();
         setRealAlbums(list.filter((a) => a.assetCount > 0));
       }
+      await reviewedStore.addReviewed(albumId, [id]);
       showToast(t('moved_to', { album: name }));
       if (currentRef.current && currentRef.current.id === id) callNext();
     } catch (e) {
