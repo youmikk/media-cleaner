@@ -342,6 +342,7 @@ class ChunkedAnalyzer {
       log(
         'analysis',
         `start ${albumId}/${mediaType} scope=${scope.length} todo=${total}`
+          + ` concurrency=${CONCURRENCY} lowPower=${this.lowPower}`
       );
       this._emit({ running: true, albumId, done: 0, total });
 
@@ -390,6 +391,13 @@ class ChunkedAnalyzer {
           // remainder, so the CPU gets idle gaps to shed heat.
           const budget = TARGET_MS_PER_PHOTO * batch.length;
           const spent = new Date().getTime() - batchStart;
+          if (spent > Math.max(250, budget * 3)) {
+            log(
+              'perf',
+              `analysis-slow ${albumId}/${mediaType} batch=${batch.length} ` +
+                `spent=${spent}ms budget=${budget}ms lowPower=${this.lowPower}`
+            );
+          }
           await sleep(Math.min(MAX_COOLDOWN_MS, Math.max(0, budget - spent)));
         }
         if (new Date().getTime() - this._lastPersist > PERSIST_INTERVAL_MS) {
@@ -476,6 +484,7 @@ class ChunkedAnalyzer {
       log(
         'analysis',
         `done ${albumId} in ${Math.round((new Date().getTime() - startedAt) / 1000)}s ` +
+          `durationMs=${new Date().getTime() - startedAt} ` +
           `clusters=${clusters.length} low=${lowQuality.length} dupes=${duplicates.length}`
       );
       job.resolvers.forEach((r) => r(result));

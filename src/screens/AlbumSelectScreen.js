@@ -1,5 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, useWindowDimensions } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  InteractionManager,
+  View,
+  Text,
+  StyleSheet,
+  useWindowDimensions,
+} from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
@@ -17,10 +23,12 @@ import {
   getRangeThumbs,
   getAlbumFingerprint,
   getAlbumSummary,
+  peekAlbumSummary,
   saveAlbumSummary,
   buildYearHistogram,
   ALL_ALBUM_ID,
 } from '../utils/albumHelpers';
+import { log } from '../utils/logger';
 
 // Preview pool cached per album. Three are shown; the extras exist so
 // "random" order can show a DIFFERENT three without a rescan.
@@ -46,7 +54,9 @@ export default function AlbumSelectScreen({ navigation }) {
 
   const [albums, setAlbums] = useState([]);
   const [albumId, setAlbumId] = useState(ALL_ALBUM_ID);
-  const [summary, setSummary] = useState(null); // {count, thumbs, years}
+  const [summary, setSummary] = useState(
+    () => peekAlbumSummary(ALL_ALBUM_ID)?.summary || null
+  ); // {count, thumbs, years}
   const [timeFilter, setTimeFilter] = useState(null);
   const [analysisState, setAnalysisState] = useState(null);
   // When an unfinished photo session exists for this album, the three
@@ -54,6 +64,30 @@ export default function AlbumSelectScreen({ navigation }) {
   const [sessionPreview, setSessionPreview] = useState(null); // {thumbs} | null
   // Preview for the picked year/month — one scoped media-store query.
   const [rangeThumbs, setRangeThumbs] = useState(null);
+  const focusStartedAt = useRef(0);
+  const firstThumbLogged = useRef(false);
+
+  useFocusEffect(
+    useCallback(() => {
+      const startedAt = Date.now();
+      focusStartedAt.current = startedAt;
+      firstThumbLogged.current = false;
+      log('perf', 'home focus-start screen=photos');
+      const frame = requestAnimationFrame(() => {
+        log('perf', `home first-frame ${Date.now() - startedAt}ms screen=photos`);
+      });
+      const interactive = InteractionManager.runAfterInteractions(() => {
+        log(
+          'perf',
+          `home first-interactive ${Date.now() - startedAt}ms screen=photos`
+        );
+      });
+      return () => {
+        cancelAnimationFrame(frame);
+        interactive.cancel();
+      };
+    }, [])
+  );
 
   const albumTitle = useMemo(() => {
     const a = albums.find((x) => x.id === albumId);
@@ -63,11 +97,14 @@ export default function AlbumSelectScreen({ navigation }) {
   useFocusEffect(
     useCallback(() => {
       let alive = true;
-      getAlbums('photo', t('all_photos'))
+      // Album names are secondary to the first paint. Android's album query
+      // can compete with the first thumbnail query on the MediaStore bridge.
+      const timer = setTimeout(() => getAlbums('photo', t('all_photos'))
         .then((list) => alive && setAlbums(list))
-        .catch(() => {});
+        .catch(() => {}), 350);
       return () => {
         alive = false;
+        clearTimeout(timer);
       };
     }, [t])
   );
@@ -153,10 +190,34 @@ export default function AlbumSelectScreen({ navigation }) {
     (async () => {
       try {
         const cached = await getAlbumSummary(albumId);
-        if (alive && cached) setSummary(cached.summary);
+        if (alive && cached) {
+          setSummary(cached.summary);
+          if (!firstThumbLogged.current && cached.summary?.thumbs?.length) {
+            firstThumbLogged.current = true;
+            log(
+              'perf',
+              `home first-thumbnails ${Date.now() - focusStartedAt.current}ms ` +
+                `screen=photos source=cache count=${cached.summary.thumbs.length}`
+            );
+          }
+        }
         else if (alive && !cached) setSummary(null);
 
-        const fp = await getAlbumFingerprint(albumId, 'photo');
+        // Cached content is already paintable. Give the first frame and
+        // thumbnails a short head start before any freshness work.
+        if (cached) {
+          await new Promise((resolve) => setTimeout(resolve, 350));
+          if (!alive) return;
+        }
+
+        // On a first visit there is no summary to show, so fetch the
+        // fingerprint and first page together. The first page can paint while
+        // the fingerprint decides whether a full refresh is needed.
+        const fpPromise = getAlbumFingerprint(albumId, 'photo');
+        const firstPagePromise = cached
+          ? null
+          : getAssetsPage(albumId, 'photo');
+        const fp = await fpPromise;
         if (!alive) return;
         if (
           cached &&
@@ -172,6 +233,27 @@ export default function AlbumSelectScreen({ navigation }) {
         let after;
         let hasNext = true;
         let first = true;
+        if (firstPagePromise) {
+          const page = await firstPagePromise;
+          if (!alive) return;
+          all = page.assets;
+          hasNext = page.hasNext;
+          after = page.endCursor;
+          setSummary((s) => ({
+            count: fp.assetCount || all.length,
+            thumbs: all.slice(0, THUMB_POOL).map((a) => ({ id: a.id, uri: a.uri })),
+            years: s ? s.years : [],
+          }));
+          if (!firstThumbLogged.current && all.length > 0) {
+            firstThumbLogged.current = true;
+            log(
+              'perf',
+              `home first-thumbnails ${Date.now() - focusStartedAt.current}ms ` +
+                `screen=photos source=media-library count=${Math.min(3, all.length)}`
+            );
+          }
+          first = false;
+        }
         while (hasNext && all.length < 20000) {
           const page = await getAssetsPage(albumId, 'photo', after);
           if (!alive) return;
@@ -184,6 +266,14 @@ export default function AlbumSelectScreen({ navigation }) {
               thumbs: all.slice(0, THUMB_POOL).map((a) => ({ id: a.id, uri: a.uri })),
               years: s ? s.years : [],
             }));
+            if (!firstThumbLogged.current && all.length > 0) {
+              firstThumbLogged.current = true;
+              log(
+                'perf',
+                `home first-thumbnails ${Date.now() - focusStartedAt.current}ms ` +
+                  `screen=photos source=media-library count=${Math.min(3, all.length)}`
+              );
+            }
             first = false;
           }
         }

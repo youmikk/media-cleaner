@@ -70,15 +70,17 @@ function formatDuration(seconds) {
  * DELETE-confirmation sheet pops up IF anything is marked — otherwise the
  * next group loads directly. Deletion is one batch per group.
  */
-export default function VideoCleaningScreen({ navigation }) {
+export default function VideoCleaningScreen({ navigation, route }) {
   const { colors, t, settings, recycleBinActive } = useSettings();
   const { recordCleaned, recordViewed, toggleFavorite, isFavorite } = useApp();
   const { height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  const groupSize = settings.videoGroupSize || settings.groupSize || 5;
+  const groupSize =
+    route?.params?.groupSize || settings.videoGroupSize || settings.groupSize || 5;
+  const initialAlbumId = route?.params?.albumId || ALL_ALBUM_ID;
 
   const [albums, setAlbums] = useState([]);
-  const [albumId, setAlbumId] = useState(ALL_ALBUM_ID);
+  const [albumId, setAlbumId] = useState(initialAlbumId);
   const [loading, setLoading] = useState(true);
   const [totalCount, setTotalCount] = useState(0);
   const [remaining, setRemaining] = useState([]); // not yet reviewed
@@ -214,16 +216,25 @@ export default function VideoCleaningScreen({ navigation }) {
   // Load-failure fallback WITHOUT touching live players: remount the card
   // with the MediaStore content:// uri; if that fails too, an unplayable
   // placeholder is shown instead of a player.
-  const [altUris, setAltUris] = useState({}); // id -> alt uri | null(dead)
-  const handleLoadError = useCallback((item) => {
+  const [altUris, setAltUris] = useState({}); // id -> alternate uri | null(dead)
+  const handleLoadError = useCallback(async (item) => {
     log('video', `loadError id=${item.id}`);
-    setAltUris((m) => {
-      if (m[item.id] !== undefined) return { ...m, [item.id]: null };
+    let alt = null;
+    try {
+      const info = await MediaLibrary.getAssetInfoAsync(item.id);
+      alt = info.localUri || info.uri || null;
+    } catch (e) {
+      // Fall through to the deterministic MediaStore URI below.
+    }
+    if (!alt || alt === item.uri) {
       const rawId = String(item.id).split('/')[0];
-      const alt =
+      alt =
         Platform.OS === 'android' && /^\d+$/.test(rawId)
           ? `content://media/external/video/media/${rawId}`
           : null;
+    }
+    setAltUris((m) => {
+      if (m[item.id] !== undefined) return { ...m, [item.id]: null };
       return { ...m, [item.id]: alt };
     });
   }, []);
@@ -454,7 +465,7 @@ export default function VideoCleaningScreen({ navigation }) {
   }, [loading, totalCount, remaining.length, finishAll]);
 
   const exit = () => {
-    navigation.navigate('PhotosTab'); // leave IMMEDIATELY
+    navigation.goBack();
     settleSession();
   };
 
@@ -532,7 +543,7 @@ export default function VideoCleaningScreen({ navigation }) {
         </Text>
         <Pressable
           style={[styles.doneBtn, { backgroundColor: colors.accent }]}
-          onPress={() => navigation.navigate('PhotosTab')}
+          onPress={() => navigation.goBack()}
         >
           <Text style={styles.doneBtnText}>{t('done')}</Text>
         </Pressable>

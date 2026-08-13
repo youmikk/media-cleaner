@@ -7,6 +7,7 @@ import { useSettings } from '../context/SettingsContext';
 import AlbumSelectScreen from '../screens/AlbumSelectScreen';
 import CleaningScreen from '../screens/CleaningScreen';
 import VideoCleaningScreen from '../screens/VideoCleaningScreen';
+import VideoAlbumSelectScreen from '../screens/VideoAlbumSelectScreen';
 import ProfileScreen from '../screens/ProfileScreen';
 import RecycleBinScreen from '../screens/RecycleBinScreen';
 import BurstCleanScreen from '../screens/BurstCleanScreen';
@@ -52,10 +53,10 @@ function PhotosNavigator() {
   );
 }
 
-// Videos tab opens the cleaning feed DIRECTLY (no album-select screen).
 function VideosNavigator() {
   return (
     <VideosStack.Navigator screenOptions={{ headerShown: false }}>
+      <VideosStack.Screen name="VideoAlbumSelect" component={VideoAlbumSelectScreen} />
       <VideosStack.Screen
         name="VideoCleaning"
         component={VideoCleaningScreen}

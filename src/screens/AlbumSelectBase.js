@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  InteractionManager,
   View,
   Text,
   Pressable,
@@ -16,6 +17,7 @@ import AnalysisProgress from '../components/AnalysisProgress';
 import CacheStalePrompt from '../components/CacheStalePrompt';
 import analyzer from '../utils/chunkedAnalyzer';
 import { getAlbums, getAssetsPage, ALL_ALBUM_ID } from '../utils/albumHelpers';
+import { log } from '../utils/logger';
 
 const MIN_GROUP = 2;
 const MAX_GROUP = 20;
@@ -37,6 +39,38 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
   const [thumbs, setThumbs] = useState([]);
   const [analysisState, setAnalysisState] = useState(null);
   const [stalePrompt, setStalePrompt] = useState(false);
+  const focusStartedAt = useRef(0);
+  const firstThumbLogged = useRef(false);
+
+  useFocusEffect(
+    useCallback(() => {
+      const startedAt = Date.now();
+      focusStartedAt.current = startedAt;
+      firstThumbLogged.current = false;
+      log(
+        'perf',
+        `home focus-start screen=${isVideo ? 'videos' : 'photos-base'}`
+      );
+      const frame = requestAnimationFrame(() => {
+        log(
+          'perf',
+          `home first-frame ${Date.now() - startedAt}ms ` +
+            `screen=${isVideo ? 'videos' : 'photos-base'}`
+        );
+      });
+      const interactive = InteractionManager.runAfterInteractions(() => {
+        log(
+          'perf',
+          `home first-interactive ${Date.now() - startedAt}ms ` +
+            `screen=${isVideo ? 'videos' : 'photos-base'}`
+        );
+      });
+      return () => {
+        cancelAnimationFrame(frame);
+        interactive.cancel();
+      };
+    }, [isVideo])
+  );
 
   const albumTitle = useMemo(() => {
     const a = albums.find((x) => x.id === albumId);
@@ -47,11 +81,15 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
   useFocusEffect(
     useCallback(() => {
       let alive = true;
-      getAlbums(mediaType, t(isVideo ? 'all_videos' : 'all_photos'))
+      const timer = setTimeout(() => getAlbums(
+        mediaType,
+        t(isVideo ? 'all_videos' : 'all_photos')
+      )
         .then((list) => alive && setAlbums(list))
-        .catch(() => {});
+        .catch(() => {}), 350);
       return () => {
         alive = false;
+        clearTimeout(timer);
       };
     }, [mediaType, t, isVideo])
   );
@@ -62,7 +100,20 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
   useEffect(() => {
     let alive = true;
     getAssetsPage(albumId, mediaType)
-      .then((page) => alive && setThumbs(page.assets.slice(0, 3)))
+      .then((page) => {
+        if (!alive) return;
+        const first = page.assets.slice(0, 3);
+        setThumbs(first);
+        if (!firstThumbLogged.current && first.length > 0) {
+          firstThumbLogged.current = true;
+          log(
+            'perf',
+            `home first-thumbnails ${Date.now() - focusStartedAt.current}ms ` +
+              `screen=${isVideo ? 'videos' : 'photos-base'} source=media-library ` +
+              `count=${first.length}`
+          );
+        }
+      })
       .catch(() => alive && setThumbs([]));
     return () => {
       alive = false;
@@ -76,17 +127,20 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
   useEffect(() => {
     if (isVideo || !settings.similarDetection) return;
     let alive = true;
-    (async () => {
-      const { cache, stale } = await analyzer.checkCache(albumId, mediaType);
-      if (!alive) return;
-      if (cache && stale) {
-        setStalePrompt(true); // let the user decide
-      } else if (!cache) {
-        analyzer.analyzeAlbum(albumId, { mediaType });
-      }
-    })();
+    const timer = setTimeout(() => {
+      (async () => {
+        const { cache, stale } = await analyzer.checkCache(albumId, mediaType);
+        if (!alive) return;
+        if (cache && stale) {
+          setStalePrompt(true); // let the user decide
+        } else if (!cache) {
+          analyzer.analyzeAlbum(albumId, { mediaType });
+        }
+      })();
+    }, 450);
     return () => {
       alive = false;
+      clearTimeout(timer);
     };
   }, [albumId, mediaType, isVideo, settings.similarDetection]);
 

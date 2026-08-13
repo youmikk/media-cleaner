@@ -67,7 +67,8 @@ function usePairedLivePhoto(asset, enabled) {
  * Full-bleed media display for the cleaning flow. The photo keeps its
  * ORIGINAL aspect ratio, centered on a theme-adaptive background.
  * - Videos render an inline expo-video player.
- * - iOS Live Photos auto-play (hint style) when the setting is on.
+ * - iOS Live Photos always retain the native long-press playback gesture;
+ *   the setting only controls automatic hint playback.
  */
 function formatDuration(seconds) {
   if (!seconds) return '';
@@ -102,7 +103,7 @@ export default function PhotoCard({
   }, [isVideo, inactive, player, asset?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const liveSource = usePairedLivePhoto(
     asset,
-    settings.liveAutoplay && !isVideo && !inactive
+    !isVideo && !inactive
   );
   const liveRef = useRef(null);
 
@@ -142,12 +143,15 @@ export default function PhotoCard({
           ref={liveRef}
           source={liveSource}
           isMuted={settings.liveMuted !== false}
+          useDefaultGestureRecognizer
           style={[styles.image, { aspectRatio }]}
           onLoadComplete={() => {
-            try {
-              liveRef.current?.startPlayback('hint');
-            } catch (e) {
-              // playback is best-effort
+            if (settings.liveAutoplay) {
+              try {
+                liveRef.current?.startPlayback('hint');
+              } catch (e) {
+                // playback is best-effort
+              }
             }
           }}
         />

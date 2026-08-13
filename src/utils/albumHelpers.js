@@ -8,6 +8,10 @@ import { log } from './logger';
 export const ALL_ALBUM_ID = 'all';
 const PAGE_SIZE = 200;
 const MAX_ASSETS = 20000; // safety cap for very large libraries
+const ALBUMS_TTL_MS = 30000;
+const FINGERPRINT_TTL_MS = 5000;
+const albumsMemoryCache = new Map();
+const fingerprintMemoryCache = new Map();
 const SNAPSHOT_SAMPLE = 60; // size sampling cap when there is no native query
 const SNAPSHOT_CONCURRENCY = 6;
 // Assets measured for real per album snapshot. Cheap on Android (a cursor),
@@ -30,16 +34,36 @@ export const MAX_ASSETS_BY_IDS = 600;
  * "All Photos"/"All Videos" entry.
  */
 export async function getAlbums(mediaType, allLabel) {
-  const albums = await MediaLibrary.getAlbumsAsync({
-    includeSmartAlbums: true,
-  });
-  const result = [{ id: ALL_ALBUM_ID, title: allLabel, assetCount: undefined }];
-  for (const album of albums) {
-    // Filter out empty albums; keep smart albums like Screenshots / Camera.
-    if (album.assetCount === 0) continue;
-    result.push({ id: album.id, title: album.title, assetCount: album.assetCount });
+  const cacheKey = mediaType;
+  const cached = albumsMemoryCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < ALBUMS_TTL_MS) {
+    // Keep the synthetic "All" label in the current locale when the user
+    // changes language while the short-lived album cache is warm.
+    if (cached.value[0]) cached.value[0] = { ...cached.value[0], title: allLabel };
+    log('perf', `getAlbumsAsync ${mediaType} cache ${Date.now() - cached.at}ms count=${cached.value.length}`);
+    return cached.value;
   }
-  return result;
+  const startedAt = Date.now();
+  try {
+    const albums = await MediaLibrary.getAlbumsAsync({
+      includeSmartAlbums: true,
+    });
+    const result = [{ id: ALL_ALBUM_ID, title: allLabel, assetCount: undefined }];
+    for (const album of albums) {
+      // Filter out empty albums; keep smart albums like Screenshots / Camera.
+      if (album.assetCount === 0) continue;
+      result.push({ id: album.id, title: album.title, assetCount: album.assetCount });
+    }
+    log(
+      'perf',
+      `getAlbumsAsync ${mediaType} ${Date.now() - startedAt}ms count=${result.length}`
+    );
+    albumsMemoryCache.set(cacheKey, { at: Date.now(), value: result });
+    return result;
+  } catch (e) {
+    log('perf', `getAlbumsAsync ${mediaType} failed ${Date.now() - startedAt}ms`);
+    throw e;
+  }
 }
 
 /**
@@ -52,6 +76,7 @@ export async function getAlbums(mediaType, allLabel) {
  * took many seconds to show anything on a large library.
  */
 export async function getAssetsPage(albumId, mediaType, after, range = null) {
+  const startedAt = Date.now();
   const options = {
     first: PAGE_SIZE,
     mediaType,
@@ -63,12 +88,25 @@ export async function getAssetsPage(albumId, mediaType, after, range = null) {
   // createdBefore is exclusive of the boundary in practice; the callers'
   // own `< end` filter still runs, so an off-by-one here can't leak.
   if (range && range.end) options.createdBefore = range.end;
-  const page = await MediaLibrary.getAssetsAsync(options);
-  return {
-    assets: page.assets,
-    hasNext: page.hasNextPage && page.assets.length > 0,
-    endCursor: page.endCursor,
-  };
+  try {
+    const page = await MediaLibrary.getAssetsAsync(options);
+    log(
+      'perf',
+      `getAssetsPage ${mediaType}/${albumId || ALL_ALBUM_ID} ${Date.now() - startedAt}ms ` +
+        `count=${page.assets.length} after=${after ? '1' : '0'}`
+    );
+    return {
+      assets: page.assets,
+      hasNext: page.hasNextPage && page.assets.length > 0,
+      endCursor: page.endCursor,
+    };
+  } catch (e) {
+    log(
+      'perf',
+      `getAssetsPage ${mediaType}/${albumId || ALL_ALBUM_ID} failed ${Date.now() - startedAt}ms`
+    );
+    throw e;
+  }
 }
 
 /**
@@ -259,6 +297,8 @@ export async function getLibraryIndex(mediaType = 'all', { force = false } = {})
 /** Drop the cached scan — call after deleting or moving assets. */
 export function invalidateLibraryIndex() {
   scanCache = null;
+  fingerprintMemoryCache.clear();
+  albumsMemoryCache.clear();
 }
 
 /**
@@ -563,20 +603,43 @@ export async function getLibrarySize({
  * modification time. Cheap (single page of 1).
  */
 export async function getAlbumFingerprint(albumId, mediaType) {
+  const cacheKey = `${mediaType}/${albumId || ALL_ALBUM_ID}`;
+  const cached = fingerprintMemoryCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < FINGERPRINT_TTL_MS) {
+    log('perf', `getAlbumFingerprint ${cacheKey} cache ${Date.now() - cached.at}ms count=${cached.value.assetCount || 0}`);
+    return cached.value;
+  }
+  const startedAt = Date.now();
   const options = {
     first: 1,
     mediaType,
     sortBy: [[MediaLibrary.SortBy.modificationTime, false]],
   };
   if (albumId && albumId !== ALL_ALBUM_ID) options.album = albumId;
-  const page = await MediaLibrary.getAssetsAsync(options);
-  const newest = page.assets[0];
-  return {
-    assetCount: page.totalCount,
-    latestModificationTime: newest
-      ? newest.modificationTime || newest.creationTime || 0
-      : 0,
-  };
+  try {
+    const page = await MediaLibrary.getAssetsAsync(options);
+    const newest = page.assets[0];
+    const result = {
+      assetCount: page.totalCount,
+      latestModificationTime: newest
+        ? newest.modificationTime || newest.creationTime || 0
+        : 0,
+    };
+    log(
+      'perf',
+      `getAlbumFingerprint ${cacheKey} ` +
+        `${Date.now() - startedAt}ms count=${result.assetCount || 0}`
+    );
+    fingerprintMemoryCache.set(cacheKey, { at: Date.now(), value: result });
+    return result;
+  } catch (e) {
+    log(
+      'perf',
+      `getAlbumFingerprint ${mediaType}/${albumId || ALL_ALBUM_ID} failed ` +
+        `${Date.now() - startedAt}ms`
+    );
+    throw e;
+  }
 }
 
 export async function findAlbumByTitle(title) {
@@ -592,18 +655,26 @@ export async function moveAssetsToAlbum(assets, album, copy = false) {
   // copy=true: file is DUPLICATED into the album — the original keeps every
   // bit of its metadata untouched (used by Android categorize-then-delete).
   await MediaLibrary.addAssetsToAlbumAsync(ids, album.id, copy);
+  invalidateLibraryIndex();
 }
 
 /** Undo an add: take the assets back OUT of the album (iOS collections). */
 export async function removeAssetsFromAlbum(assets, album) {
   const ids = assets.map((a) => (typeof a === 'string' ? a : a.id));
   await MediaLibrary.removeAssetsFromAlbumAsync(ids, album.id);
+  invalidateLibraryIndex();
 }
 
 // ---- Album summary cache: the home screen renders INSTANTLY from this and
 // skips scanning entirely while the album's fingerprint is unchanged. ----
 
 const SUMMARY_PREFIX = 'album_summary_';
+const summaryMemoryCache = new Map();
+
+/** Synchronous cache peek for the already visited home screen. */
+export function peekAlbumSummary(albumId) {
+  return summaryMemoryCache.get(albumId) || null;
+}
 
 /** Build the year -> month photo-count histogram used by the time picker. */
 export function buildYearHistogram(assets) {
@@ -702,15 +773,20 @@ export async function saveCachedAssetList(albumId, mediaType, assets) {
 }
 
 export async function getAlbumSummary(albumId) {
+  const memory = summaryMemoryCache.get(albumId);
+  if (memory) return memory;
   try {
     const raw = await AsyncStorage.getItem(`${SUMMARY_PREFIX}${albumId}`);
-    return raw ? JSON.parse(raw) : null;
+    const value = raw ? JSON.parse(raw) : null;
+    if (value) summaryMemoryCache.set(albumId, value);
+    return value;
   } catch (e) {
     return null;
   }
 }
 
 export async function saveAlbumSummary(albumId, entry) {
+  summaryMemoryCache.set(albumId, entry);
   try {
     await AsyncStorage.setItem(
       `${SUMMARY_PREFIX}${albumId}`,
