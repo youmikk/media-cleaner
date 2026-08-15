@@ -8,8 +8,8 @@ import {
   StyleSheet,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import * as MediaLibrary from 'expo-media-library';
 import { useSettings } from '../context/SettingsContext';
+import { getRawAlbums } from '../utils/albumHelpers';
 
 /**
  * Bottom sheet listing target albums for "Move to Album".
@@ -30,10 +30,10 @@ export default function MoveSheet({
 
   useEffect(() => {
     if (!visible || albumsOverride) return;
-    MediaLibrary.getAlbumsAsync()
-      .then((all) =>
-        setAlbums(all.filter((a) => a.id !== excludeAlbumId))
-      )
+    // Shared 30s cache, not a fresh MediaLibrary query: this sheet opens
+    // mid-cleaning (swipe down), where a cold getAlbumsAsync costs seconds.
+    getRawAlbums()
+      .then((all) => setAlbums(all.filter((a) => a.id !== excludeAlbumId)))
       .catch(() => setAlbums([]));
   }, [visible, excludeAlbumId, albumsOverride]);
 

@@ -95,20 +95,29 @@ export default function AlbumSelectScreen({ navigation }) {
     return a ? a.title : '';
   }, [albums, albumId]);
 
+  // Per-album cleaning progress for the picker. ONE batched storage read for
+  // the whole list: a phone can have 150+ albums, and asking the reviewed
+  // store for them one at a time was 150 getItem calls (plus 150 JSON
+  // parses) on the JS thread every time this tab came into focus.
   useEffect(() => {
+    if (albums.length === 0) return undefined;
     let alive = true;
     (async () => {
-      const entries = await Promise.all(
-        albums.map(async (album) => {
-          let total = album.assetCount;
-          if (!total && album.id === ALL_ALBUM_ID) {
-            total = (await getAlbumFingerprint(ALL_ALBUM_ID, 'photo')).assetCount;
-          }
-          if (!total) return [album.id, null];
-          return [album.id, await reviewedStore.getProgress(album.id, total)];
-        })
-      );
-      if (alive) setProgressByAlbum(Object.fromEntries(entries.filter(([, value]) => value)));
+      const allEntry = albums.find((a) => a.id === ALL_ALBUM_ID);
+      let allTotal = allEntry ? allEntry.assetCount : 0;
+      if (allEntry && !allTotal) {
+        allTotal = (await getAlbumFingerprint(ALL_ALBUM_ID, 'photo')).assetCount;
+        if (!alive) return;
+      }
+      await reviewedStore.primeReviewed(albums.map((a) => a.id));
+      if (!alive) return;
+      const out = {};
+      for (const album of albums) {
+        const total = album.id === ALL_ALBUM_ID ? allTotal : album.assetCount;
+        if (!total) continue;
+        out[album.id] = reviewedStore.getProgressSync(album.id, total);
+      }
+      setProgressByAlbum(out);
     })().catch(() => {});
     return () => {
       alive = false;
@@ -250,14 +259,19 @@ export default function AlbumSelectScreen({ navigation }) {
         }
 
         // Album changed (or first visit): stream pages, show early.
-        let all = [];
+        // `all` is appended IN PLACE. `all = [...all, ...page.assets]` meant
+        // re-copying everything accumulated so far on each of ~66 pages —
+        // roughly 440k element copies on a 13k-photo library, on the JS
+        // thread, right after returning from a cleaning session (a deletion
+        // always changes the fingerprint, so this path always runs).
+        const all = [];
         let after;
         let hasNext = true;
         let first = true;
         if (firstPagePromise) {
           const page = await firstPagePromise;
           if (!alive) return;
-          all = page.assets;
+          for (const a of page.assets) all.push(a);
           hasNext = page.hasNext;
           after = page.endCursor;
           setSummary((s) => ({
@@ -278,7 +292,7 @@ export default function AlbumSelectScreen({ navigation }) {
         while (hasNext && all.length < 20000) {
           const page = await getAssetsPage(albumId, 'photo', after);
           if (!alive) return;
-          all = [...all, ...page.assets];
+          for (const a of page.assets) all.push(a);
           hasNext = page.hasNext;
           after = page.endCursor;
           if (first) {

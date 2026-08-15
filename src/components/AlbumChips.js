@@ -1,9 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
   Pressable,
-  ScrollView,
+  FlatList,
   Modal,
   TextInput,
   StyleSheet,
@@ -17,8 +17,13 @@ import { getUsage, sortByUsage } from '../utils/albumUsage';
  *   [ + ] [ ✓ current album ] [ other albums by usage frequency … ]
  * Tapping a chip moves the CURRENT item into that album; "+" creates a new
  * album. `currentAlbumId` follows the current photo/video.
+ *
+ * VIRTUALIZED, and memoized on its props. This row lives on the cleaning
+ * screen, which re-renders on every swipe, and `currentAlbumId` follows the
+ * photo — so with a real phone's album list (150+) a plain ScrollView meant
+ * mounting 150 native Pressables and re-sorting all of them once per photo.
  */
-export default function AlbumChips({
+function AlbumChips({
   albums,
   currentAlbumId,
   onSelect,
@@ -54,58 +59,72 @@ export default function AlbumChips({
   const chipBg = 'rgba(0,0,0,0.45)';
   const chipFg = '#fff';
 
+  const renderChip = useCallback(
+    ({ item }) => (
+      <Pressable
+        style={[styles.chip, { backgroundColor: chipBg }]}
+        onPress={() => onSelect(item)}
+      >
+        <Text style={[styles.chipText, { color: chipFg }]} numberOfLines={1}>
+          {item.title}
+        </Text>
+      </Pressable>
+    ),
+    [onSelect]
+  );
+
   return (
     <>
-      <ScrollView
+      <FlatList
         horizontal
+        data={others}
+        keyExtractor={(item) => String(item.id)}
+        renderItem={renderChip}
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.row}
-      >
-        {/* 1) fixed: create new album */}
-        <Pressable
-          style={[styles.chip, { backgroundColor: chipBg }]}
-          onPress={() => {
-            setName('');
-            setCreating(true);
-          }}
-        >
-          <Ionicons name="add" size={16} color={chipFg} />
-        </Pressable>
+        initialNumToRender={8}
+        maxToRenderPerBatch={8}
+        windowSize={3}
+        removeClippedSubviews
+        ListHeaderComponent={
+          <View style={styles.header}>
+            {/* 1) fixed: create new album */}
+            <Pressable
+              style={[styles.chip, { backgroundColor: chipBg }]}
+              onPress={() => {
+                setName('');
+                setCreating(true);
+              }}
+            >
+              <Ionicons name="add" size={16} color={chipFg} />
+            </Pressable>
 
-        {/* 2) current item's album (follows the item) — solid accent so the
-            ✓ chip stands out from the scrim chips on any background.
-            When this session moved the item here, tapping the chip UNDOES
-            the move (small × shows the affordance). */}
-        {currentAlbum && (
-          <Pressable
-            disabled={!onCurrentPress}
-            onPress={onCurrentPress || undefined}
-            style={[styles.chip, { backgroundColor: colors.accent }]}
-          >
-            <Ionicons
-              name={onCurrentPress ? 'close-circle' : 'checkmark'}
-              size={14}
-              color="#fff"
-            />
-            <Text style={[styles.chipText, { color: '#fff' }]} numberOfLines={1}>
-              {currentAlbum.title}
-            </Text>
-          </Pressable>
-        )}
-
-        {/* 3) the rest, by usage frequency */}
-        {others.map((album) => (
-          <Pressable
-            key={album.id}
-            style={[styles.chip, { backgroundColor: chipBg }]}
-            onPress={() => onSelect(album)}
-          >
-            <Text style={[styles.chipText, { color: chipFg }]} numberOfLines={1}>
-              {album.title}
-            </Text>
-          </Pressable>
-        ))}
-      </ScrollView>
+            {/* 2) current item's album (follows the item) — solid accent so
+                the ✓ chip stands out from the scrim chips on any background.
+                When this session moved the item here, tapping the chip UNDOES
+                the move (small × shows the affordance). */}
+            {currentAlbum && (
+              <Pressable
+                disabled={!onCurrentPress}
+                onPress={onCurrentPress || undefined}
+                style={[styles.chip, { backgroundColor: colors.accent }]}
+              >
+                <Ionicons
+                  name={onCurrentPress ? 'close-circle' : 'checkmark'}
+                  size={14}
+                  color="#fff"
+                />
+                <Text
+                  style={[styles.chipText, { color: '#fff' }]}
+                  numberOfLines={1}
+                >
+                  {currentAlbum.title}
+                </Text>
+              </Pressable>
+            )}
+          </View>
+        }
+      />
 
       {/* Create-album dialog */}
       <Modal
@@ -174,12 +193,19 @@ export default function AlbumChips({
   );
 }
 
+// The cleaning screen re-renders on every swipe. Nothing here changes unless
+// the album list, the current album or a handler does.
+export default React.memo(AlbumChips);
+
 const styles = StyleSheet.create({
   row: {
     paddingHorizontal: 12,
     gap: 8,
     alignItems: 'center',
   },
+  // The [+] and [✓] chips ride in ListHeaderComponent, which sits OUTSIDE
+  // contentContainerStyle's gap — so it carries its own.
+  header: { flexDirection: 'row', alignItems: 'center', gap: 8, marginRight: 8 },
   chip: {
     flexDirection: 'row',
     alignItems: 'center',

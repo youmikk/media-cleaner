@@ -10,6 +10,8 @@ const PAGE_SIZE = 200;
 const MAX_ASSETS = 20000; // safety cap for very large libraries
 const ALBUMS_TTL_MS = 30000;
 const FINGERPRINT_TTL_MS = 5000;
+// A follow-up page slower than this is worth a log line; the rest are noise.
+const SLOW_PAGE_MS = 150;
 const albumsMemoryCache = new Map();
 const fingerprintMemoryCache = new Map();
 const ALBUMS_CACHE_PREFIX = '@mediacleaner/albums_v1_';
@@ -33,6 +35,27 @@ const MAX_CACHED_LIST = 4800;
 export const MAX_ASSETS_BY_IDS = 600;
 
 /**
+ * The raw device album list, memoised for ALBUMS_TTL_MS.
+ *
+ * `getAlbumsAsync({includeSmartAlbums:true})` is one of the most expensive
+ * calls in the app — 116 ms warm but 4.5 s on a cold MediaStore cursor with
+ * 150+ albums — and five different places wanted it. Sharing one memo keeps
+ * a screen that needs the list (the categorize chips) from racing the first
+ * photo decode for the native media thread.
+ */
+export async function getRawAlbums({ force = false } = {}) {
+  const cached = albumsMemoryCache.get('raw');
+  if (!force && cached && Date.now() - cached.at < ALBUMS_TTL_MS) {
+    return cached.value;
+  }
+  const startedAt = Date.now();
+  const albums = await MediaLibrary.getAlbumsAsync({ includeSmartAlbums: true });
+  log('perf', `getAlbumsAsync raw ${Date.now() - startedAt}ms count=${albums.length}`);
+  albumsMemoryCache.set('raw', { at: Date.now(), value: albums });
+  return albums;
+}
+
+/**
  * List device albums for the given media type, prefixed by a synthetic
  * "All Photos"/"All Videos" entry.
  */
@@ -44,9 +67,18 @@ export async function getAlbums(mediaType, allLabel) {
   if (cached && Date.now() - cached.at < ALBUMS_TTL_MS) {
     // Keep the synthetic "All" label in the current locale when the user
     // changes language while the short-lived album cache is warm.
-    if (cached.value[0]) cached.value[0] = { ...cached.value[0], title: allLabel };
-    log('perf', `getAlbumsAsync ${mediaType} cache ${Date.now() - cached.at}ms count=${cached.value.length}`);
-    return cached.value;
+    //
+    // COPY, never write into cached.value: photos and videos share this one
+    // entry but pass DIFFERENT labels for row 0, so relabelling in place made
+    // whichever tab asked last silently retitle the other tab's list too.
+    const result =
+      cached.value.length > 0
+        ? [{ ...cached.value[0], title: allLabel }, ...cached.value.slice(1)]
+        : cached.value;
+    // `age`, NOT a duration: this branch did no work. Logging it as "…ms"
+    // made a 19-second-old cache hit read like a 19-second call.
+    log('perf', `getAlbums ${mediaType} cache-hit age=${Date.now() - cached.at}ms count=${result.length}`);
+    return result;
   }
   // Android's MediaStore album query can take several seconds on large
   // libraries. Use the last known list immediately, then refresh it for the
@@ -73,9 +105,7 @@ async function refreshAlbums(mediaType, allLabel) {
   const cacheKey = 'library';
   const startedAt = Date.now();
   try {
-    const albums = await MediaLibrary.getAlbumsAsync({
-      includeSmartAlbums: true,
-    });
+    const albums = await getRawAlbums();
     const result = [{ id: ALL_ALBUM_ID, title: allLabel, assetCount: undefined }];
     for (const album of albums) {
       // Filter out empty albums; keep smart albums like Screenshots / Camera.
@@ -84,7 +114,7 @@ async function refreshAlbums(mediaType, allLabel) {
     }
     log(
       'perf',
-      `getAlbumsAsync ${mediaType} ${Date.now() - startedAt}ms count=${result.length}`
+      `getAlbums ${mediaType} ${Date.now() - startedAt}ms count=${result.length}`
     );
     albumsMemoryCache.set(cacheKey, { at: Date.now(), value: result });
     AsyncStorage.setItem(
@@ -93,7 +123,7 @@ async function refreshAlbums(mediaType, allLabel) {
     ).catch(() => {});
     return result;
   } catch (e) {
-    log('perf', `getAlbumsAsync ${mediaType} failed ${Date.now() - startedAt}ms`);
+    log('perf', `getAlbums ${mediaType} failed ${Date.now() - startedAt}ms`);
     throw e;
   }
 }
@@ -122,11 +152,18 @@ export async function getAssetsPage(albumId, mediaType, after, range = null) {
   if (range && range.end) options.createdBefore = range.end;
   try {
     const page = await MediaLibrary.getAssetsAsync(options);
-    log(
-      'perf',
-      `getAssetsPage ${mediaType}/${albumId || ALL_ALBUM_ID} ${Date.now() - startedAt}ms ` +
-        `count=${page.assets.length} after=${after ? '1' : '0'}`
-    );
+    // Only the FIRST page (which is what "how fast did the screen open?"
+    // actually measures) and pages that were slow enough to matter. Logging
+    // every page meant a 13k-photo library wrote 66 lines per home refresh,
+    // which flushed the real diagnostics out of the 1500-line ring buffer.
+    const spent = Date.now() - startedAt;
+    if (!after || spent > SLOW_PAGE_MS) {
+      log(
+        'perf',
+        `getAssetsPage ${mediaType}/${albumId || ALL_ALBUM_ID} ${spent}ms ` +
+          `count=${page.assets.length} after=${after ? '1' : '0'}`
+      );
+    }
     return {
       assets: page.assets,
       hasNext: page.hasNextPage && page.assets.length > 0,
@@ -679,7 +716,8 @@ export async function getAlbumFingerprint(albumId, mediaType) {
   const cacheKey = `${mediaType}/${albumId || ALL_ALBUM_ID}`;
   const cached = fingerprintMemoryCache.get(cacheKey);
   if (cached && Date.now() - cached.at < FINGERPRINT_TTL_MS) {
-    log('perf', `getAlbumFingerprint ${cacheKey} cache ${Date.now() - cached.at}ms count=${cached.value.assetCount || 0}`);
+    // `age`, not a duration — this branch did no work. See getAlbums().
+    log('perf', `getAlbumFingerprint ${cacheKey} cache-hit age=${Date.now() - cached.at}ms count=${cached.value.assetCount || 0}`);
     return cached.value;
   }
   const startedAt = Date.now();
@@ -716,7 +754,7 @@ export async function getAlbumFingerprint(albumId, mediaType) {
 }
 
 export async function findAlbumByTitle(title) {
-  const albums = await MediaLibrary.getAlbumsAsync({ includeSmartAlbums: true });
+  const albums = await getRawAlbums();
   return albums.find((a) => a.title === title) || null;
 }
 

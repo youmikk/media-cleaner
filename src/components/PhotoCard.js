@@ -77,34 +77,44 @@ function formatDuration(seconds) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-export default function PhotoCard({
-  asset,
-  isFavorite,
-  marked,
-  sizeLabel,
-  inactive = false, // UNDER-card in the stack: no video/live playback
-}) {
-  const { colors, t, settings } = useSettings();
-  const isVideo = asset ? asset.mediaType === 'video' : false;
-  const player = useVideoPlayer(isVideo && !inactive ? asset.uri : null, (p) => {
+/**
+ * The video body — and, critically, the ONLY place useVideoPlayer is called.
+ *
+ * It used to live in PhotoCard itself with a `isVideo ? uri : null` source.
+ * Hooks can't be conditional, so the photo flow (where nothing is a video)
+ * still constructed and released a native player for every card it mounted —
+ * and the cleaning screen mounts current ± 1, so that was a player created
+ * and torn down on EVERY swipe.
+ */
+function VideoBody({ asset }) {
+  const player = useVideoPlayer(asset.uri, (p) => {
     p.loop = true;
     p.muted = true; // autoplay politely muted; native controls can unmute
   });
   // AUTO-PLAY videos (e.g. in the Largest Files flow) so it's obvious
   // they're videos, with a badge as a second cue.
   useEffect(() => {
-    if (isVideo && !inactive && player) {
-      try {
-        player.play();
-      } catch (e) {
-        // best effort
-      }
+    try {
+      player.play();
+    } catch (e) {
+      // best effort — a released player throws
     }
-  }, [isVideo, inactive, player, asset?.id]); // eslint-disable-line react-hooks/exhaustive-deps
-  const liveSource = usePairedLivePhoto(
-    asset,
-    !isVideo && !inactive
+  }, [player]);
+  return (
+    <VideoView
+      player={player}
+      style={styles.fill}
+      contentFit="contain"
+      nativeControls
+      surfaceType={Platform.OS === 'android' ? 'textureView' : undefined}
+    />
   );
+}
+
+/** Still image, or its Live Photo form once the paired video resolves. */
+function StillBody({ asset, inactive }) {
+  const { settings } = useSettings();
+  const liveSource = usePairedLivePhoto(asset, !inactive);
   const liveRef = useRef(null);
 
   // Stop Live Photo playback the moment the photo changes / unmounts —
@@ -117,11 +127,63 @@ export default function PhotoCard({
         // best effort
       }
     };
-  }, [asset?.id]);
+  }, [asset.id]);
 
+  if (liveSource) {
+    const aspectRatio =
+      asset.width && asset.height ? asset.width / asset.height : 1;
+    return (
+      <LivePhotoView
+        key={asset.id} // force remount per photo — no cross-photo playback
+        ref={liveRef}
+        source={liveSource}
+        isMuted={settings.liveMuted !== false}
+        useDefaultGestureRecognizer
+        style={[styles.image, { aspectRatio }]}
+        onLoadComplete={() => {
+          if (settings.liveAutoplay) {
+            try {
+              liveRef.current?.startPlayback('hint');
+            } catch (e) {
+              // playback is best-effort
+            }
+          }
+        }}
+      />
+    );
+  }
+
+  return (
+    <Image
+      source={{ uri: asset.uri }}
+      // FIXED full-size container + contain: the layout never resizes
+      // between aspect ratios, so switching photos can't flash.
+      //
+      // The cleaning screen mounts one of these PER ASSET and keys them
+      // by id, so this view's source never changes for its whole life —
+      // it decodes once, off screen, and is already painted by the time
+      // the card slides into view. (It used to be remounted on every
+      // swipe, which threw the decoded image away and made the incoming
+      // photo fade in from nothing.)
+      style={styles.fillImage}
+      contentFit="contain"
+      cachePolicy="memory-disk"
+      priority="high" // the on-screen photo beats any queued prefetch
+      transition={120}
+    />
+  );
+}
+
+export default function PhotoCard({
+  asset,
+  isFavorite,
+  marked,
+  sizeLabel,
+  inactive = false, // UNDER-card in the stack: no video/live playback
+}) {
+  const { colors, t } = useSettings();
   if (!asset) return null;
-  const aspectRatio =
-    asset.width && asset.height ? asset.width / asset.height : 1;
+  const isVideo = asset.mediaType === 'video';
 
   return (
     <View style={styles.card}>
@@ -130,49 +192,9 @@ export default function PhotoCard({
           <Ionicons name="videocam" size={40} color="rgba(255,255,255,0.5)" />
         </View>
       ) : isVideo ? (
-        <VideoView
-          player={player}
-          style={styles.fill}
-          contentFit="contain"
-          nativeControls
-          surfaceType={Platform.OS === 'android' ? 'textureView' : undefined}
-        />
-      ) : liveSource ? (
-        <LivePhotoView
-          key={asset.id} // force remount per photo — no cross-photo playback
-          ref={liveRef}
-          source={liveSource}
-          isMuted={settings.liveMuted !== false}
-          useDefaultGestureRecognizer
-          style={[styles.image, { aspectRatio }]}
-          onLoadComplete={() => {
-            if (settings.liveAutoplay) {
-              try {
-                liveRef.current?.startPlayback('hint');
-              } catch (e) {
-                // playback is best-effort
-              }
-            }
-          }}
-        />
+        <VideoBody asset={asset} />
       ) : (
-        <Image
-          source={{ uri: asset.uri }}
-          // FIXED full-size container + contain: the layout never resizes
-          // between aspect ratios, so switching photos can't flash.
-          //
-          // The cleaning screen mounts one of these PER ASSET and keys them
-          // by id, so this view's source never changes for its whole life —
-          // it decodes once, off screen, and is already painted by the time
-          // the card slides into view. (It used to be remounted on every
-          // swipe, which threw the decoded image away and made the incoming
-          // photo fade in from nothing.)
-          style={styles.fillImage}
-          contentFit="contain"
-          cachePolicy="memory-disk"
-          priority="high" // the on-screen photo beats any queued prefetch
-          transition={120}
-        />
+        <StillBody asset={asset} inactive={inactive} />
       )}
       {isVideo && (
         <View style={styles.liveBadge}>

@@ -11,7 +11,13 @@ import { Platform } from 'react-native';
 
 const LOG_FILE = FileSystem.documentDirectory + 'mediacleaner.log';
 const MAX_LINES = 1500;
-const PREV_KEEP = 120 * 1024; // keep at most this much of older sessions
+const PREV_KEEP = 60 * 1024; // keep at most this much of older sessions
+// expo-file-system has no append, so every flush REWRITES the whole file:
+// prevLog + the entire ring buffer, i.e. a ~180 KB string built and written
+// each time. At 1.5s that ran continuously through any busy session. 4s
+// costs nothing in forensic value — logSync() still writes through
+// immediately, which is what the crash-bisect markers rely on.
+const FLUSH_INTERVAL_MS = 4000;
 
 let buffer = [];
 let prevLog = '';
@@ -27,7 +33,7 @@ function scheduleFlush() {
   flushTimer = setTimeout(() => {
     flushTimer = null;
     flushNow().catch(() => {});
-  }, 1500);
+  }, FLUSH_INTERVAL_MS);
 }
 
 export function log(tag, msg) {

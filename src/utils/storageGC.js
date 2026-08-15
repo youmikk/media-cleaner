@@ -1,6 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as MediaLibrary from 'expo-media-library';
-import { ALL_ALBUM_ID } from './albumHelpers';
+import { ALL_ALBUM_ID, getRawAlbums } from './albumHelpers';
 import { log } from './logger';
 
 /**
@@ -35,7 +34,7 @@ export async function pruneOrphanAlbumKeys() {
   try {
     const [keys, albums] = await Promise.all([
       AsyncStorage.getAllKeys(),
-      MediaLibrary.getAlbumsAsync({ includeSmartAlbums: true }),
+      getRawAlbums(),
     ]);
     // An empty album list means the query failed or permission was revoked.
     // Treating that as "no albums exist" would wipe every cache the app has.

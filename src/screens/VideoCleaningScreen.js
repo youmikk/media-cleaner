@@ -446,6 +446,8 @@ export default function VideoCleaningScreen({ navigation, route }) {
     (async () => {
       try {
         if (viewed > 0) await recordViewed('video', viewed);
+        // Reviewed ids are coalesced in memory (see reviewedStore).
+        await reviewedStore.flushReviewed();
         if (session) await sessionManager.finishSession(session);
       } catch (e) {
         // stats are best-effort

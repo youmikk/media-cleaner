@@ -140,14 +140,28 @@ export async function analyzePixels(uri) {
     const d = gray[i] - mean;
     varSum += d * d;
   }
+  // ROUNDED before it leaves this function, because every one of these
+  // numbers is persisted per asset in one AsyncStorage value with a hard
+  // ~1.2 MB budget (see MAX_METRIC_BYTES). Full float precision serialises
+  // as `0.012345678901234` — ~230 B per asset, so a 13k-photo library only
+  // ever kept ~5k of them and re-decoded the rest (≈250 ms each) on every
+  // pass. At this precision an entry is ~130 B and far more of the library
+  // stays cached. The thresholds that consume these (BLUR_THRESHOLD 45,
+  // UNDER_MEAN 45, UNDER_RATIO 0.55, BLANK_STDDEV 8 …) are nowhere near
+  // sensitive enough to notice.
+  const round = (v, places) => {
+    const f = 10 ** places;
+    return Math.round(v * f) / f;
+  };
   const brightness = {
-    mean,
-    underRatio: under / total,
-    overRatio: over / total,
-    stdDev: Math.sqrt(varSum / total), // near-zero => blank / pocket shot
+    mean: round(mean, 1),
+    underRatio: round(under / total, 4),
+    overRatio: round(over / total, 4),
+    // near-zero => blank / pocket shot
+    stdDev: round(Math.sqrt(varSum / total), 2),
   };
 
-  return { hash: hex, sharpness, brightness };
+  return { hash: hex, sharpness: round(sharpness, 1), brightness };
 }
 
 /** 64-bit average hash (compat wrapper around analyzePixels). */
@@ -170,6 +184,20 @@ const POPCOUNT = (() => {
   return table;
 })();
 
+// Hex char code -> nibble. The clustering pass runs tens of thousands of
+// comparisons per album and this used to be two parseInt() calls per nibble
+// — 32 of them per distance — which dominated the cost of a pass whose pixel
+// work was already cached.
+const HEX_VALUE = (() => {
+  const table = new Int8Array(128).fill(-1);
+  for (let i = 0; i < 10; i++) table['0'.charCodeAt(0) + i] = i;
+  for (let i = 0; i < 6; i++) {
+    table['a'.charCodeAt(0) + i] = 10 + i;
+    table['A'.charCodeAt(0) + i] = 10 + i;
+  }
+  return table;
+})();
+
 /**
  * Hamming distance between two 16-char hex hashes (0..64).
  */
@@ -177,8 +205,14 @@ export function hammingDistance(a, b) {
   if (!a || !b || a.length !== b.length) return 64;
   let dist = 0;
   for (let i = 0; i < a.length; i++) {
-    const xa = parseInt(a[i], 16);
-    const xb = parseInt(b[i], 16);
+    const ca = a.charCodeAt(i);
+    const cb = b.charCodeAt(i);
+    // Out of the table's range would read `undefined`, and `undefined < 0` is
+    // false — so clamp before the guard below can be trusted.
+    const xa = ca < 128 ? HEX_VALUE[ca] : -1;
+    const xb = cb < 128 ? HEX_VALUE[cb] : -1;
+    // A non-hex character means the hash is not comparable at all.
+    if (xa < 0 || xb < 0) return 64;
     dist += POPCOUNT[xa ^ xb];
   }
   return dist;

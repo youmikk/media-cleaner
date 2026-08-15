@@ -81,25 +81,33 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
     }, [isVideo])
   );
 
+  // Per-album cleaning progress for the picker — ONE batched storage read.
+  // See the same effect in AlbumSelectScreen: a per-album getItem meant 150+
+  // storage round trips on every focus, and BOTH tabs stay mounted.
   useEffect(() => {
+    if (albums.length === 0) return undefined;
     let alive = true;
     (async () => {
-      const entries = await Promise.all(
-        albums.map(async (album) => {
-          let total = album.assetCount;
-          if (!total && album.id === ALL_ALBUM_ID) {
-            total = (await getAlbumFingerprint(ALL_ALBUM_ID, mediaType)).assetCount;
-          }
-          if (!total) return [album.id, null];
-          return [album.id, await reviewedStore.getProgress(album.id, total)];
-        })
-      );
-      if (alive) setProgressByAlbum(Object.fromEntries(entries.filter(([, value]) => value)));
+      const allEntry = albums.find((a) => a.id === ALL_ALBUM_ID);
+      let allTotal = allEntry ? allEntry.assetCount : 0;
+      if (allEntry && !allTotal) {
+        allTotal = (await getAlbumFingerprint(ALL_ALBUM_ID, mediaType)).assetCount;
+        if (!alive) return;
+      }
+      await reviewedStore.primeReviewed(albums.map((a) => a.id));
+      if (!alive) return;
+      const out = {};
+      for (const album of albums) {
+        const total = album.id === ALL_ALBUM_ID ? allTotal : album.assetCount;
+        if (!total) continue;
+        out[album.id] = reviewedStore.getProgressSync(album.id, total);
+      }
+      setProgressByAlbum(out);
     })().catch(() => {});
     return () => {
       alive = false;
     };
-  }, [albums]);
+  }, [albums, mediaType]);
 
   const albumTitle = useMemo(() => {
     const a = albums.find((x) => x.id === albumId);

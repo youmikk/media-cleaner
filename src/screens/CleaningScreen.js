@@ -52,6 +52,7 @@ import { log } from '../utils/logger';
 import analyzer from '../utils/chunkedAnalyzer';
 import { reverseGeocode } from '../utils/geocode';
 import {
+  getRawAlbums,
   getAssetsPage,
   getAssetsByIds,
   getAlbumSnapshot,
@@ -183,11 +184,17 @@ export default function CleaningScreen({ route, navigation }) {
   const [toast, setToast] = useState(null);
   const [realAlbums, setRealAlbums] = useState([]); // for the quick chips
 
-  // Real device albums for the quick-categorize chip row.
+  // Real device albums for the quick-categorize chip row. Goes through the
+  // shared 30s album cache, NOT MediaLibrary directly: getAlbumsAsync costs
+  // seconds on a cold MediaStore cursor with a large album list, and doing
+  // it here raced the first photo's decode for the native media thread.
+  // Raw list — the chips have no use for the synthetic "All" row.
   useEffect(() => {
     let alive = true;
-    MediaLibrary.getAlbumsAsync()
-      .then((list) => alive && setRealAlbums(list.filter((a) => a.assetCount > 0)))
+    getRawAlbums()
+      .then(
+        (list) => alive && setRealAlbums(list.filter((a) => a.assetCount > 0))
+      )
       .catch(() => {});
     return () => {
       alive = false;
@@ -265,6 +272,11 @@ export default function CleaningScreen({ route, navigation }) {
     async (minCount) => {
       if (!initializedRef.current || loadingMoreRef.current) return;
       loadingMoreRef.current = true;
+      // Did this call actually pull anything? The look-ahead effect fires on
+      // every group change, and the order below is up to 20 000 ids (~500 KB
+      // of JSON) — rewriting it when nothing moved meant a half-megabyte
+      // serialise + disk write every five photos.
+      let appended = false;
       try {
         while (
           aliveRef.current &&
@@ -294,14 +306,23 @@ export default function CleaningScreen({ route, navigation }) {
             .filter((a) => !reviewedSetRef.current.has(a.id));
           const pageAssets =
             settings.order === 'random' ? shuffle(scoped) : scoped;
-          allRef.current = [...allRef.current, ...pageAssets];
+          // A NEW array each page, on purpose: `lookupAsset` below memoises
+          // its id index on this array's identity, and the segmented loader
+          // only pulls ~3 groups ahead, so the copy is one page's worth of
+          // work — the same order as the `map`/`makeGroups` right after it.
+          // (The whole-library loops — resume here, and the home summary —
+          // are the ones that had to stop re-copying; they push in place.)
+          const next = allRef.current.slice();
+          for (const a of pageAssets) next.push(a);
+          allRef.current = next;
+          if (pageAssets.length > 0) appended = true;
           cursorRef.current = { after: page.endCursor, hasNext: page.hasNext };
           orderRef.current = allRef.current.map((a) => a.id);
           setGroups(makeGroups(allRef.current, groupSize));
         }
         // Preset lists (Largest Files / Low Quality) must never overwrite
         // the paused album session's saved order — the home cards follow it.
-        if (!assetIds) sessionManager.saveOrder(orderRef.current);
+        if (!assetIds && appended) sessionManager.saveOrder(orderRef.current);
         // Whole album loaded (unscoped) — persist it as the local index so
         // the NEXT session opens with zero MediaStore scanning.
         if (
@@ -361,13 +382,15 @@ export default function CleaningScreen({ route, navigation }) {
         setLoading(false);
       } else if (resuming) {
         // Resume needs the full list to rebuild the EXACT saved order.
-        let all = [];
+        const all = [];
         let after;
         let hasNext = true;
         while (hasNext && all.length < 20000) {
           const page = await getAssetsPage(albumId, 'photo', after, range);
           if (!alive) return;
-          all = [...all, ...page.assets.filter(inRange)];
+          // push, not `all = [...all, ...]`: the spread re-copied everything
+          // accumulated so far on every one of ~66 pages.
+          for (const a of page.assets) if (inRange(a)) all.push(a);
           hasNext = page.hasNext;
           after = page.endCursor;
         }
@@ -595,6 +618,23 @@ export default function CleaningScreen({ route, navigation }) {
     [group, markedIds]
   );
   // EVERYTHING queued for deletion: swipe marks + similar picks.
+  //
+  // Marks that resolve to neither the current group nor extraAssetsRef (a
+  // resumed session's saved marks, say) need a lookup in the full list — up
+  // to 20 000 assets. A linear `.find` per mark ran on every swipe; index it
+  // instead, keyed on the array's IDENTITY, which is safe because every
+  // writer above replaces allRef.current with a brand new array.
+  const allIndexRef = useRef({ src: null, map: null });
+  const lookupAsset = useCallback((id) => {
+    const list = allRef.current;
+    if (allIndexRef.current.src !== list) {
+      allIndexRef.current = {
+        src: list,
+        map: new Map(list.map((a) => [a.id, a])),
+      };
+    }
+    return allIndexRef.current.map.get(id);
+  }, []);
   const markedAssets = useMemo(() => {
     const inGroup = group.filter(
       (a) => markedIds.has(a.id) && !deletedIdsRef.current.has(a.id)
@@ -603,13 +643,11 @@ export default function CleaningScreen({ route, navigation }) {
     const others = [];
     for (const id of markedIds) {
       if (seen.has(id) || deletedIdsRef.current.has(id)) continue;
-      const a =
-        extraAssetsRef.current[id] ||
-        allRef.current.find((x) => x.id === id);
+      const a = extraAssetsRef.current[id] || lookupAsset(id);
       if (a) others.push(a);
     }
     return [...inGroup, ...others];
-  }, [group, markedIds]);
+  }, [group, markedIds, lookupAsset]);
   const currentIdx = Math.min(pi, Math.max(0, visible.length - 1));
   const current = visible[currentIdx] || null;
   // Lets async handlers check whether the user has moved on since they
@@ -1007,7 +1045,9 @@ export default function CleaningScreen({ route, navigation }) {
         const [res] = await PhotoMove.moveToAlbum([id], name);
         if (!res || !res.ok) throw new Error(res && res.error);
         asset.uri = 'file://' + res.newPath;
-        const list = await MediaLibrary.getAlbumsAsync();
+        // Forced: the album we just created is by definition not in the
+        // shared 30s cache yet.
+        const list = await getRawAlbums({ force: true });
         setRealAlbums(list.filter((a) => a.assetCount > 0));
         const album = list.find((a) => a.title === name);
         if (album) incrementUsage(album.id);
@@ -1033,7 +1073,7 @@ export default function CleaningScreen({ route, navigation }) {
           overrideHistoryRef.current[id] = { fromAlbumId, toAlbumId: album.id };
           setAlbumOverrides((m) => ({ ...m, [id]: album.id }));
         }
-        const list = await MediaLibrary.getAlbumsAsync();
+        const list = await getRawAlbums({ force: true });
         setRealAlbums(list.filter((a) => a.assetCount > 0));
       }
       await reviewedStore.addReviewed(albumId, [id]);
@@ -1099,6 +1139,26 @@ export default function CleaningScreen({ route, navigation }) {
       movingRef.current = false;
     }
   };
+
+  // Stable identities for the chip row. AlbumChips is memoized and this
+  // screen re-renders on every swipe — handing it three fresh closures each
+  // time would defeat the memo completely. Same ref idiom as the gesture
+  // handlers above: the callbacks never change, what they call does.
+  const chipHandlersRef = useRef({});
+  chipHandlersRef.current = {
+    move: moveCurrentTo,
+    create: createAlbumWithCurrent,
+    cancel: cancelCurrentCategory,
+  };
+  const onChipSelect = useCallback(
+    (album) => chipHandlersRef.current.move(album),
+    []
+  );
+  const onChipCreate = useCallback(
+    (name) => chipHandlersRef.current.create(name),
+    []
+  );
+  const onChipCancel = useCallback(() => chipHandlersRef.current.cancel(), []);
 
   // The current photo's album for the ✓ chip: a manual move wins, then the
   // asset's own albumId (Android), then the cleaning scope's album.
@@ -1368,6 +1428,9 @@ export default function CleaningScreen({ route, navigation }) {
     (async () => {
       try {
         if (viewed > 0) await recordViewed('photo', viewed);
+        // Reviewed ids are coalesced in memory (see reviewedStore) — leaving
+        // the screen is the point at which they must be on disk.
+        await reviewedStore.flushReviewed();
         if (session && finish) {
           await sessionManager.finishSession(
             { ...session, afterAssets: allRef.current },
@@ -1579,11 +1642,11 @@ export default function CleaningScreen({ route, navigation }) {
         <AlbumChips
           albums={realAlbums}
           currentAlbumId={currentAssetAlbumId}
-          onSelect={moveCurrentTo}
-          onCreate={createAlbumWithCurrent}
+          onSelect={onChipSelect}
+          onCreate={onChipCreate}
           onCurrentPress={
             displayAsset && overrideHistoryRef.current[displayAsset.id]
-              ? cancelCurrentCategory
+              ? onChipCancel
               : null
           }
         />
