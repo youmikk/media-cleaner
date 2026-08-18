@@ -49,7 +49,7 @@ export function requestAllFilesPermission() {
  * derived destination — pass the original folder when UNDOING a move, or a
  * camera-roll photo comes back into Pictures/Camera instead of DCIM/Camera.
  *
- * Returns [{id, ok, newPath?, oldPath?, oldDir?, error?}].
+ * Returns [{id, newId?, ok, newPath?, oldPath?, oldDir?, error?}].
  */
 export async function moveToAlbum(assetIds, albumName, destDir = null) {
   if (!native || !native.moveToAlbum) throw new Error('unavailable');
@@ -78,6 +78,20 @@ export function hasNativeMove() {
 /** True when batched MediaStore/PhotoKit size lookups are available. */
 export function hasNativeSizes() {
   return !!(native && native.getSizes);
+}
+
+/** True when this build can resolve iOS asset -> all PhotoKit collections. */
+export function hasAlbumMembership() {
+  return !!(native && native.getAlbumMembership);
+}
+
+export async function getAlbumMembership(assetIds) {
+  if (!native || !native.getAlbumMembership) return {};
+  try {
+    return (await native.getAlbumMembership(assetIds)) || {};
+  } catch (e) {
+    return {};
+  }
 }
 
 /** True when the exact whole-library size query is available. */

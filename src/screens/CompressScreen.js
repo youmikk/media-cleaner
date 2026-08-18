@@ -16,7 +16,7 @@ import * as MediaLibrary from 'expo-media-library';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useSettings } from '../context/SettingsContext';
-import { useApp } from '../context/AppContext';
+import { useStats } from '../context/AppContext';
 import { batchDelete } from '../utils/deletionManager';
 import {
   getAssets,
@@ -55,7 +55,7 @@ const MIN_SIZE_OPTIONS = [5, 10, 20, 50]; // "only show files over X MB"
  */
 export default function CompressScreen({ navigation }) {
   const { colors, t, recycleBinActive } = useSettings();
-  const { recordCleaned } = useApp();
+  const { recordCleaned } = useStats();
 
   const [allSized, setAllSized] = useState(null); // every scanned file+size
   const [minMB, setMinMB] = useState(10); // only show files over X MB

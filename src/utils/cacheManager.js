@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Image as ExpoImage } from 'expo-image';
 import { utf8ByteLength } from './safeStore';
 import { log } from './logger';
+import { clearThumbnailCache, getThumbnailCacheBytes } from './thumbCache';
 
 /**
  * Cache housekeeping for the Settings screen.
@@ -19,7 +20,10 @@ import { log } from './logger';
 const CACHE_PATTERNS = [
   /^analysis_v3_/, //         per-album similarity / burst / low-quality results
   /^analysis_metrics_v2$/, // the global per-asset metric store
-  /^analysis_suggestions_v2$/, // home suggestion cards
+  /^analysis_suggestions_v2$/, // home suggestion cards (superseded by v3)
+  /^analysis_suggestions_v3$/, // home suggestion cards
+  /^suggestion_groups_v1_/, //  verified burst / duplicate groups
+  /^suggestion_groups_v2_/, //  versioned verified groups
   /^album_summary_/, //       count + preview thumbs + time histogram
   /^@mediacleaner\/albums_v1_/, // persisted album picker list
   /^@mediacleaner\/preview_v1_/, // first preview cards
@@ -39,6 +43,7 @@ const PROTECTED = [
   '@mediacleaner/favorites',
   '@mediacleaner/album_usage',
   '@mediacleaner/session_order',
+  '@mediacleaner/session_order_video',
   '@mediacleaner/active_session_photo',
   '@mediacleaner/active_session_video',
 ];
@@ -65,7 +70,6 @@ function isCacheKey(key) {
 export async function getCacheSize() {
   try {
     const keys = (await AsyncStorage.getAllKeys()).filter(isCacheKey);
-    if (keys.length === 0) return { bytes: 0, entries: 0 };
     let bytes = 0;
     // Chunked: a single multiGet of every cache value peaks at the sum of
     // all of them in memory, which is exactly the size we are worried about.
@@ -76,7 +80,11 @@ export async function getCacheSize() {
         if (value) bytes += utf8ByteLength(value);
       }
     }
-    return { bytes, entries: keys.length };
+    const thumbnailBytes = await getThumbnailCacheBytes().catch(() => 0);
+    return {
+      bytes: bytes + thumbnailBytes,
+      entries: keys.length + (thumbnailBytes > 0 ? 1 : 0),
+    };
   } catch (e) {
     return { bytes: 0, entries: 0 };
   }
@@ -106,6 +114,11 @@ export async function clearCaches() {
     await ExpoImage.clearDiskCache();
   } catch (e) {
     // not available
+  }
+  try {
+    await clearThumbnailCache();
+  } catch (e) {
+    log('cache', `thumbnail clear failed: ${(e && e.message) || e}`);
   }
   return before;
 }

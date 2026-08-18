@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
+import { pickerStyles } from './pickerButtonStyle';
 
 function monthLabel(year, month, language) {
   if (language === 'zh') return `${year}年${month + 1}月`;
@@ -59,11 +60,18 @@ export default function TimePicker({ years = [], value, onSelect }) {
   return (
     <>
       <Pressable
-        style={[styles.button, { backgroundColor: colors.card, borderColor: colors.border }]}
+        style={[
+          pickerStyles.button,
+          styles.button,
+          { backgroundColor: colors.card, borderColor: colors.border },
+        ]}
         onPress={() => setOpen(true)}
       >
         <Ionicons name="calendar-outline" size={18} color={colors.accent} />
-        <Text style={[styles.buttonText, { color: colors.text }]} numberOfLines={1}>
+        <Text
+          style={[pickerStyles.text, { color: colors.text }]}
+          numberOfLines={1}
+        >
           {value ? value.label : t('time_all')}
         </Text>
         <Ionicons name="chevron-down" size={16} color={colors.subtext} />
@@ -164,17 +172,9 @@ export default function TimePicker({ years = [], value, onSelect }) {
 }
 
 const styles = StyleSheet.create({
-  button: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 14,
-    borderWidth: StyleSheet.hairlineWidth,
-    maxWidth: 170,
-  },
-  buttonText: { fontSize: 14, fontWeight: '600', flexShrink: 1 },
+  // Geometry is shared with the album picker (pickerStyles.button); the
+  // label is short, so this one only takes the room it needs.
+  button: { flexShrink: 1 },
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.35)',

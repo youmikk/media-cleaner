@@ -14,12 +14,14 @@ import { getVideoThumbnail } from '../utils/thumbCache';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
-import { useApp } from '../context/AppContext';
+import { useStats } from '../context/AppContext';
 import PhotoViewer from '../components/PhotoViewer';
 import { getAssetsByIds, formatBytes } from '../utils/albumHelpers';
 import { hammingDistance } from '../utils/imageHashing';
 import analyzer from '../utils/chunkedAnalyzer';
 import { batchDelete } from '../utils/deletionManager';
+import ProgressBar from '../components/ProgressBar';
+import * as suggestionCache from '../utils/suggestionCache';
 
 // Members whose hash differs from the group's reference by more than this
 // are NOT real burst duplicates — drop them from the group.
@@ -38,7 +40,7 @@ export default function BurstCleanScreen({ route, navigation }) {
   const { groups = [], mode = 'burst' } = route.params || {};
   const isDuplicate = mode === 'duplicate';
   const { colors, t, recycleBinActive } = useSettings();
-  const { recordCleaned } = useApp();
+  const { recordCleaned } = useStats();
   const { width } = useWindowDimensions();
 
   const [sections, setSections] = useState(null);
@@ -63,6 +65,29 @@ export default function BurstCleanScreen({ route, navigation }) {
       const autoSel = {};
       let done = 0;
       let sectionNo = 0;
+
+      const cached = await suggestionCache.getVerifiedGroups(mode, groups, resolved);
+      if (!alive) return;
+      if (cached) {
+        for (const item of cached) {
+          const members = (item.ids || []).map((id) => byId.get(id)).filter(Boolean);
+          if (members.length < 2) continue;
+          members.forEach((a) => {
+            if (a.id !== item.bestId) autoSel[a.id] = true;
+            if (a.mediaType === 'video') {
+              getVideoThumbnail(a)
+                .then((uri) => alive && setThumbs((s) => ({ ...s, [a.id]: uri })))
+                .catch(() => {});
+            }
+          });
+          sectionNo += 1;
+          out.push({ title: `#${sectionNo}`, bestId: item.bestId, data: [members] });
+        }
+        setProgress({ done: total, total });
+        setSections(out);
+        setSelected(autoSel);
+        return;
+      }
 
       for (let gi = 0; gi < groups.length; gi++) {
         const assets = groups[gi].ids
@@ -143,6 +168,16 @@ export default function BurstCleanScreen({ route, navigation }) {
         out.push({ title: `#${sectionNo}`, bestId, data: [members] });
       }
       if (!alive) return;
+      await suggestionCache.saveVerifiedGroups(
+        mode,
+        groups,
+        out.map((section) => ({
+          ids: section.data[0].map((a) => a.id),
+          bestId: section.bestId,
+        })),
+        resolved
+      );
+      if (!alive) return;
       setSections(out);
       setSelected(autoSel);
     })();
@@ -171,7 +206,7 @@ export default function BurstCleanScreen({ route, navigation }) {
           }
           try {
             // ONE system deletion dialog for all selected burst photos.
-            const { count, bytes, deletedIds } = await batchDelete(targets, {
+            const { count, bytesById, deletedIds } = await batchDelete(targets, {
               useRecycleBin: recycleBinActive,
             });
             if (count > 0) {
@@ -180,13 +215,16 @@ export default function BurstCleanScreen({ route, navigation }) {
               // be booked as photos.
               const goneIds = new Set(deletedIds || targets.map((a) => a.id));
               const gone = targets.filter((a) => goneIds.has(a.id));
-              const vids = gone.filter((a) => a.mediaType === 'video').length;
-              const pics = gone.length - vids;
-              // Split the measured bytes proportionally — batchDelete
-              // reports one total for the batch.
-              const share = gone.length > 0 ? bytes / gone.length : 0;
-              if (vids > 0) await recordCleaned('video', vids, share * vids);
-              if (pics > 0) await recordCleaned('photo', pics, share * pics);
+              const vids = gone.filter((a) => a.mediaType === 'video');
+              const pics = gone.filter((a) => a.mediaType !== 'video');
+              const sum = (items) =>
+                items.reduce((n, item) => n + (bytesById?.[item.id] || 0), 0);
+              if (vids.length > 0) {
+                await recordCleaned('video', vids.length, sum(vids));
+              }
+              if (pics.length > 0) {
+                await recordCleaned('photo', pics.length, sum(pics));
+              }
             }
           } catch (e) {
             // user cancelled the system dialog
@@ -213,9 +251,12 @@ export default function BurstCleanScreen({ route, navigation }) {
         <View style={styles.center}>
           <ActivityIndicator size="large" color={colors.accent} />
           {!working && progress.total > 0 && (
-            <Text style={[styles.progress, { color: colors.subtext }]}>
-              {t('computing_sharpness', progress)}
-            </Text>
+            <View style={styles.loadingProgress}>
+              <Text style={[styles.progress, { color: colors.subtext }]}>
+                {t('computing_sharpness', progress)}
+              </Text>
+              <ProgressBar done={progress.done} total={progress.total} />
+            </View>
           )}
         </View>
       </SafeAreaView>
@@ -345,6 +386,7 @@ const styles = StyleSheet.create({
   },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   progress: { marginTop: 12, fontSize: 13 },
+  loadingProgress: { width: '72%', gap: 8 },
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',

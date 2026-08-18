@@ -11,13 +11,25 @@ import { log } from './logger';
  * tens of MB of dead entries.
  */
 const ALBUM_KEY_PATTERNS = [
-  /^@mediacleaner\/reviewed_(.+)$/,
   /^asset_list_v1_(?:photo|video)_(.+)$/,
   /^analysis_v3_(?:video_)?(.+)$/,
-  /^album_summary_(.+)$/,
+  /^album_summary_(?:video_)?(.+)$/,
 ];
 
+const REVIEWED_PREFIX = '@mediacleaner/reviewed_';
+const REVIEWED_MIGRATION_KEY = '@mediacleaner/reviewed_global_migrated_v1';
+
 function albumIdOf(key) {
+  // Global history and the migration marker are never orphanable. Album and
+  // round scopes encode the real album id explicitly; legacy keys use it raw.
+  if (key.startsWith(REVIEWED_PREFIX)) {
+    if (key === REVIEWED_MIGRATION_KEY) return null;
+    const suffix = key.slice(REVIEWED_PREFIX.length);
+    if (suffix.startsWith('global:') || suffix.startsWith('v:')) return null;
+    const scoped = suffix.match(/^(?:album|round):(photo|video):([^:]+)/);
+    if (scoped) return scoped[2];
+    return suffix || null;
+  }
   for (const pattern of ALBUM_KEY_PATTERNS) {
     const m = key.match(pattern);
     if (m) return m[1];

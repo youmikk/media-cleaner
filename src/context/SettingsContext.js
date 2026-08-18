@@ -4,6 +4,7 @@ import React, {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import { Platform, useColorScheme } from 'react-native';
@@ -27,6 +28,8 @@ export const DEFAULT_SETTINGS = {
   // thumbnail wall. Persisted so the choice survives leaving the screen.
   recycleView: 'list',
   recycleColumns: 3,
+  favoriteView: 'grid',
+  favoriteColumns: 3,
   theme: 'system', // 'system' | 'light' | 'dark'
   language: 'system', // 'system' (follow device) | 'zh' | 'en'
 };
@@ -36,6 +39,7 @@ const SettingsContext = createContext(null);
 export function SettingsProvider({ children }) {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [loaded, setLoaded] = useState(false);
+  const writeChainRef = useRef(Promise.resolve());
   const systemScheme = useColorScheme();
 
   useEffect(() => {
@@ -52,12 +56,18 @@ export function SettingsProvider({ children }) {
   }, []);
 
   const setSetting = useCallback((key, value) => {
-    setSettings((prev) => {
-      const next = { ...prev, [key]: value };
-      AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next)).catch(() => {});
-      return next;
-    });
+    setSettings((prev) => ({ ...prev, [key]: value }));
   }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const payload = JSON.stringify(settings);
+    // Preserve call order: rapid toggles must not let an older AsyncStorage
+    // write finish last and become the state seen after a process restart.
+    writeChainRef.current = writeChainRef.current
+      .catch(() => {})
+      .then(() => AsyncStorage.setItem(STORAGE_KEY, payload));
+  }, [loaded, settings]);
 
   const language =
     settings.language && settings.language !== 'system'

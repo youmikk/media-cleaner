@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
+import { log } from './logger';
 
 export const APP_VERSION = '1.21.1';
 const REPO = 'youmikk/media-cleaner';
@@ -276,13 +277,18 @@ export async function autoCheckDaily(onUpdate, platform = Platform.OS) {
       10
     );
     const now = new Date().getTime();
-    if (now - last < CHECK_INTERVAL) return;
+    if (now - last < CHECK_INTERVAL) {
+      log('update', 'auto check skipped: interval');
+      return;
+    }
     const info = await checkGitHubRelease(platform);
     // Only record a completed request. Previously a temporary offline or
     // GitHub-rate-limit failure suppressed all automatic checks for 24 hours.
     await AsyncStorage.setItem(LAST_CHECK_KEY, String(now));
+    log('update', `auto check complete: ${info.hasUpdate ? `new ${info.version}` : 'latest'}`);
     if (info.hasUpdate && onUpdate) onUpdate(info);
   } catch (e) {
-    // offline / rate-limited — try again another day
+    log('update', `auto check failed: ${(e && e.message) || e}`);
+    // offline / rate-limited — do not mark the day as checked
   }
 }

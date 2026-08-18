@@ -11,6 +11,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
 import AlbumPicker from '../components/AlbumPicker';
 import TimePicker from '../components/TimePicker';
+import GroupSizeStepper from '../components/GroupSizeStepper';
 import StackedCards from '../components/StackedCards';
 import AnalysisProgress from '../components/AnalysisProgress';
 import analyzer from '../utils/chunkedAnalyzer';
@@ -18,6 +19,7 @@ import * as sessionManager from '../utils/sessionManager';
 import * as reviewedStore from '../utils/reviewedStore';
 import {
   getAlbums,
+  getAssets,
   getAssetsPage,
   getAssetsByIds,
   getRangeThumbs,
@@ -25,7 +27,8 @@ import {
   getAlbumSummary,
   peekAlbumSummary,
   saveAlbumSummary,
-          buildYearHistogram,
+  buildYearHistogram,
+  getCachedAssetList,
   ALL_ALBUM_ID,
 } from '../utils/albumHelpers';
 import { log } from '../utils/logger';
@@ -42,25 +45,38 @@ const THUMB_POOL = 12;
 const DEFER_MS = 450;
 
 /**
- * Photos tab entry. Renders INSTANTLY from a cached album summary (count,
- * preview thumbs, time histogram) — the album is only re-scanned when its
- * fingerprint (count + latest modification) changed. Stale analysis
- * refreshes SILENTLY and incrementally in the background (no prompt: old
- * photos are already in the global metric store, only new ones get decoded).
+ * Album-select entry for BOTH the Photos and the Videos tab (`mediaType`).
+ * One component on purpose: the two tabs used to be separate screens with
+ * separate control rows, so they offered different options and centred their
+ * card stack at different heights.
+ *
+ * Renders INSTANTLY from a cached album summary (count, preview thumbs, time
+ * histogram) — the album is only re-scanned when its fingerprint (count +
+ * latest modification) changed. Stale analysis refreshes SILENTLY and
+ * incrementally in the background (no prompt: old photos are already in the
+ * global metric store, only new ones get decoded).
  */
-export default function AlbumSelectScreen({ navigation }) {
-  const { colors, t, settings } = useSettings();
+export default function AlbumSelectScreen({
+  navigation,
+  mediaType = 'photo',
+  cleaningRoute = 'Cleaning',
+}) {
+  const { colors, t, settings, setSetting } = useSettings();
   const { width } = useWindowDimensions();
+  const isVideo = mediaType === 'video';
+  const groupSizeKey = isVideo ? 'videoGroupSize' : 'groupSize';
+  const groupSize = settings[groupSizeKey] || 5;
+  const reviewScope = useMemo(() => reviewedStore.scopeFor(mediaType), [mediaType]);
 
   const [albums, setAlbums] = useState([]);
   const [albumId, setAlbumId] = useState(ALL_ALBUM_ID);
   const [summary, setSummary] = useState(
-    () => peekAlbumSummary(ALL_ALBUM_ID)?.summary || null
+    () => peekAlbumSummary(ALL_ALBUM_ID, mediaType)?.summary || null
   ); // {count, thumbs, years}
   const [timeFilter, setTimeFilter] = useState(null);
   const [analysisState, setAnalysisState] = useState(null);
-  // When an unfinished photo session exists for this album, the three
-  // preview cards show the CURRENT GROUP's photos (and tapping resumes).
+  // When an unfinished session exists for this album, the three preview
+  // cards show the CURRENT GROUP's items (and tapping resumes).
   const [sessionPreview, setSessionPreview] = useState(null); // {thumbs} | null
   // Preview for the picked year/month — one scoped media-store query.
   const [rangeThumbs, setRangeThumbs] = useState(null);
@@ -74,21 +90,21 @@ export default function AlbumSelectScreen({ navigation }) {
       const startedAt = Date.now();
       focusStartedAt.current = startedAt;
       firstThumbLogged.current = false;
-      log('perf', 'home focus-start screen=photos');
+      log('perf', `home focus-start screen=${mediaType}s`);
       const frame = requestAnimationFrame(() => {
-        log('perf', `home first-frame ${Date.now() - startedAt}ms screen=photos`);
+        log('perf', `home first-frame ${Date.now() - startedAt}ms screen=${mediaType}s`);
       });
       const interactive = InteractionManager.runAfterInteractions(() => {
         log(
           'perf',
-          `home first-interactive ${Date.now() - startedAt}ms screen=photos`
+          `home first-interactive ${Date.now() - startedAt}ms screen=${mediaType}s`
         );
       });
       return () => {
         cancelAnimationFrame(frame);
         interactive.cancel();
       };
-    }, [])
+    }, [mediaType])
   );
 
   const albumTitle = useMemo(() => {
@@ -107,43 +123,89 @@ export default function AlbumSelectScreen({ navigation }) {
       const allEntry = albums.find((a) => a.id === ALL_ALBUM_ID);
       let allTotal = allEntry ? allEntry.assetCount : 0;
       if (allEntry && !allTotal) {
-        allTotal = (await getAlbumFingerprint(ALL_ALBUM_ID, 'photo')).assetCount;
+        allTotal = (await getAlbumFingerprint(ALL_ALBUM_ID, mediaType)).assetCount;
         if (!alive) return;
       }
-      await reviewedStore.primeReviewed(albums.map((a) => a.id));
+      // Prime the global ledger and every album ledger in one bounded batch.
+      // Progress is shared across overlapping collections, but the album
+      // ledger also contains ids reviewed before an asset was deleted.
+      await reviewedStore.primeReviewed([
+        reviewScope,
+        ...albums.map((album) => reviewedStore.albumScopeFor(mediaType, album.id)),
+      ]);
       if (!alive) return;
       const out = {};
       const totals = {};
       for (const album of albums) {
         const total = album.id === ALL_ALBUM_ID ? allTotal : album.assetCount;
         if (total !== undefined && total !== null) totals[album.id] = total;
-        if (!total) continue;
-        out[album.id] = reviewedStore.getProgressSync(album.id, total);
       }
       setTotalCounts(totals);
       setProgressByAlbum(out);
+
+      // Resolve every category in the background. This is deliberately
+      // throttled: opening the picker should never launch one MediaStore
+      // cursor per album at once, but every row should eventually show the
+      // same progress for an asset handled from any overlapping view.
+      const pending = albums.filter((album) => (totals[album.id] || 0) > 0);
+      const CONCURRENCY = 2;
+      for (let i = 0; i < pending.length && alive; i += CONCURRENCY) {
+        const batch = pending.slice(i, i + CONCURRENCY);
+        const results = await Promise.all(
+          batch.map(async (album) => {
+            try {
+              const assets =
+                (await getCachedAssetList(album.id, mediaType)) ||
+                (await getAssets(album.id, mediaType));
+              if (!alive) return null;
+              reviewedStore.rememberAlbumMembership(mediaType, album.id, assets);
+              return [
+                album.id,
+                reviewedStore.getAlbumProgressSync(mediaType, album.id, assets),
+              ];
+            } catch (e) {
+              return null;
+            }
+          })
+        );
+        if (!alive) return;
+        setProgressByAlbum((current) => {
+          const next = { ...current };
+          for (const result of results) {
+            if (result) next[result[0]] = result[1];
+          }
+          return next;
+        });
+        // Yield one frame between bridge batches so the picker and cards stay
+        // responsive on large libraries.
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
     })().catch(() => {});
     return () => {
       alive = false;
     };
-  }, [albums]);
+  }, [albums, mediaType, reviewScope]);
 
   useFocusEffect(
     useCallback(() => {
       let alive = true;
       // Album names are secondary to the first paint. Android's album query
       // can compete with the first thumbnail query on the MediaStore bridge.
-      const timer = setTimeout(() => getAlbums('photo', t('all_photos'))
-        .then((list) => alive && setAlbums(list))
-        .catch(() => {}), 350);
+      const timer = setTimeout(
+        () =>
+          getAlbums(mediaType, t(isVideo ? 'all_videos' : 'all_photos'))
+            .then((list) => alive && setAlbums(list))
+            .catch(() => {}),
+        350
+      );
       return () => {
         alive = false;
         clearTimeout(timer);
       };
-    }, [t])
+    }, [t, mediaType, isVideo])
   );
 
-  // Follow the cleaning progress: show the current group's photos on the
+  // Follow the cleaning progress: show the current group's items on the
   // three cards whenever an unfinished session matches this album.
   useFocusEffect(
     useCallback(() => {
@@ -155,22 +217,27 @@ export default function AlbumSelectScreen({ navigation }) {
             // while this screen is mounted. A paused session froze its queue
             // under the OLD mode, so honour the new setting by dropping it —
             // otherwise the preview and the resume both ignore the change.
-            await sessionManager.dropSessionIfOrderChanged(settings.order);
-            const pending = await sessionManager.getPendingSession();
+            await sessionManager.dropSessionIfOrderChanged(
+              settings.order,
+              mediaType
+            );
+            const pending = await sessionManager.getPendingSession(mediaType);
             if (
               !pending ||
-              pending.type !== 'photo' ||
+              pending.type !== mediaType ||
               pending.albumId !== albumId
             ) {
               if (alive) setSessionPreview(null);
               return;
             }
-            const order = (await sessionManager.getOrder()) || [];
+            const order = (await sessionManager.getOrder(mediaType)) || [];
             const gs = pending.groupSize || 5;
             // SAME rule as resume: confirmed (reviewed) ids are dropped, the
             // interrupted group is the first gs unreviewed ids — the cards
             // show exactly what re-entering will show.
-            const reviewed = await reviewedStore.getReviewed(pending.albumId);
+            const reviewed = await reviewedStore.getReviewed(
+              reviewScope
+            );
             const ids = order.filter((id) => !reviewed.has(id)).slice(0, gs);
             if (ids.length === 0) {
               if (alive) setSessionPreview(null);
@@ -191,7 +258,40 @@ export default function AlbumSelectScreen({ navigation }) {
         alive = false;
         clearTimeout(timer);
       };
-    }, [albumId, settings.order])
+    }, [albumId, settings.order, mediaType, reviewScope])
+  );
+
+  // Exact progress for the album currently shown. Reviewed ids are global,
+  // so intersect them with this album's ids; this is what keeps All Photos,
+  // QQ, Camera and every other overlapping collection in sync.
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      const timer = setTimeout(async () => {
+        try {
+          const albumScope = reviewedStore.albumScopeFor(mediaType, albumId);
+          await reviewedStore.primeReviewed([reviewScope, albumScope]);
+          if (!alive) return;
+          const assets =
+            (await getCachedAssetList(albumId, mediaType)) ||
+            (await getAssets(albumId, mediaType));
+          if (!alive) return;
+          reviewedStore.rememberAlbumMembership(mediaType, albumId, assets);
+          const progress = reviewedStore.getAlbumProgressSync(
+            mediaType,
+            albumId,
+            assets
+          );
+          setProgressByAlbum((p) => ({ ...p, [albumId]: progress }));
+        } catch (e) {
+          // Progress is best-effort; the album itself remains usable.
+        }
+      }, DEFER_MS);
+      return () => {
+        alive = false;
+        clearTimeout(timer);
+      };
+    }, [albumId, mediaType, reviewScope, summary?.count, totalCounts])
   );
 
   // Time-scoped preview. createdAfter/createdBefore let the media store do
@@ -204,14 +304,14 @@ export default function AlbumSelectScreen({ navigation }) {
       return undefined;
     }
     let alive = true;
-    setRangeThumbs([]); // clear immediately: never show another range's photos
-    getRangeThumbs(albumId, 'photo', timeFilter, 3)
+    setRangeThumbs([]); // clear immediately: never show another range's items
+    getRangeThumbs(albumId, mediaType, timeFilter, 3)
       .then((list) => alive && setRangeThumbs(list))
       .catch(() => alive && setRangeThumbs([]));
     return () => {
       alive = false;
     };
-  }, [albumId, timeFilter]);
+  }, [albumId, timeFilter, mediaType]);
 
   // Summary: cached-first, rescan ONLY when the album actually changed.
   // Runs on EVERY focus (not just album switches): coming back from a
@@ -223,7 +323,7 @@ export default function AlbumSelectScreen({ navigation }) {
     let alive = true;
     (async () => {
       try {
-        const cached = await getAlbumSummary(albumId);
+        const cached = await getAlbumSummary(albumId, mediaType);
         if (alive && cached) {
           setSummary(cached.summary);
           if (!firstThumbLogged.current && cached.summary?.thumbs?.length) {
@@ -231,7 +331,7 @@ export default function AlbumSelectScreen({ navigation }) {
             log(
               'perf',
               `home first-thumbnails ${Date.now() - focusStartedAt.current}ms ` +
-                `screen=photos source=cache count=${cached.summary.thumbs.length}`
+                `screen=${mediaType}s source=cache count=${cached.summary.thumbs.length}`
             );
           }
         }
@@ -247,17 +347,20 @@ export default function AlbumSelectScreen({ navigation }) {
         // On a first visit there is no summary to show, so fetch the
         // fingerprint and first page together. The first page can paint while
         // the fingerprint decides whether a full refresh is needed.
-        const fpPromise = getAlbumFingerprint(albumId, 'photo');
+        const fpPromise = getAlbumFingerprint(albumId, mediaType);
         const firstPagePromise = cached
           ? null
-          : getAssetsPage(albumId, 'photo');
+          : getAssetsPage(albumId, mediaType);
         const fp = await fpPromise;
         if (!alive) return;
         if (
           cached &&
           cached.fingerprint &&
           cached.fingerprint.assetCount === fp.assetCount &&
-          cached.fingerprint.latestModificationTime === fp.latestModificationTime
+          cached.fingerprint.latestModificationTime === fp.latestModificationTime &&
+          cached.fingerprint.newestId === fp.newestId &&
+          cached.fingerprint.oldestId === fp.oldestId &&
+          cached.fingerprint.edgeIds === fp.edgeIds
         ) {
           return; // unchanged — ZERO scanning this visit
         }
@@ -288,13 +391,13 @@ export default function AlbumSelectScreen({ navigation }) {
             log(
               'perf',
               `home first-thumbnails ${Date.now() - focusStartedAt.current}ms ` +
-                `screen=photos source=media-library count=${Math.min(3, all.length)}`
+                `screen=${mediaType}s source=media-library count=${Math.min(3, all.length)}`
             );
           }
           first = false;
         }
         while (hasNext && all.length < 20000) {
-          const page = await getAssetsPage(albumId, 'photo', after);
+          const page = await getAssetsPage(albumId, mediaType, after);
           if (!alive) return;
           for (const a of page.assets) all.push(a);
           hasNext = page.hasNext;
@@ -310,7 +413,7 @@ export default function AlbumSelectScreen({ navigation }) {
               log(
                 'perf',
                 `home first-thumbnails ${Date.now() - focusStartedAt.current}ms ` +
-                  `screen=photos source=media-library count=${Math.min(3, all.length)}`
+                  `screen=${mediaType}s source=media-library count=${Math.min(3, all.length)}`
               );
             }
             first = false;
@@ -324,7 +427,7 @@ export default function AlbumSelectScreen({ navigation }) {
         };
         if (!alive) return;
         setSummary(fresh);
-        saveAlbumSummary(albumId, { fingerprint: fp, summary: fresh });
+        saveAlbumSummary(albumId, { fingerprint: fp, summary: fresh }, mediaType);
       } catch (e) {
         if (alive) setSummary({ count: 0, thumbs: [], years: [] });
       }
@@ -332,7 +435,7 @@ export default function AlbumSelectScreen({ navigation }) {
     return () => {
       alive = false;
     };
-    }, [albumId])
+    }, [albumId, mediaType])
   );
 
   useEffect(() => analyzer.subscribe(setAnalysisState), []);
@@ -340,8 +443,9 @@ export default function AlbumSelectScreen({ navigation }) {
   // Missing/stale analysis: SILENT, delayed, incremental background refresh.
   // checkCache() itself is the expensive part — it JSON.parses the whole
   // analysis cache — so even the CHECK waits for the cards to paint.
+  // Videos have no pixel-analysis pipeline, so this is photos only.
   useEffect(() => {
-    if (!settings.similarDetection) return undefined;
+    if (isVideo || !settings.similarDetection) return undefined;
     let alive = true;
     let startTimer;
     const checkTimer = setTimeout(() => {
@@ -361,7 +465,7 @@ export default function AlbumSelectScreen({ navigation }) {
       clearTimeout(checkTimer);
       if (startTimer) clearTimeout(startTimer);
     };
-  }, [albumId, settings.similarDetection]);
+  }, [albumId, settings.similarDetection, isVideo]);
 
   // Scoped count straight from the cached histogram — no asset scanning.
   const filteredCount = useMemo(() => {
@@ -386,23 +490,29 @@ export default function AlbumSelectScreen({ navigation }) {
         // Same invalidation as the preview effect — a session built for the
         // other order mode must not be resumed just because the tap beat the
         // effect to it.
-        await sessionManager.dropSessionIfOrderChanged(settings.order);
-        const pending = await sessionManager.getPendingSession();
+        await sessionManager.dropSessionIfOrderChanged(settings.order, mediaType);
+        const pending = await sessionManager.getPendingSession(mediaType);
         resume = !!(
           pending &&
-          pending.type === 'photo' &&
+          pending.type === mediaType &&
           pending.albumId === albumId
         );
       } catch (e) {
         resume = false;
       }
     }
-    navigation.navigate('Cleaning', {
+    const timeRange = timeFilter
+      ? { start: timeFilter.start, end: timeFilter.end }
+      : null;
+    // Cleaning decisions feed one shared progress ledger, but the pool that
+    // decides when to auto-reset is independent per album/time scope.
+    reviewedStore.activateRound(mediaType, albumId, timeRange);
+    navigation.navigate(cleaningRoute, {
       albumId,
       albumTitle: timeFilter ? `${albumTitle} · ${timeFilter.label}` : albumTitle,
-      timeRange: timeFilter
-        ? { start: timeFilter.start, end: timeFilter.end }
-        : null,
+      mediaType,
+      groupSize,
+      timeRange,
       resume,
     });
   };
@@ -441,7 +551,7 @@ export default function AlbumSelectScreen({ navigation }) {
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
       <Text style={[styles.header, { color: colors.text }]}>
-        {t('clean_photos')}
+        {t(isVideo ? 'clean_videos' : 'clean_photos')}
       </Text>
 
       <View style={styles.controls}>
@@ -461,18 +571,23 @@ export default function AlbumSelectScreen({ navigation }) {
           value={timeFilter}
           onSelect={setTimeFilter}
         />
+        <GroupSizeStepper
+          value={groupSize}
+          onChange={(v) => setSetting(groupSizeKey, v)}
+        />
       </View>
 
       <View style={styles.centerArea}>
         <StackedCards
           items={thumbs}
           cardWidth={cardW}
+          isVideo={isVideo}
           onPress={startCleaning}
         />
         <Text style={[styles.count, { color: colors.subtext }]}>
           {filteredCount === 0
-            ? t('no_photos')
-            : t('photo_count', { count: filteredCount })}
+            ? t(isVideo ? 'no_videos' : 'no_photos')
+            : t(isVideo ? 'video_count' : 'photo_count', { count: filteredCount })}
         </Text>
         {filteredCount > 0 && (
           <Text style={[styles.hint, { color: colors.subtext }]}>
@@ -483,7 +598,7 @@ export default function AlbumSelectScreen({ navigation }) {
 
       <AnalysisProgress
         state={analysisState}
-        mediaType="photo"
+        mediaType={mediaType}
         onCancel={() => analyzer.cancel(albumId)}
       />
     </SafeAreaView>
@@ -497,17 +612,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'flex-start',
     alignItems: 'center',
-    gap: 10,
-    // Kept in sync with AlbumSelectBase's CONTROLS_HEIGHT so the photo and
-    // video tabs centre their card stack at the same height.
-    minHeight: 46,
+    // Three controls of identical height (see pickerButtonStyle). They wrap
+    // rather than squeeze on narrow screens; the card area below simply gets
+    // whatever height is left, so both tabs still agree with each other.
+    flexWrap: 'wrap',
+    gap: 8,
   },
   centerArea: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 90,
+    marginTop: 4,
   },
   count: { marginTop: 26, fontSize: 15, fontWeight: '700' },
-  hint: { marginTop: 6, fontSize: 12 },
+  hint: { marginTop: 6, fontSize: 12, textAlign: 'center' },
 });

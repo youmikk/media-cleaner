@@ -15,7 +15,16 @@ try {
   LivePhotoView = null;
 }
 
-const pairedCache = {}; // asset id -> {photoUri, pairedVideoUri} | null
+const MAX_PAIRED_CACHE = 500;
+const pairedCache = new Map(); // asset id -> {photoUri, pairedVideoUri} | null
+
+function cachePaired(id, value) {
+  pairedCache.delete(id);
+  pairedCache.set(id, value);
+  while (pairedCache.size > MAX_PAIRED_CACHE) {
+    pairedCache.delete(pairedCache.keys().next().value);
+  }
+}
 
 function isLivePhoto(asset) {
   return (
@@ -35,8 +44,10 @@ function usePairedLivePhoto(asset, enabled) {
       return undefined;
     }
     if (!isLivePhoto(asset)) return undefined;
-    if (pairedCache[asset.id] !== undefined) {
-      setSource(pairedCache[asset.id]);
+    if (pairedCache.has(asset.id)) {
+      const cached = pairedCache.get(asset.id);
+      cachePaired(asset.id, cached);
+      setSource(cached);
       return undefined;
     }
     (async () => {
@@ -50,10 +61,10 @@ function usePairedLivePhoto(asset, enabled) {
         const val = paired
           ? { photoUri: info.localUri || info.uri, pairedVideoUri: paired }
           : null;
-        pairedCache[asset.id] = val;
+        cachePaired(asset.id, val);
         if (alive) setSource(val);
       } catch (e) {
-        pairedCache[asset.id] = null;
+        cachePaired(asset.id, null);
       }
     })();
     return () => {
@@ -86,20 +97,48 @@ function formatDuration(seconds) {
  * and the cleaning screen mounts current ± 1, so that was a player created
  * and torn down on EVERY swipe.
  */
-function VideoBody({ asset }) {
+function VideoBody({ asset, active = true, onLoadError }) {
+  const errorFiredRef = useRef(false);
   const player = useVideoPlayer(asset.uri, (p) => {
     p.loop = true;
     p.muted = true; // autoplay politely muted; native controls can unmute
+    // ExoPlayer otherwise buffers roughly 50 seconds. One live player with
+    // the default is still enough to OOM on a large 4K video.
+    try {
+      p.bufferOptions = {
+        preferredForwardBufferDuration: 6,
+        maxBufferBytes: 12 * 1024 * 1024,
+        minBufferForPlayback: 1,
+        minBufferForPlaybackAfterRebuffer: 2,
+      };
+    } catch (e) {
+      // Older expo-video builds do not expose bufferOptions.
+    }
   });
   // AUTO-PLAY videos (e.g. in the Largest Files flow) so it's obvious
   // they're videos, with a badge as a second cue.
   useEffect(() => {
     try {
-      player.play();
+      if (active) player.play();
+      else player.pause();
     } catch (e) {
       // best effort — a released player throws
     }
-  }, [player]);
+  }, [active, player]);
+  useEffect(() => {
+    let sub;
+    try {
+      sub = player.addListener('statusChange', (event) => {
+        if (event.status === 'error' && onLoadError && !errorFiredRef.current) {
+          errorFiredRef.current = true;
+          setTimeout(onLoadError, 0);
+        }
+      });
+    } catch (e) {
+      sub = null;
+    }
+    return () => sub?.remove();
+  }, [onLoadError, player]);
   return (
     <VideoView
       player={player}
@@ -180,6 +219,8 @@ export default function PhotoCard({
   marked,
   sizeLabel,
   inactive = false, // UNDER-card in the stack: no video/live playback
+  active = !inactive,
+  onLoadError,
 }) {
   const { colors, t } = useSettings();
   if (!asset) return null;
@@ -192,7 +233,7 @@ export default function PhotoCard({
           <Ionicons name="videocam" size={40} color="rgba(255,255,255,0.5)" />
         </View>
       ) : isVideo ? (
-        <VideoBody asset={asset} />
+        <VideoBody asset={asset} active={active} onLoadError={onLoadError} />
       ) : (
         <StillBody asset={asset} inactive={inactive} />
       )}

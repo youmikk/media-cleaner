@@ -10,10 +10,11 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
 import GlassSurface from './GlassSurface';
 
-// The video feed ('VideoCleaning') is NOT hidden: the tab bar stays on top
-// of the feed so switching tabs is instant — no need to exit first.
 const HIDDEN_ROUTES = [
   'Cleaning',
+  'SmartCleaning',
+  'VideoCleaning',
+  'Favorites',
   'BurstClean',
   'RecycleBin',
   'Compress',

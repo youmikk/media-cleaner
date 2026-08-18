@@ -7,7 +7,13 @@ import { readJSON, withLock } from './safeStore';
 // paused photo session (that wiped the saved random order and caused
 // "re-entering shows a different group").
 const SESSION_KEY = (type) => `@mediacleaner/active_session_${type}`;
-const ORDER_KEY = '@mediacleaner/session_order';
+// The saved cleaning ORDER is per type too. Photos keep the original key so
+// an app update doesn't lose a paused photo session's shuffle; videos get
+// their own, now that the video flow resumes the same way photos do.
+const ORDER_KEY = (type) =>
+  type === 'video'
+    ? '@mediacleaner/session_order_video'
+    : '@mediacleaner/session_order';
 
 /**
  * Start a cleaning session: capture a "before" snapshot of the album and
@@ -41,12 +47,10 @@ export async function startSession({
   await withLock(SESSION_KEY(type), async () => {
     await AsyncStorage.setItem(SESSION_KEY(type), JSON.stringify(session));
   });
-  // The saved random ORDER belongs to photo sessions only — starting a
-  // VIDEO session must not touch it.
-  if (type === 'photo') {
-    orderMemo = null;
-    await AsyncStorage.removeItem(ORDER_KEY);
-  }
+  // A fresh session invalidates the saved order of ITS OWN type only —
+  // starting a video session must not touch a paused photo session's queue.
+  orderMemo.delete(type);
+  await AsyncStorage.removeItem(ORDER_KEY(type));
   return session;
 }
 
@@ -63,22 +67,23 @@ export async function getPendingSession(type = 'photo') {
  * preview and the resume path parse it on entry. That parse landed on the
  * JS thread right when the preview images needed it.
  */
-let orderMemo = null; // string[] | null
+let orderMemo = new Map(); // type -> string[]
 
-export async function saveOrder(assetIds) {
-  orderMemo = assetIds;
+export async function saveOrder(assetIds, type = 'photo') {
+  orderMemo.set(type, assetIds);
   try {
-    await AsyncStorage.setItem(ORDER_KEY, JSON.stringify(assetIds));
+    await AsyncStorage.setItem(ORDER_KEY(type), JSON.stringify(assetIds));
   } catch (e) {
     // best effort
   }
 }
 
-export async function getOrder() {
-  if (orderMemo) return [...orderMemo];
-  const { value } = await readJSON(ORDER_KEY);
+export async function getOrder(type = 'photo') {
+  const memo = orderMemo.get(type);
+  if (memo) return [...memo];
+  const { value } = await readJSON(ORDER_KEY(type));
   if (!Array.isArray(value)) return null;
-  orderMemo = value;
+  orderMemo.set(type, value);
   return [...value];
 }
 
@@ -108,10 +113,20 @@ export async function saveProgress(patch, type = 'photo') {
 export async function discardSession(type = 'photo') {
   return withLock(SESSION_KEY(type), async () => {
     await AsyncStorage.removeItem(SESSION_KEY(type));
-    if (type === 'photo') {
-      orderMemo = null;
-      await AsyncStorage.removeItem(ORDER_KEY);
-    }
+    orderMemo.delete(type);
+    await AsyncStorage.removeItem(ORDER_KEY(type));
+  });
+}
+
+/** Remove only the session created by a screen that was closed mid-startup. */
+export async function discardSessionIfId(id, type = 'photo') {
+  return withLock(SESSION_KEY(type), async () => {
+    const { ok, value } = await readJSON(SESSION_KEY(type));
+    if (!ok || !value || value.id !== id) return false;
+    await AsyncStorage.removeItem(SESSION_KEY(type));
+    orderMemo.delete(type);
+    await AsyncStorage.removeItem(ORDER_KEY(type));
+    return true;
   });
 }
 

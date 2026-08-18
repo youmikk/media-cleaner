@@ -162,6 +162,39 @@ public class PhotoMoveModule: Module {
       return out
     }
 
+    // Resolve every PhotoKit collection that contains each asset. Expo's
+    // Asset.albumId is Android-only, so without this batch query deleting
+    // from "All Photos" cannot update progress for all iOS classifications.
+    AsyncFunction("getAlbumMembership") { (assetIds: [String]) -> [String: [String]] in
+      var rawByIdentifier: [String: String] = [:]
+      for raw in assetIds {
+        let key = raw.components(separatedBy: "/").first ?? raw
+        if !key.isEmpty { rawByIdentifier[key] = raw }
+      }
+      if rawByIdentifier.isEmpty { return [:] }
+
+      let fetched = PHAsset.fetchAssets(
+        withLocalIdentifiers: Array(rawByIdentifier.keys), options: nil
+      )
+      var out: [String: [String]] = [:]
+      fetched.enumerateObjects { asset, _, _ in
+        let bare = asset.localIdentifier.components(separatedBy: "/").first
+          ?? asset.localIdentifier
+        guard let raw = rawByIdentifier[bare] else { return }
+        var ids = Set<String>()
+        for collectionType in [PHAssetCollectionType.album, .smartAlbum] {
+          let collections = PHAssetCollection.fetchAssetCollectionsContaining(
+            asset, with: collectionType, options: nil
+          )
+          collections.enumerateObjects { collection, _, _ in
+            ids.insert(collection.localIdentifier)
+          }
+        }
+        out[raw] = Array(ids)
+      }
+      return out
+    }
+
     // Exact size of the whole library. This is the only full-library walk in
     // the app, so it fans out across cores; the JS caller caches the result
     // against the library fingerprint and only recomputes when it changes.

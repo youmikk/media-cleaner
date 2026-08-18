@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -11,9 +11,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import * as MediaLibrary from 'expo-media-library';
 import { useSettings } from '../context/SettingsContext';
-import { useApp } from '../context/AppContext';
+import { useTrash } from '../context/AppContext';
 import * as trashManager from '../utils/trashManager';
 import { formatBytes } from '../utils/albumHelpers';
 import { getTrashImageThumbnail, getVideoThumbnail } from '../utils/thumbCache';
@@ -39,11 +38,14 @@ const SCREEN_PADDING = 16;
  */
 export default function RecycleBinScreen({ navigation }) {
   const { colors, t, settings, setSetting } = useSettings();
-  const { trash, refreshTrash } = useApp();
+  const { trash, refreshTrash } = useTrash();
   const { width } = useWindowDimensions();
   const [selected, setSelected] = useState({});
   const [busy, setBusy] = useState(false);
   const [thumbs, setThumbs] = useState({});
+  const thumbGenerationRef = useRef(0);
+  const thumbPendingRef = useRef(new Set());
+  const requestThumbsRef = useRef(null);
 
   const isGrid = settings.recycleView === 'grid';
   const columns = COLUMN_CHOICES.includes(settings.recycleColumns)
@@ -66,14 +68,16 @@ export default function RecycleBinScreen({ navigation }) {
     }, [refreshTrash])
   );
 
-  useFocusEffect(
-    useCallback(() => {
-      let alive = true;
-      (async () => {
-        // Limit work to four files at a time so opening the recycle bin does
-        // not decode every original image concurrently.
-        for (let i = 0; i < trash.length; i += 4) {
-          const batch = trash.slice(i, i + 4);
+  requestThumbsRef.current = async (entries) => {
+    const generation = thumbGenerationRef.current;
+    const needed = (entries || []).filter(
+      (entry) =>
+        !thumbs[entry.fileUri] && !thumbPendingRef.current.has(entry.fileUri)
+    );
+    needed.forEach((entry) => thumbPendingRef.current.add(entry.fileUri));
+    try {
+      for (let i = 0; i < needed.length; i += 4) {
+          const batch = needed.slice(i, i + 4);
           const results = await Promise.all(
             batch.map(async (entry) => {
               try {
@@ -91,18 +95,31 @@ export default function RecycleBinScreen({ navigation }) {
               }
             })
           );
-          if (!alive) return;
+          if (generation !== thumbGenerationRef.current) return;
           setThumbs((current) => ({
             ...current,
-            ...Object.fromEntries(results),
+            ...Object.fromEntries(results.filter(([, uri]) => !!uri)),
           }));
-        }
-      })();
+      }
+    } finally {
+      needed.forEach((entry) => thumbPendingRef.current.delete(entry.fileUri));
+    }
+  };
+
+  useFocusEffect(
+    useCallback(() => {
+      thumbGenerationRef.current++;
+      requestThumbsRef.current?.(trash.slice(0, 12));
       return () => {
-        alive = false;
+        thumbGenerationRef.current++;
       };
     }, [trash])
   );
+
+  const onViewableItemsChanged = useRef(({ viewableItems }) => {
+    requestThumbsRef.current?.(viewableItems.map((item) => item.item));
+  }).current;
+  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 10 }).current;
 
   const selectedEntries = trash.filter((e) => selected[e.fileUri]);
   const allSelected = trash.length > 0 && selectedEntries.length === trash.length;
@@ -137,7 +154,7 @@ export default function RecycleBinScreen({ navigation }) {
     try {
       for (const entry of selectedEntries) {
         try {
-          await MediaLibrary.createAssetAsync(entry.fileUri);
+          await trashManager.restoreFromTrash(entry, { remove: false });
           restored.push(entry);
         } catch (e) {
           failed++; // backing file missing — leave the row in place
@@ -378,6 +395,8 @@ export default function RecycleBinScreen({ navigation }) {
                   })
             }
             renderItem={({ item }) => (isGrid ? renderTile(item) : renderRow(item))}
+            onViewableItemsChanged={onViewableItemsChanged}
+            viewabilityConfig={viewabilityConfig}
           />
 
           {selectedEntries.length > 0 && (

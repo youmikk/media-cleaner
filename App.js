@@ -219,7 +219,16 @@ function AppInner() {
         onPress: () => {
           if (!navigationRef.isReady()) return;
           if (session.type === 'video') {
-            navigationRef.navigate('VideosTab');
+            navigationRef.navigate('VideosTab', {
+              screen: 'VideoCleaning',
+              params: {
+                albumId: session.albumId,
+                albumTitle: session.albumTitle,
+                assetIds: session.assetIds || null,
+                timeRange: session.timeRange || null,
+                resume: true,
+              },
+            });
           } else {
             navigationRef.navigate('PhotosTab', {
               screen: 'Cleaning',

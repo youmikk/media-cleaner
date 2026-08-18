@@ -11,6 +11,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
 import ProgressRing from './ProgressRing';
+import { pickerStyles } from './pickerButtonStyle';
 
 /**
  * Button + modal list to pick a source album.
@@ -53,11 +54,18 @@ export default function AlbumPicker({
   return (
     <>
       <Pressable
-        style={[styles.button, { backgroundColor: colors.card, borderColor: colors.border }]}
+        style={[
+          pickerStyles.button,
+          styles.button,
+          { backgroundColor: colors.card, borderColor: colors.border },
+        ]}
         onPress={() => setOpen(true)}
       >
         <Ionicons name="albums-outline" size={18} color={colors.accent} />
-        <Text style={[styles.buttonText, { color: colors.text }]} numberOfLines={1}>
+        <Text
+          style={[pickerStyles.text, { color: colors.text }]}
+          numberOfLines={1}
+        >
           {current ? current.title : '…'}
         </Text>
         {currentCount !== undefined && currentCount !== null && (
@@ -68,6 +76,10 @@ export default function AlbumPicker({
         {currentProgress && (
           <ProgressRing
             percent={currentProgress.percent}
+            // Small enough to sit INSIDE the shared control height — the
+            // default 30px ring is what used to make this button taller
+            // than the time picker next to it.
+            size={24}
             color={colors.accent}
             trackColor={colors.chartTrack}
             textColor={colors.subtext}
@@ -144,17 +156,10 @@ export default function AlbumPicker({
 }
 
 const styles = StyleSheet.create({
-  button: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 14,
-    borderWidth: StyleSheet.hairlineWidth,
-    maxWidth: 200,
-  },
-  buttonText: { fontSize: 14, fontWeight: '600', flexShrink: 1 },
+  // Geometry comes from pickerStyles.button — only the flex behaviour is
+  // local, so the album name gets the room it needs without pushing the
+  // other controls out of the row.
+  button: { flex: 1, minWidth: 0 },
   buttonCount: { fontSize: 11, fontWeight: '700' },
   backdrop: {
     flex: 1,

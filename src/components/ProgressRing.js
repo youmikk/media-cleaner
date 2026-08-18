@@ -10,35 +10,40 @@ export default function ProgressRing({
   textColor,
 }) {
   const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
-  const segments = useMemo(() => {
-    const count = 24;
-    const radius = size / 2 - 4;
+  const dots = useMemo(() => {
+    // Fractional positions let the compositor antialias the curve. Dot size
+    // is derived from the circumference so neighbours overlap slightly and
+    // produce a continuous ring even at the 24px picker size.
+    const count = 48;
+    const radiusEstimate = size / 2 - size * 0.075;
+    const dotSize = Math.max(1.5, (2 * Math.PI * radiusEstimate * 1.15) / count);
+    const radius = size / 2 - dotSize;
     const center = size / 2;
-    const filled = Math.round((safePercent / 100) * count);
     return Array.from({ length: count }, (_, index) => {
       const angle = (index / count) * Math.PI * 2 - Math.PI / 2;
       return {
-        left: center + Math.cos(angle) * radius - 1.5,
-        top: center + Math.sin(angle) * radius - 2.5,
-        rotate: `${(index / count) * 360 + 90}deg`,
-        filled: index < filled,
+        left: center + Math.cos(angle) * radius - dotSize / 2,
+        top: center + Math.sin(angle) * radius - dotSize / 2,
+        size: dotSize,
       };
     });
-  }, [safePercent, size]);
+  }, [size]);
+  const filled = Math.round((safePercent / 100) * dots.length);
 
   return (
     <View style={{ width: size, height: size }}>
-      {segments.map((segment, index) => (
+      {dots.map((dot, index) => (
         <View
           key={index}
           style={[
-            styles.segment,
+            styles.dot,
             {
-              left: segment.left,
-              top: segment.top,
-              height: Math.max(4, size * 0.17),
-              backgroundColor: segment.filled ? color : trackColor,
-              transform: [{ rotate: segment.rotate }],
+              left: dot.left,
+              top: dot.top,
+              width: dot.size,
+              height: dot.size,
+              borderRadius: dot.size / 2,
+              backgroundColor: index < filled ? color : trackColor,
             },
           ]}
         />
@@ -53,10 +58,8 @@ export default function ProgressRing({
 }
 
 const styles = StyleSheet.create({
-  segment: {
+  dot: {
     position: 'absolute',
-    width: 3,
-    borderRadius: 2,
   },
   center: {
     ...StyleSheet.absoluteFillObject,

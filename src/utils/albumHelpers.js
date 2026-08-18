@@ -17,6 +17,7 @@ const fingerprintMemoryCache = new Map();
 const ALBUMS_CACHE_PREFIX = '@mediacleaner/albums_v1_';
 const PREVIEW_CACHE_PREFIX = '@mediacleaner/preview_v1_';
 const assetInfoMemoryCache = new Map();
+const assetFetchPromises = new Map();
 const SNAPSHOT_SAMPLE = 60; // size sampling cap when there is no native query
 const SNAPSHOT_CONCURRENCY = 6;
 // Assets measured for real per album snapshot. Cheap on Android (a cursor),
@@ -60,9 +61,9 @@ export async function getRawAlbums({ force = false } = {}) {
  * "All Photos"/"All Videos" entry.
  */
 export async function getAlbums(mediaType, allLabel) {
-  // getAlbumsAsync returns the same mixed album directory for photos and
-  // videos; only the synthetic "All" label differs by tab.
-  const cacheKey = 'library';
+  // getAlbumsAsync exposes a mixed photo+video assetCount. Keep separate
+  // typed caches; sharing one made the photos tab overwrite the video list.
+  const cacheKey = `library_${mediaType}`;
   const cached = albumsMemoryCache.get(cacheKey);
   if (cached && Date.now() - cached.at < ALBUMS_TTL_MS) {
     // Keep the synthetic "All" label in the current locale when the user
@@ -84,7 +85,7 @@ export async function getAlbums(mediaType, allLabel) {
   // libraries. Use the last known list immediately, then refresh it for the
   // next visit in the background.
   try {
-    const raw = await AsyncStorage.getItem(`${ALBUMS_CACHE_PREFIX}library`);
+    const raw = await AsyncStorage.getItem(`${ALBUMS_CACHE_PREFIX}${cacheKey}`);
     const stored = raw ? JSON.parse(raw) : null;
     if (Array.isArray(stored) && stored.length > 0) {
       const result = stored.map((a) =>
@@ -102,15 +103,31 @@ export async function getAlbums(mediaType, allLabel) {
 }
 
 async function refreshAlbums(mediaType, allLabel) {
-  const cacheKey = 'library';
+  const cacheKey = `library_${mediaType}`;
   const startedAt = Date.now();
   try {
     const albums = await getRawAlbums();
     const result = [{ id: ALL_ALBUM_ID, title: allLabel, assetCount: undefined }];
-    for (const album of albums) {
-      // Filter out empty albums; keep smart albums like Screenshots / Camera.
-      if (album.assetCount === 0) continue;
-      result.push({ id: album.id, title: album.title, assetCount: album.assetCount });
+    // Query exact typed totals in small batches. Running all 150+ album
+    // cursors together overwhelms MediaStore/PhotoKit on real devices.
+    for (let i = 0; i < albums.length; i += 4) {
+      const typed = await Promise.all(
+        albums.slice(i, i + 4).map(async (album) => {
+          try {
+            const page = await MediaLibrary.getAssetsAsync({
+              album: album.id,
+              mediaType,
+              first: 1,
+            });
+            return page.totalCount > 0
+              ? { id: album.id, title: album.title, assetCount: page.totalCount }
+              : null;
+          } catch (e) {
+            return null;
+          }
+        })
+      );
+      for (const album of typed) if (album) result.push(album);
     }
     log(
       'perf',
@@ -118,7 +135,7 @@ async function refreshAlbums(mediaType, allLabel) {
     );
     albumsMemoryCache.set(cacheKey, { at: Date.now(), value: result });
     AsyncStorage.setItem(
-      `${ALBUMS_CACHE_PREFIX}library`,
+      `${ALBUMS_CACHE_PREFIX}${cacheKey}`,
       JSON.stringify(result)
     ).catch(() => {});
     return result;
@@ -234,25 +251,38 @@ export async function getRangeThumbs(albumId, mediaType, range, count = 3) {
  * round trips on a 15k-photo device — and throwing most of it away.
  */
 export async function getAssets(albumId, mediaType, limit = MAX_ASSETS) {
-  const assets = [];
   const cap = Math.min(limit, MAX_ASSETS);
-  let after;
-  let hasNext = true;
-  while (hasNext && assets.length < cap) {
-    const options = {
-      first: PAGE_SIZE,
-      mediaType,
-      sortBy: [[MediaLibrary.SortBy.creationTime, false]],
-    };
-    if (after) options.after = after;
-    if (albumId && albumId !== ALL_ALBUM_ID) options.album = albumId;
-    // eslint-disable-next-line no-await-in-loop
-    const page = await MediaLibrary.getAssetsAsync(options);
-    assets.push(...page.assets);
-    hasNext = page.hasNextPage;
-    after = page.endCursor;
+  const key = `${mediaType}/${albumId || ALL_ALBUM_ID}/${cap}`;
+  let promise = assetFetchPromises.get(key);
+  if (!promise) {
+    promise = (async () => {
+      const assets = [];
+      let after;
+      let hasNext = true;
+      while (hasNext && assets.length < cap) {
+        const options = {
+          first: PAGE_SIZE,
+          mediaType,
+          sortBy: [[MediaLibrary.SortBy.creationTime, false]],
+        };
+        if (after) options.after = after;
+        if (albumId && albumId !== ALL_ALBUM_ID) options.album = albumId;
+        // eslint-disable-next-line no-await-in-loop
+        const page = await MediaLibrary.getAssetsAsync(options);
+        assets.push(...page.assets);
+        hasNext = page.hasNextPage && page.assets.length > 0;
+        after = page.endCursor;
+      }
+      return assets.length > cap ? assets.slice(0, cap) : assets;
+    })();
+    assetFetchPromises.set(key, promise);
   }
-  return assets.length > cap ? assets.slice(0, cap) : assets;
+  try {
+    // Callers may sort/filter in place; never share the resolved array itself.
+    return (await promise).slice();
+  } finally {
+    if (assetFetchPromises.get(key) === promise) assetFetchPromises.delete(key);
+  }
 }
 
 export async function getAssetsByIds(ids) {
@@ -773,8 +803,8 @@ export async function getLibrarySize({
 }
 
 /**
- * Quick staleness fingerprint of an album: total count and the newest
- * modification time. Cheap (single page of 1).
+ * Quick staleness fingerprint of an album: count, modification-time edges
+ * and a small newest-id signature. Two tiny queries, no full scan.
  */
 export async function getAlbumFingerprint(albumId, mediaType) {
   const cacheKey = `${mediaType}/${albumId || ALL_ALBUM_ID}`;
@@ -786,19 +816,34 @@ export async function getAlbumFingerprint(albumId, mediaType) {
   }
   const startedAt = Date.now();
   const options = {
-    first: 1,
+    first: 3,
     mediaType,
     sortBy: [[MediaLibrary.SortBy.modificationTime, false]],
   };
   if (albumId && albumId !== ALL_ALBUM_ID) options.album = albumId;
   try {
-    const page = await MediaLibrary.getAssetsAsync(options);
+    // Count + newest timestamp misses an equal-count membership swap. Keep a
+    // small signature from both edges so moving one asset out and another in
+    // cannot usually leave a stale list/analysis cache looking fresh.
+    const oldestOptions = {
+      ...options,
+      first: 1,
+      sortBy: [[MediaLibrary.SortBy.modificationTime, true]],
+    };
+    const [page, oldestPage] = await Promise.all([
+      MediaLibrary.getAssetsAsync(options),
+      MediaLibrary.getAssetsAsync(oldestOptions),
+    ]);
     const newest = page.assets[0];
+    const oldest = oldestPage.assets[0];
     const result = {
       assetCount: page.totalCount,
       latestModificationTime: newest
         ? newest.modificationTime || newest.creationTime || 0
         : 0,
+      newestId: newest ? newest.id : null,
+      oldestId: oldest ? oldest.id : null,
+      edgeIds: page.assets.map((a) => a.id).join('|'),
     };
     log(
       'perf',
@@ -846,9 +891,18 @@ export async function removeAssetsFromAlbum(assets, album) {
 const SUMMARY_PREFIX = 'album_summary_';
 const summaryMemoryCache = new Map();
 
+// Photos and videos have separate summaries (count, preview thumbs, year
+// histogram) for the same album id. Photos keep the original key so an
+// update doesn't cost them their instant first paint.
+function summaryKey(albumId, mediaType) {
+  return mediaType === 'video'
+    ? `${SUMMARY_PREFIX}video_${albumId}`
+    : `${SUMMARY_PREFIX}${albumId}`;
+}
+
 /** Synchronous cache peek for the already visited home screen. */
-export function peekAlbumSummary(albumId) {
-  return summaryMemoryCache.get(albumId) || null;
+export function peekAlbumSummary(albumId, mediaType = 'photo') {
+  return summaryMemoryCache.get(summaryKey(albumId, mediaType)) || null;
 }
 
 /** Build the year -> month photo-count histogram used by the time picker. */
@@ -907,7 +961,10 @@ export async function getCachedAssetList(albumId, mediaType) {
     const fp = await getAlbumFingerprint(albumId, mediaType);
     if (
       fingerprint.assetCount !== fp.assetCount ||
-      fingerprint.latestModificationTime !== fp.latestModificationTime
+      fingerprint.latestModificationTime !== fp.latestModificationTime ||
+      fingerprint.newestId !== fp.newestId ||
+      fingerprint.oldestId !== fp.oldestId ||
+      fingerprint.edgeIds !== fp.edgeIds
     ) {
       return null; // album changed — caller rescans (and re-saves)
     }
@@ -947,26 +1004,25 @@ export async function saveCachedAssetList(albumId, mediaType, assets) {
   }
 }
 
-export async function getAlbumSummary(albumId) {
-  const memory = summaryMemoryCache.get(albumId);
+export async function getAlbumSummary(albumId, mediaType = 'photo') {
+  const key = summaryKey(albumId, mediaType);
+  const memory = summaryMemoryCache.get(key);
   if (memory) return memory;
   try {
-    const raw = await AsyncStorage.getItem(`${SUMMARY_PREFIX}${albumId}`);
+    const raw = await AsyncStorage.getItem(key);
     const value = raw ? JSON.parse(raw) : null;
-    if (value) summaryMemoryCache.set(albumId, value);
+    if (value) summaryMemoryCache.set(key, value);
     return value;
   } catch (e) {
     return null;
   }
 }
 
-export async function saveAlbumSummary(albumId, entry) {
-  summaryMemoryCache.set(albumId, entry);
+export async function saveAlbumSummary(albumId, entry, mediaType = 'photo') {
+  const key = summaryKey(albumId, mediaType);
+  summaryMemoryCache.set(key, entry);
   try {
-    await AsyncStorage.setItem(
-      `${SUMMARY_PREFIX}${albumId}`,
-      JSON.stringify(entry)
-    );
+    await AsyncStorage.setItem(key, JSON.stringify(entry));
   } catch (e) {
     // best effort
   }

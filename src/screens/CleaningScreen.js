@@ -13,6 +13,7 @@ import {
   ActivityIndicator,
   useWindowDimensions,
   Platform,
+  AppState,
   Share,
   Alert,
 } from 'react-native';
@@ -33,7 +34,7 @@ import * as Haptics from 'expo-haptics';
 import { Image as ExpoImage } from 'expo-image';
 import * as MediaLibrary from 'expo-media-library';
 import { useSettings } from '../context/SettingsContext';
-import { useApp } from '../context/AppContext';
+import { useFavorites, useStats } from '../context/AppContext';
 import PhotoCard from '../components/PhotoCard';
 import PageIndicator from '../components/PageIndicator';
 import BottomInfoBar from '../components/BottomInfoBar';
@@ -56,6 +57,7 @@ import { reverseGeocode } from '../utils/geocode';
 import {
   getRawAlbums,
   getAssetsPage,
+  getAssets,
   getAssetsByIds,
   getAlbumSnapshot,
   getCachedAssetList,
@@ -144,11 +146,16 @@ function StackLayer({ asset, index, screenW, offset, ty, dragId, children }) {
 }
 
 /**
- * Swipe-based photo cleaning flow.
- * - Swiping up MARKS a photo; the actual media-library deletion happens ONCE
+ * Swipe-based cleaning flow, for PHOTOS and VIDEOS alike (`mediaType`).
+ * - Swiping up MARKS an item; the actual media-library deletion happens ONCE
  *   per group ("Delete All Marked") — a single system dialog per batch.
  * - First page of the album shows immediately; the rest streams in.
  * - Sessions resume exactly: shuffled order, group, position and marks.
+ *
+ * The videos tab used to have its own full-screen black feed. Two screens
+ * meant two behaviours drifting apart (and two sets of bugs) for what is the
+ * same flow, so there is one screen now; only the card body differs, and
+ * PhotoCard already handles that.
  */
 export default function CleaningScreen({ route, navigation }) {
   const {
@@ -162,17 +169,27 @@ export default function CleaningScreen({ route, navigation }) {
     // photos the user has already been through.
     suggestionKey = null,
     timeRange = null, // {start, end} — year / year-month scope
+    mediaType = 'photo', // 'photo' | 'video'
   } = route.params;
+  const isVideo = mediaType === 'video';
   const { colors, t, settings, setSetting, recycleBinActive, language } = useSettings();
-  const { recordCleaned, recordViewed, toggleFavorite, isFavorite } = useApp();
+  const { recordCleaned, recordViewed } = useStats();
+  const { toggleFavorite, replaceFavoriteId, isFavorite } = useFavorites();
   const { width: SCREEN_W, height: SCREEN_H } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  const groupSize = route.params.groupSize || settings.groupSize || 5;
+  const groupSize =
+    route.params.groupSize ||
+    (isVideo ? settings.videoGroupSize : settings.groupSize) ||
+    5;
+  // Reviewed history is per album AND per media type — photo and video
+  // albums share ids, so the video flow needs its own namespace.
+  const reviewScope = reviewedStore.scopeFor(mediaType);
   // ~22% of screen height — no need to drag all the way to the top; a fast
   // flick (velocity) deletes from even less.
   const DELETE_THRESHOLD = SCREEN_H * 0.22;
 
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [groups, setGroups] = useState([]);
   const [gi, setGi] = useState(0);
   const [pi, setPi] = useState(0);
@@ -191,6 +208,16 @@ export default function CleaningScreen({ route, navigation }) {
   const [finalStats, setFinalStats] = useState({ count: 0, bytes: 0 });
   const [toast, setToast] = useState(null);
   const [realAlbums, setRealAlbums] = useState([]); // for the quick chips
+  const [appActive, setAppActive] = useState(AppState.currentState === 'active');
+  const [videoUriById, setVideoUriById] = useState({});
+  const videoFallbackTriedRef = useRef(new Set());
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      setAppActive(state === 'active');
+    });
+    return () => sub.remove();
+  }, []);
 
   // Real device albums for the quick-categorize chip row. Goes through the
   // shared 30s album cache, NOT MediaLibrary directly: getAlbumsAsync costs
@@ -207,6 +234,30 @@ export default function CleaningScreen({ route, navigation }) {
     return () => {
       alive = false;
     };
+  }, []);
+
+  const handleVideoLoadError = useCallback(async (asset) => {
+    if (!asset || videoFallbackTriedRef.current.has(asset.id)) return;
+    videoFallbackTriedRef.current.add(asset.id);
+    try {
+      const info = await MediaLibrary.getAssetInfoAsync(asset.id);
+      const numericId = String(asset.id).split('/')[0];
+      const candidates = [
+        info.localUri,
+        info.uri,
+        Platform.OS === 'android'
+          ? `content://media/external/file/${numericId}`
+          : null,
+      ].filter((uri) => uri && uri !== asset.uri);
+      if (candidates.length > 0 && aliveRef.current) {
+        // PhotoCard is keyed by the URI below, so this replaces the failed
+        // player by remounting it. Calling replace() on a live/releasing
+        // expo-video player can crash natively.
+        setVideoUriById((current) => ({ ...current, [asset.id]: candidates[0] }));
+      }
+    } catch (e) {
+      // No alternate URI. Keep the poster instead of retrying forever.
+    }
   }, []);
 
   const sessionRef = useRef(null);
@@ -301,7 +352,7 @@ export default function CleaningScreen({ route, navigation }) {
           // boundary handling.
           const page = await getAssetsPage(
             albumId,
-            'photo',
+            mediaType,
             cursorRef.current.after,
             rangeRef.current
           );
@@ -334,7 +385,9 @@ export default function CleaningScreen({ route, navigation }) {
         }
         // Preset lists (Largest Files / Low Quality) must never overwrite
         // the paused album session's saved order — the home cards follow it.
-        if (!assetIds && appended) sessionManager.saveOrder(orderRef.current);
+        if (!assetIds && appended) {
+          sessionManager.saveOrder(orderRef.current, mediaType);
+        }
         // Whole album loaded (unscoped) — persist it as the local index so
         // the NEXT session opens with zero MediaStore scanning.
         if (
@@ -344,13 +397,13 @@ export default function CleaningScreen({ route, navigation }) {
           !rangeRef.current
         ) {
           listSavedRef.current = true;
-          saveCachedAssetList(albumId, 'photo', allRef.current);
+          saveCachedAssetList(albumId, mediaType, allRef.current);
         }
       } finally {
         loadingMoreRef.current = false;
       }
     },
-    [albumId, groupSize, settings.order, assetIds]
+    [albumId, groupSize, settings.order, assetIds, mediaType]
   );
 
   // ---- Load: lazy segments for fresh sessions, full ordered for resume ----
@@ -358,7 +411,8 @@ export default function CleaningScreen({ route, navigation }) {
     let alive = true;
     aliveRef.current = true;
     (async () => {
-      const pending = await sessionManager.getPendingSession();
+      try {
+      const pending = await sessionManager.getPendingSession(mediaType);
       log(
         'clean.load',
         `resume=${resume} pending=${pending ? pending.type + '/' + pending.albumId + '/g' + (pending.groupIndex || 0) : 'none'} album=${albumId}`
@@ -368,8 +422,13 @@ export default function CleaningScreen({ route, navigation }) {
         pending &&
         !pending.assetIds && // stale preset sessions (pre-fix) are not resumable
         pending.albumId === albumId &&
-        pending.type === 'photo';
+        pending.type === mediaType;
       const range = resuming ? pending.timeRange || timeRange : timeRange;
+      if (!assetIds) {
+        // Direct resume (including cold-start navigation) bypasses the album
+        // picker, so establish the independent album/time round here too.
+        reviewedStore.activateRound(mediaType, albumId, range);
+      }
       const inRange = (a) =>
         !range ||
         (a.creationTime &&
@@ -398,7 +457,7 @@ export default function CleaningScreen({ route, navigation }) {
         let after;
         let hasNext = true;
         while (hasNext && all.length < 20000) {
-          const page = await getAssetsPage(albumId, 'photo', after, range);
+          const page = await getAssetsPage(albumId, mediaType, after, range);
           if (!alive) return;
           // push, not `all = [...all, ...]`: the spread re-copied everything
           // accumulated so far on every one of ~66 pages.
@@ -408,14 +467,14 @@ export default function CleaningScreen({ route, navigation }) {
         }
         if (!range) {
           fullAlbumList = all;
-          saveCachedAssetList(albumId, 'photo', all); // refresh local index
+          saveCachedAssetList(albumId, mediaType, all); // refresh local index
         }
         // CONFIRMED groups (recorded in reviewedStore) are dropped from the
         // order entirely — deletions in earlier groups then can't shift the
         // remaining group boundaries. The group you left mid-way is always
         // the FIRST group after resume, photo-for-photo identical.
-        const savedOrder = (await sessionManager.getOrder()) || [];
-        const reviewed = await reviewedStore.getReviewed(albumId);
+        const savedOrder = (await sessionManager.getOrder(mediaType)) || [];
+        const reviewed = await reviewedStore.getReviewed(reviewScope);
         reviewedSetRef.current = reviewed;
         const byId = Object.fromEntries(all.map((a) => [a.id, a]));
         const ordered = savedOrder
@@ -477,27 +536,27 @@ export default function CleaningScreen({ route, navigation }) {
         setMarkedIds(usableMarks);
         markStackRef.current = [...usableMarks];
         // Re-save the restored order: guards against any earlier writer.
-        sessionManager.saveOrder(orderRef.current);
+        sessionManager.saveOrder(orderRef.current, mediaType);
         initializedRef.current = true;
         setLoading(false);
       } else {
         // Fresh session: reviewed photos are EXCLUDED from the pool — a
         // group you confirmed (kept or deleted) never comes back until the
         // whole album has been reviewed once (then the round resets).
-        reviewedSetRef.current = await reviewedStore.getReviewed(albumId);
+        reviewedSetRef.current = await reviewedStore.getReviewed(reviewScope);
         if (!alive) return;
         // Try the persisted local index first (Fossify-style) —
         // fingerprint unchanged means the FULL list loads instantly with
         // zero MediaStore scanning.
-        const cachedList = await getCachedAssetList(albumId, 'photo');
+        const cachedList = await getCachedAssetList(albumId, mediaType);
         if (!alive) return;
         if (cachedList) {
           const inR = cachedList.filter(inRange);
           let pool = inR.filter((a) => !reviewedSetRef.current.has(a.id));
           if (pool.length === 0 && inR.length > 0) {
             // Round complete: every photo reviewed once — start over.
-            await reviewedStore.clearReviewed(albumId);
-            reviewedSetRef.current = new Set();
+            await reviewedStore.resetAlbumRound(mediaType, albumId, inR);
+            reviewedSetRef.current = await reviewedStore.getReviewed(reviewScope);
             pool = inR;
           }
           const ordered = settings.order === 'random' ? shuffle(pool) : pool;
@@ -522,8 +581,9 @@ export default function CleaningScreen({ route, navigation }) {
           ) {
             // Round complete (everything filtered as reviewed) — reset
             // and reload from scratch.
-            await reviewedStore.clearReviewed(albumId);
-            reviewedSetRef.current = new Set();
+            const roundAssets = await getAssets(albumId, mediaType);
+            await reviewedStore.resetAlbumRound(mediaType, albumId, roundAssets);
+            reviewedSetRef.current = await reviewedStore.getReviewed(reviewScope);
             cursorRef.current = { after: undefined, hasNext: true };
             await ensureLoaded(groupSize * 3);
             if (!alive) return;
@@ -542,9 +602,10 @@ export default function CleaningScreen({ route, navigation }) {
         // an in-memory session only. Persisting one used to overwrite the
         // paused album session + saved order, so the home cards suddenly
         // showed the preset's photos and resume lost the real group.
-        const before = await getAlbumSnapshot(albumId, 'photo', fullAlbumList);
+        const before = await getAlbumSnapshot(albumId, mediaType, fullAlbumList);
+        if (!alive) return;
         sessionRef.current = {
-          type: 'photo',
+          type: mediaType,
           albumId,
           albumTitle,
           groupSize,
@@ -554,9 +615,10 @@ export default function CleaningScreen({ route, navigation }) {
           ephemeral: true,
         };
       } else {
-        const before = await getAlbumSnapshot(albumId, 'photo', fullAlbumList);
-        sessionRef.current = await sessionManager.startSession({
-          type: 'photo',
+        const before = await getAlbumSnapshot(albumId, mediaType, fullAlbumList);
+        if (!alive) return;
+        const createdSession = await sessionManager.startSession({
+          type: mediaType,
           albumId,
           albumTitle,
           groupSize,
@@ -568,12 +630,24 @@ export default function CleaningScreen({ route, navigation }) {
           order: settings.order,
           before,
         });
-        sessionManager.saveOrder(orderRef.current);
+        if (!alive) {
+          await sessionManager.discardSessionIfId(createdSession.id, mediaType);
+          return;
+        }
+        sessionRef.current = createdSession;
+        sessionManager.saveOrder(orderRef.current, mediaType);
       }
 
-      if (settings.similarDetection) {
+      if (!isVideo && settings.similarDetection) {
         const cache = await analyzer.getCached(albumId, 'photo');
         if (alive && cache && cache.clusters) setClusters(cache.clusters);
+      }
+      } catch (e) {
+        log('clean.load', `failed: ${(e && e.message) || e}`);
+        if (alive) {
+          setLoadError(true);
+          setLoading(false);
+        }
       }
     })();
     return () => {
@@ -600,7 +674,7 @@ export default function CleaningScreen({ route, navigation }) {
       groupIndex: gi,
       photoIndex: piRef.current,
       markedIds: [...markedIds],
-    });
+    }, mediaType);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gi, markedIds]);
 
@@ -611,7 +685,7 @@ export default function CleaningScreen({ route, navigation }) {
   useEffect(() => {
     if (!sessionRef.current || sessionRef.current.ephemeral) return;
     const id = setTimeout(() => {
-      sessionManager.saveProgress({ photoIndex: piRef.current });
+      sessionManager.saveProgress({ photoIndex: piRef.current }, mediaType);
     }, 600);
     return () => clearTimeout(id);
   }, [pi]);
@@ -1005,6 +1079,35 @@ export default function CleaningScreen({ route, navigation }) {
   // so the flow jumped two photos and skipped one entirely.
   const movingRef = useRef(false);
 
+  const migrateMovedAssetId = (asset, oldId, nextId) => {
+    const newId = nextId && String(nextId);
+    if (!asset || !newId || newId === String(oldId)) return String(oldId);
+    asset.id = newId;
+    orderRef.current = orderRef.current.map((id) =>
+      String(id) === String(oldId) ? newId : id
+    );
+    if (markStackRef.current.includes(oldId)) {
+      markStackRef.current = markStackRef.current.map((id) =>
+        id === oldId ? newId : id
+      );
+      setMarkedIds((currentIds) => {
+        const next = new Set(currentIds);
+        if (next.delete(oldId)) next.add(newId);
+        return next;
+      });
+    }
+    if (extraAssetsRef.current[oldId]) {
+      extraAssetsRef.current[newId] = extraAssetsRef.current[oldId];
+      delete extraAssetsRef.current[oldId];
+    }
+    replaceFavoriteId(oldId, newId);
+    if (!assetIds && sessionRef.current) {
+      sessionManager.saveOrder(orderRef.current, mediaType);
+      sessionManager.saveProgress({ markedIds: [...markStackRef.current] }, mediaType);
+    }
+    return newId;
+  };
+
   const moveCurrentTo = async (album) => {
     if (!current || movingRef.current) return;
     const id = current.id;
@@ -1022,7 +1125,8 @@ export default function CleaningScreen({ route, navigation }) {
         const [res] = await PhotoMove.moveToAlbum([id], album.title);
         if (!res || !res.ok) throw new Error(res && res.error);
         asset.uri = 'file://' + res.newPath; // keep displaying the photo
-        overrideHistoryRef.current[id] = {
+        const movedId = migrateMovedAssetId(asset, id, res.newId);
+        overrideHistoryRef.current[movedId] = {
           fromAlbumId,
           toAlbumId: album.id,
           native: true,
@@ -1046,14 +1150,19 @@ export default function CleaningScreen({ route, navigation }) {
         overrideHistoryRef.current[id] = { fromAlbumId, toAlbumId: album.id };
       }
       // Categorizing counts as completing this item in the current album.
-      await reviewedStore.addReviewed(albumId, [id]);
+      await reviewedStore.addReviewedAssets(mediaType, albumId, [current]);
       incrementUsage(album.id);
-      setAlbumOverrides((m) => ({ ...m, [id]: album.id }));
+      setAlbumOverrides((m) => {
+        const next = { ...m };
+        delete next[id];
+        next[asset.id] = album.id;
+        return next;
+      });
       showToast(t('moved_to', { album: album.title }));
       // Only advance if we are still on the photo we just moved — the user
       // may have swiped on during the await, and blindly calling next then
       // skipped an unseen photo.
-      if (currentRef.current && currentRef.current.id === id) callNext();
+      if (currentRef.current && currentRef.current.id === asset.id) callNext();
     } catch (e) {
       // move failed — nothing changes
     } finally {
@@ -1083,14 +1192,15 @@ export default function CleaningScreen({ route, navigation }) {
         const [res] = await PhotoMove.moveToAlbum([id], name);
         if (!res || !res.ok) throw new Error(res && res.error);
         asset.uri = 'file://' + res.newPath;
+        const movedId = migrateMovedAssetId(asset, id, res.newId);
         // Forced: the album we just created is by definition not in the
         // shared 30s cache yet.
         const list = await getRawAlbums({ force: true });
         setRealAlbums(list.filter((a) => a.assetCount > 0));
         const album = list.find((a) => a.title === name);
         if (album) incrementUsage(album.id);
-        await reviewedStore.addReviewed(albumId, [id]);
-        overrideHistoryRef.current[id] = {
+        await reviewedStore.addReviewedAssets(mediaType, albumId, [asset]);
+        overrideHistoryRef.current[movedId] = {
           fromAlbumId,
           toAlbumId: album ? album.id : name,
           native: true,
@@ -1098,7 +1208,12 @@ export default function CleaningScreen({ route, navigation }) {
           fromAlbumTitle:
             (realAlbums.find((a) => a.id === fromAlbumId) || {}).title || null,
         };
-        setAlbumOverrides((m) => ({ ...m, [id]: album ? album.id : name }));
+        setAlbumOverrides((m) => {
+          const next = { ...m };
+          delete next[id];
+          next[movedId] = album ? album.id : name;
+          return next;
+        });
       } else if (Platform.OS === 'android' && PhotoMove.hasNativeMove()) {
         // Needs "All files access" — prompt once, do nothing this time.
         maybeOfferNativeMove();
@@ -1114,9 +1229,9 @@ export default function CleaningScreen({ route, navigation }) {
         const list = await getRawAlbums({ force: true });
         setRealAlbums(list.filter((a) => a.assetCount > 0));
       }
-      await reviewedStore.addReviewed(albumId, [id]);
+      await reviewedStore.addReviewedAssets(mediaType, albumId, [current]);
       showToast(t('moved_to', { album: name }));
-      if (currentRef.current && currentRef.current.id === id) callNext();
+      if (currentRef.current && currentRef.current.id === asset.id) callNext();
     } catch (e) {
       // creation failed — photo stays
     } finally {
@@ -1150,6 +1265,7 @@ export default function CleaningScreen({ route, navigation }) {
         // while the file sat in the new album, now unrecoverable.
         if (!res || !res.ok) throw new Error((res && res.error) || 'undo_failed');
         displayAsset.uri = 'file://' + res.newPath;
+        migrateMovedAssetId(displayAsset, id, res.newId);
       } else {
         // iOS: pull the photo back out of the collection.
         const backAlbum = rec.fromAlbumId
@@ -1163,10 +1279,12 @@ export default function CleaningScreen({ route, navigation }) {
         }
       }
       delete overrideHistoryRef.current[id];
+      delete overrideHistoryRef.current[displayAsset.id];
       setAlbumOverrides((m) => {
         const next = { ...m };
-        if (rec.fromAlbumId) next[id] = rec.fromAlbumId;
-        else delete next[id];
+        delete next[id];
+        if (rec.fromAlbumId) next[displayAsset.id] = rec.fromAlbumId;
+        else delete next[displayAsset.id];
         return next;
       });
       showToast(t('category_cancelled'));
@@ -1254,13 +1372,16 @@ export default function CleaningScreen({ route, navigation }) {
     if (!assetIds && group.length > 0) {
       const ids = group.map((a) => a.id);
       ids.forEach((id) => reviewedSetRef.current.add(id));
-      reviewedStore.addReviewed(albumId, ids); // fire & forget
+      // Advance only after the decision ledger has accepted this group. On
+      // the final group a fire-and-forget write raced flush/finish and the
+      // same items reappeared after an immediate process kill.
+      await reviewedStore.addReviewedAssets(mediaType, albumId, group);
     } else if (suggestionKey && group.length > 0) {
       // Suggestion sessions are ephemeral and album-scoped reviewing would be
       // wrong here (the ids span the whole library), so they get their own
       // per-suggestion ledger. Without it the "10 largest files" card kept
       // offering the same photos after they had been dealt with.
-      suggestionStore.addReviewed(suggestionKey, group.map((a) => a.id));
+      await suggestionStore.addReviewed(suggestionKey, group.map((a) => a.id));
     }
     setShowConfirm(false);
     setPi(0);
@@ -1372,10 +1493,10 @@ export default function CleaningScreen({ route, navigation }) {
     setGi(0);
     setPi(0);
     if (!assetIds && sessionRef.current) {
-      sessionManager.saveOrder(orderRef.current);
+      sessionManager.saveOrder(orderRef.current, mediaType);
       // Keep the stored mode in step, or the home screen would drop this
       // session as stale the next time it looks at it.
-      sessionManager.saveProgress({ order: settings.order });
+      sessionManager.saveProgress({ order: settings.order }, mediaType);
     }
   }, [
     settings.order,
@@ -1396,13 +1517,32 @@ export default function CleaningScreen({ route, navigation }) {
       const targets = markedAssets;
       if (targets.length > 0) {
         try {
-          const { count, bytes, deletedIds, skipped } = await batchDelete(
+          if (Platform.OS === 'ios' && PhotoMove.hasAlbumMembership()) {
+            const membership = await PhotoMove.getAlbumMembership(
+              targets.map((asset) => asset.id)
+            );
+            reviewedStore.rememberMembershipMap(mediaType, membership);
+          }
+          const { count, bytes, bytesById, deletedIds, skipped } = await batchDelete(
             targets,
             { useRecycleBin: recycleBinActive }
           );
           cleanedRef.current.count += count;
           cleanedRef.current.bytes += bytes;
-          if (count > 0) recordCleaned('photo', count, bytes);
+          if (count > 0) {
+            const goneSet = new Set(deletedIds || targets.map((a) => a.id));
+            const deleted = targets.filter((a) => goneSet.has(a.id));
+            const videos = deleted.filter((a) => a.mediaType === 'video');
+            const photos = deleted.filter((a) => a.mediaType !== 'video');
+            const sumBytes = (items) =>
+              items.reduce((sum, item) => sum + (bytesById?.[item.id] || 0), 0);
+            if (photos.length > 0) {
+              recordCleaned('photo', photos.length, sumBytes(photos));
+            }
+            if (videos.length > 0) {
+              recordCleaned('video', videos.length, sumBytes(videos));
+            }
+          }
           // Only what ACTUALLY went away — a recycle-bin backup that failed
           // leaves its photo in place, and pretending otherwise would hide
           // it from this round while it still sits in the library.
@@ -1414,6 +1554,10 @@ export default function CleaningScreen({ route, navigation }) {
               t('delete_forever'),
               t('delete_partial', { count: skipped })
             );
+            // The failed backups are still marked and still exist. Stay in
+            // this group so they cannot be recorded as reviewed merely
+            // because their neighbours were deleted successfully.
+            return;
           }
         } catch (e) {
           if (e && e.message === 'trash-no-space') {
@@ -1424,7 +1568,7 @@ export default function CleaningScreen({ route, navigation }) {
           return;
         }
       }
-      nextGroup();
+      await nextGroup();
     } finally {
       deletingRef.current = false;
       setDeleting(false);
@@ -1467,11 +1611,11 @@ export default function CleaningScreen({ route, navigation }) {
     const measured = { ...cleanedRef.current };
     // Persist the final in-group position before the session object goes.
     if (session && !session.ephemeral && !finish) {
-      sessionManager.saveProgress({ photoIndex: piRef.current });
+      sessionManager.saveProgress({ photoIndex: piRef.current }, mediaType);
     }
     (async () => {
       try {
-        if (viewed > 0) await recordViewed('photo', viewed);
+        if (viewed > 0) await recordViewed(mediaType, viewed);
         // Reviewed ids are coalesced in memory (see reviewedStore) — leaving
         // the screen is the point at which they must be on disk.
         await reviewedStore.flushReviewed();
@@ -1514,9 +1658,35 @@ export default function CleaningScreen({ route, navigation }) {
   }, [navigation]);
 
   // ---- Render ----
+  if (loadError) {
+    return (
+      <SafeAreaView
+        edges={['top', 'left', 'right']}
+        style={[styles.center, { backgroundColor: colors.background }]}
+      >
+        <Ionicons name="alert-circle-outline" size={46} color={colors.subtext} />
+        <Text style={[styles.doneSub, { color: colors.subtext, marginTop: 12 }]}>
+          {t('cleaning_load_failed')}
+        </Text>
+        <Pressable
+          style={[styles.doneBtn, { backgroundColor: colors.accent }]}
+          onPress={() => navigation.replace(route.name, route.params)}
+        >
+          <Text style={styles.doneBtnText}>{t('retry')}</Text>
+        </Pressable>
+      </SafeAreaView>
+    );
+  }
   if (loading) {
     return (
       <SafeAreaView edges={['top', 'left', 'right']} style={[styles.center, { backgroundColor: colors.background }]}>
+        <Pressable
+          onPress={() => navigation.goBack()}
+          hitSlop={10}
+          style={styles.loadingBack}
+        >
+          <Ionicons name="chevron-back" size={26} color={colors.text} />
+        </Pressable>
         <ActivityIndicator size="large" color={colors.accent} />
       </SafeAreaView>
     );
@@ -1551,7 +1721,7 @@ export default function CleaningScreen({ route, navigation }) {
       <SafeAreaView edges={['top', 'left', 'right']} style={[styles.center, { backgroundColor: colors.background }]}>
         <Ionicons name="images-outline" size={48} color={colors.subtext} />
         <Text style={[styles.doneSub, { color: colors.subtext, marginTop: 12 }]}>
-          {t('no_photos')}
+          {t(isVideo ? 'no_videos' : 'no_photos')}
         </Text>
         <Pressable
           style={[styles.doneBtn, { backgroundColor: colors.accent }]}
@@ -1612,6 +1782,8 @@ export default function CleaningScreen({ route, navigation }) {
         <View style={styles.photoArea}>
           {stack.map(({ asset, index }) => {
             const isCurrent = index === currentIdx;
+            const overrideUri = videoUriById[asset.id];
+            const cardAsset = overrideUri ? { ...asset, uri: overrideUri } : asset;
             return (
               <StackLayer
                 key={asset.id}
@@ -1623,8 +1795,23 @@ export default function CleaningScreen({ route, navigation }) {
                 dragId={dragId}
               >
                 <PhotoCard
-                  asset={asset}
+                  key={`${asset.id}:${cardAsset.uri}`}
+                  asset={cardAsset}
                   inactive={!isCurrent}
+                  active={
+                    isCurrent &&
+                    appActive &&
+                    !showConfirm &&
+                    !showExif &&
+                    !showSimilar &&
+                    !showZoom &&
+                    !showMove
+                  }
+                  onLoadError={
+                    isCurrent && asset.mediaType === 'video'
+                      ? () => handleVideoLoadError(cardAsset)
+                      : undefined
+                  }
                   isFavorite={isFavorite(asset.id)}
                   marked={markedIds.has(asset.id)}
                   sizeLabel={isCurrent ? sizeLabelFor(asset) : null}
@@ -1774,6 +1961,7 @@ export default function CleaningScreen({ route, navigation }) {
 const styles = StyleSheet.create({
   screen: { flex: 1, paddingHorizontal: 16 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  loadingBack: { position: 'absolute', left: 18, top: 18, zIndex: 2 },
   topBar: {
     flexDirection: 'row',
     justifyContent: 'space-between',

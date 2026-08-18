@@ -19,7 +19,9 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * photoo-style in-place photo moving.
@@ -542,6 +544,11 @@ class PhotoMoveModule : Module() {
         target = File(destDir, "${source.nameWithoutExtension}_$n.${source.extension}")
         n++
       }
+      // Never let FileOutputStream truncate an existing user file when the
+      // bounded collision search is exhausted.
+      if (target.exists()) {
+        return mapOf("id" to idStr, "ok" to false, "error" to "name_collision")
+      }
       dest = target
 
       val originalMtime = source.lastModified()
@@ -583,16 +590,27 @@ class PhotoMoveModule : Module() {
         return mapOf("id" to idStr, "ok" to false, "error" to "move_failed")
       }
 
-      // Re-index both paths: the old entry disappears, the new one is
-      // created from the SAME bytes (EXIF taken-date) and SAME mtime.
+      // Re-index both paths and wait briefly for the destination callback.
+      // A filesystem move normally creates a NEW MediaStore id; returning
+      // the old id made immediate undo/delete target an entry that no longer
+      // existed.
+      val scanLatch = CountDownLatch(1)
+      var newId: String? = null
       MediaScannerConnection.scanFile(
         context,
         arrayOf(oldPath, target.absolutePath),
         null,
-        null
+        { path, uri ->
+          if (path == target.absolutePath) {
+            newId = uri?.lastPathSegment
+            scanLatch.countDown()
+          }
+        }
       )
+      scanLatch.await(5, TimeUnit.SECONDS)
       mapOf(
         "id" to idStr,
+        "newId" to (newId ?: idStr),
         "ok" to true,
         "newPath" to target.absolutePath,
         "oldPath" to oldPath,

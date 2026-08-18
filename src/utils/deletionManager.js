@@ -3,7 +3,7 @@ import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as trashManager from './trashManager';
 import { getAssetSizes, pruneLibraryIndex } from './albumHelpers';
-import { log } from './logger';
+import { log, logSync } from './logger';
 
 /**
  * Delete a WHOLE BATCH of assets with a SINGLE media-library call — one
@@ -24,7 +24,7 @@ import { log } from './logger';
  */
 export async function batchDelete(assets, { useRecycleBin = false } = {}) {
   if (!assets || assets.length === 0) {
-    return { count: 0, bytes: 0, deletedIds: [], skipped: 0 };
+    return { count: 0, bytes: 0, bytesById: {}, deletedIds: [], skipped: 0 };
   }
 
   // ONE MediaStore query for the whole batch. The old per-asset loop cost a
@@ -40,6 +40,7 @@ export async function batchDelete(assets, { useRecycleBin = false } = {}) {
 
   let deletable = assets;
   let skipped = 0;
+  const trashEntries = [];
 
   if (Platform.OS === 'android' && useRecycleBin) {
     // The recycle bin COPIES each file before deletion, so it needs as much
@@ -65,15 +66,18 @@ export async function batchDelete(assets, { useRecycleBin = false } = {}) {
       // A null entry means the backup did NOT happen. Deleting anyway is
       // how photos used to disappear permanently while the UI promised a
       // 30-day recovery window.
-      const entry = await trashManager.moveToTrash(asset);
-      if (entry) deletable.push(asset);
+      const entry = await trashManager.moveToTrash(asset, sizeOf(asset));
+      if (entry) {
+        deletable.push(asset);
+        trashEntries.push(entry);
+      }
       else skipped++;
     }
     if (skipped > 0) {
       log('delete', `${skipped}/${assets.length} not backed up — kept`);
     }
     if (deletable.length === 0) {
-      return { count: 0, bytes: 0, deletedIds: [], skipped };
+      return { count: 0, bytes: 0, bytesById: {}, deletedIds: [], skipped };
     }
   }
 
@@ -82,26 +86,30 @@ export async function batchDelete(assets, { useRecycleBin = false } = {}) {
   // dialog on some paths, scoped-storage refusal, partial failure). Treating
   // that as success marked photos as cleaned, cleared their marks and
   // inflated the "space freed" stat while the files were still there.
-  const ok = await MediaLibrary.deleteAssetsAsync(ids);
+  await logSync('delete', `batch start count=${ids.length} recycle=${useRecycleBin}`);
+  let ok;
+  try {
+    ok = await MediaLibrary.deleteAssetsAsync(ids);
+  } catch (e) {
+    if (trashEntries.length > 0) {
+      await trashManager.removeManyFromTrash(trashEntries).catch(() => {});
+    }
+    throw e;
+  }
   if (!ok) {
-    if (Platform.OS === 'android' && useRecycleBin) {
-      // Nothing was deleted, so the backups are duplicates — drop them or
-      // the same photo shows up in both the library and the recycle bin.
-      await trashManager
-        .removeManyFromTrash(
-          (await trashManager.listTrash()).filter((e) => ids.includes(e.id))
-        )
-        .catch(() => {});
+    if (trashEntries.length > 0) {
+      await trashManager.removeManyFromTrash(trashEntries).catch(() => {});
     }
     throw new Error('delete-rejected');
   }
 
   const bytes = deletable.reduce((sum, a) => sum + sizeOf(a), 0);
+  const bytesById = Object.fromEntries(deletable.map((a) => [a.id, sizeOf(a)]));
   // Prune the deleted ids out of the cached library scan rather than dropping
   // it: a full rescan costs ~5.5s of JS-thread time and would be paid after
   // EVERY confirmed group, stalling the analyser mid-session.
   pruneLibraryIndex(ids);
-  return { count: deletable.length, bytes, deletedIds: ids, skipped };
+  return { count: deletable.length, bytes, bytesById, deletedIds: ids, skipped };
 }
 
 /** Single-asset convenience wrapper around batchDelete. */

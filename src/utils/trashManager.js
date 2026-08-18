@@ -4,15 +4,15 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { readJSON, withLock, utf8ByteLength, MAX_VALUE_BYTES } from './safeStore';
+import * as PhotoMove from '../../modules/photo-move';
 
 const TRASH_DIR = FileSystem.documentDirectory + 'trash/';
 const INDEX_KEY = '@mediacleaner/trash_index';
 export const RETENTION_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
-// The index is the ONLY record of what is in trash/: if it overflows
-// Android's silent ~2 MB per-value limit the whole recycle bin disappears
-// AND the copied files become unreachable garbage. Cap it like every other
-// large writer in this codebase.
+// The index is the ONLY record of what is in trash/: never silently drop old
+// rows, because their backing files would become unreachable garbage. When a
+// new row would exceed either cap, reject that backup and keep the source.
 const MAX_ENTRIES = 4000;
 
 async function ensureDir() {
@@ -34,15 +34,10 @@ async function readIndex() {
 }
 
 async function writeIndex(index) {
-  let list = index;
-  if (list.length > MAX_ENTRIES) list = list.slice(0, MAX_ENTRIES);
-  let payload = JSON.stringify(list);
-  // Shed oldest entries until the payload fits rather than let the write be
-  // silently dropped.
-  while (utf8ByteLength(payload) > MAX_VALUE_BYTES && list.length > 1) {
-    list = list.slice(0, Math.floor(list.length * 0.8));
-    payload = JSON.stringify(list);
-  }
+  const list = index;
+  if (list.length > MAX_ENTRIES) return false;
+  const payload = JSON.stringify(list);
+  if (utf8ByteLength(payload) > MAX_VALUE_BYTES) return false;
   try {
     await AsyncStorage.setItem(INDEX_KEY, payload);
     return true;
@@ -57,7 +52,7 @@ async function writeIndex(index) {
  *
  * A null return MUST block the caller's deletion — see deletionManager.
  */
-export async function moveToTrash(asset) {
+export async function moveToTrash(asset, expectedSize = 0) {
   let dest = null;
   try {
     await ensureDir();
@@ -70,7 +65,8 @@ export async function moveToTrash(asset) {
     const stat = await FileSystem.getInfoAsync(dest, { size: true });
     // A short write (disk filled up mid-copy) must not be reported as a
     // successful backup — the original is about to be deleted forever.
-    if (!stat.exists || !stat.size) {
+    const sourceSize = expectedSize || info.fileSize || info.size || 0;
+    if (!stat.exists || !stat.size || (sourceSize > 0 && stat.size !== sourceSize)) {
       await FileSystem.deleteAsync(dest, { idempotent: true }).catch(() => {});
       return null;
     }
@@ -82,6 +78,13 @@ export async function moveToTrash(asset) {
       deletedAt: new Date().getTime(),
       fileUri: dest,
       creationTime: info.creationTime || 0,
+      modificationTime: info.modificationTime || 0,
+      originalUri: src,
+      originalAlbumId: info.albumId || asset.albumId || null,
+      originalDir:
+        typeof src === 'string' && src.startsWith('file://')
+          ? src.slice(7).replace(/[\\/][^\\/]+$/, '')
+          : null,
     };
     const stored = await withLock(INDEX_KEY, async () => {
       const { ok, index } = await readIndex();
@@ -124,10 +127,28 @@ export async function listTrash() {
 }
 
 /** Restore a trash entry back into the media library. */
-export async function restoreFromTrash(entry) {
-  const asset = await MediaLibrary.createAssetAsync(entry.fileUri);
+export async function restoreFromTrash(entry, { remove = true } = {}) {
+  let asset = await MediaLibrary.createAssetAsync(entry.fileUri);
+  if (
+    entry.originalDir &&
+    PhotoMove.hasNativeMove() &&
+    PhotoMove.hasAllFilesPermission()
+  ) {
+    try {
+      const [moved] = await PhotoMove.moveToAlbum(
+        [asset.id],
+        entry.originalAlbumId || 'Restored',
+        entry.originalDir
+      );
+      if (moved?.ok && moved.newId && moved.newId !== asset.id) {
+        asset = { ...asset, id: moved.newId, uri: `file://${moved.newPath}` };
+      }
+    } catch (e) {
+      // Older binaries restore to the platform's default media directory.
+    }
+  }
   // The photo is back in the library, so the internal copy is redundant.
-  await removeFromTrash(entry);
+  if (remove) await removeFromTrash(entry);
   return asset;
 }
 

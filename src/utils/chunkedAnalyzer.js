@@ -17,6 +17,7 @@ const METRICS_KEY = 'analysis_metrics_v2'; // GLOBAL per-asset metric store
 const SIMILAR_THRESHOLD = 8; // photoo uses 7; +1 for our decode variance
 const SIMILAR_TIME_WINDOW_MS = 120 * 1000; // only compare shots ≤2min apart
 const MAX_HASHED = 3000;
+const METRIC_VERSION = 3;
 // Each parallel decode holds a FULL-RESOLUTION bitmap natively while it is
 // downscaled — 6 concurrent 48MP photos ≈ >1GB peak and OOM-kills the app
 // on big libraries. Keep the spike bounded. photoo-style adaptive value:
@@ -94,6 +95,10 @@ class ChunkedAnalyzer {
     this.suspended = false; // e.g. while a cleaning session is active
     this.metrics = null; // id -> {hash, sharpness, brightness}
     this._metricsDirty = false;
+    this._metricsGeneration = 0;
+    this._persistPromise = null;
+    this._persistRetryTimer = null;
+    this._persistRetryCount = 0;
     this._lastPersist = 0;
     this.state = {
       running: false,
@@ -129,58 +134,108 @@ class ChunkedAnalyzer {
    */
   async _persistMetrics(keep = null) {
     if (!this.metrics || !this._metricsDirty) return;
+    if (this._persistPromise) return this._persistPromise;
+    const generation = this._metricsGeneration;
     this._metricsDirty = false;
     this._lastPersist = new Date().getTime();
-    try {
-      let json = JSON.stringify(this.metrics);
-      if (json.length > MAX_METRIC_BYTES) {
-        const keys = Object.keys(this.metrics);
-        const perEntry = json.length / Math.max(1, keys.length);
-        let toDrop = keys.length - Math.floor(MAX_METRIC_BYTES / perEntry);
-        let dropped = 0;
-        // Pass 1: oldest first, but never something in active use.
-        for (const k of keys) {
-          if (toDrop <= 0) break;
-          if (keep && keep.has(k)) continue;
-          delete this.metrics[k];
-          toDrop--;
-          dropped++;
-        }
-        // Pass 2: still over budget because everything is in use. Dropping
-        // in-use entries costs a re-decode, but writing an oversized value
-        // loses the ENTIRE store, which costs all of them.
-        if (toDrop > 0) {
-          for (const k of Object.keys(this.metrics)) {
+    const run = (async () => {
+      let succeeded = false;
+      try {
+        let json = JSON.stringify(this.metrics);
+        if (json.length > MAX_METRIC_BYTES) {
+          const keys = Object.keys(this.metrics);
+          const perEntry = json.length / Math.max(1, keys.length);
+          let toDrop = keys.length - Math.floor(MAX_METRIC_BYTES / perEntry);
+          let dropped = 0;
+          // Pass 1: oldest first, but never something in active use.
+          for (const k of keys) {
             if (toDrop <= 0) break;
+            if (keep && keep.has(k)) continue;
             delete this.metrics[k];
             toDrop--;
             dropped++;
           }
+        // Pass 2: still over budget because everything is in use. Dropping
+        // in-use entries costs a re-decode, but writing an oversized value
+        // loses the ENTIRE store, which costs all of them.
+          if (toDrop > 0) {
+            for (const k of Object.keys(this.metrics)) {
+              if (toDrop <= 0) break;
+              delete this.metrics[k];
+              toDrop--;
+              dropped++;
+            }
+          }
+          json = JSON.stringify(this.metrics);
+          log(
+            'analysis',
+            `metrics evicted ${dropped}, kept ${Object.keys(this.metrics).length}`
+          );
         }
-        json = JSON.stringify(this.metrics);
-        log(
-          'analysis',
-          `metrics evicted ${dropped}, kept ${Object.keys(this.metrics).length}`
-        );
+        await AsyncStorage.setItem(METRICS_KEY, json);
+        succeeded = true;
+      } catch (e) {
+        // Retry later; dropping dirty here would lose the completed pass.
+      } finally {
+        if (!succeeded || generation !== this._metricsGeneration) {
+          this._metricsDirty = true;
+        }
       }
-      await AsyncStorage.setItem(METRICS_KEY, json);
-    } catch (e) {
-      // best effort
+      return succeeded;
+    })();
+    this._persistPromise = run;
+    let succeeded = false;
+    try {
+      succeeded = await run;
+    } finally {
+      if (this._persistPromise === run) this._persistPromise = null;
     }
+    if (succeeded) {
+      this._persistRetryCount = 0;
+      if (this._metricsDirty) await this._persistMetrics(keep);
+    } else if (
+      this._metricsDirty &&
+      !this._persistRetryTimer &&
+      this._persistRetryCount < 3
+    ) {
+      const delay = Math.min(8000, 1000 * 2 ** this._persistRetryCount);
+      this._persistRetryCount++;
+      this._persistRetryTimer = setTimeout(() => {
+        this._persistRetryTimer = null;
+        this._persistMetrics(keep).catch(() => {});
+      }, delay);
+    }
+  }
+
+  _metricMatches(asset, metric) {
+    return !!(
+      metric &&
+      metric.v === METRIC_VERSION &&
+      Number(metric.modificationTime || 0) === Number(asset.modificationTime || 0) &&
+      Number(metric.width || 0) === Number(asset.width || 0) &&
+      Number(metric.height || 0) === Number(asset.height || 0)
+    );
   }
 
   /** Metrics for one asset — instant when already analyzed. */
   async metricsFor(asset) {
     const store = await this._loadMetrics();
-    if (store[asset.id]) return store[asset.id];
+    if (this._metricMatches(asset, store[asset.id])) return store[asset.id];
     const m = await analyzePixels(asset.localUri || asset.uri);
-    store[asset.id] = m;
+    store[asset.id] = {
+      ...m,
+      v: METRIC_VERSION,
+      modificationTime: asset.modificationTime || 0,
+      width: asset.width || 0,
+      height: asset.height || 0,
+    };
+    this._metricsGeneration++;
     this._metricsDirty = true;
     // Throttled: this is called in a loop by the burst screen, and an
     // unconditional write there meant one full-store serialisation PER PHOTO.
     const now = new Date().getTime();
     if (now - (this._lastPersist || 0) > PERSIST_INTERVAL_MS) {
-      this._persistMetrics(); // fire & forget
+      this._persistMetrics().catch(() => {}); // best effort, retry on next pass
     }
     return m;
   }
@@ -235,10 +290,15 @@ class ChunkedAnalyzer {
       const fp = await getAlbumFingerprint(albumId, mediaType);
       const stale =
         fp.assetCount !== cache.assetCount ||
-        fp.latestModificationTime !== cache.latestModificationTime;
+        fp.latestModificationTime !== cache.latestModificationTime ||
+        fp.newestId !== cache.newestId ||
+        fp.oldestId !== cache.oldestId ||
+        fp.edgeIds !== cache.edgeIds;
       return { cache, stale };
     } catch (e) {
-      return { cache, stale: false };
+      // Freshness is unknown. Never bless a deletion suggestion as current
+      // when the MediaStore query that verifies it failed.
+      return { cache, stale: true };
     }
   }
 
@@ -255,12 +315,13 @@ class ChunkedAnalyzer {
         }
       }
 
-      if (this.current && this.current.albumId === albumId && !this.current.cancelled) {
+      const key = `${mediaType}/${albumId}`;
+      if (this.current && this.current.key === key && !this.current.cancelled) {
         this.current.resolvers.push(resolve);
         if (onProgress) this.current.progressCbs.push(onProgress);
         return;
       }
-      const queued = this.queue.find((j) => j.albumId === albumId);
+      const queued = this.queue.find((j) => j.key === key && !j.cancelled);
       if (queued) {
         queued.resolvers.push(resolve);
         if (onProgress) queued.progressCbs.push(onProgress);
@@ -268,17 +329,22 @@ class ChunkedAnalyzer {
       }
 
       const job = {
+        key,
         albumId,
         mediaType,
         resolvers: [resolve],
         progressCbs: onProgress ? [onProgress] : [],
         cancelled: false,
         pauseRequested: false,
+        queuedForResume: false,
       };
 
       if (this.current) {
         this.current.pauseRequested = true;
-        this.queue.push(this.current);
+        if (!this.current.queuedForResume) {
+          this.current.queuedForResume = true;
+          this.queue.push(this.current);
+        }
         this.queue.unshift(job);
       } else {
         this.queue.push(job);
@@ -319,6 +385,7 @@ class ChunkedAnalyzer {
     const job = this.queue.shift();
     this.current = job;
     job.pauseRequested = false;
+    job.queuedForResume = false;
     await this._run(job);
   }
 
@@ -338,7 +405,9 @@ class ChunkedAnalyzer {
       // Only photos we have NOT seen before need pixel work — everything
       // already in the global store is free.
       const targets =
-        mediaType === 'photo' ? scope.filter((a) => !store[a.id]) : [];
+        mediaType === 'photo'
+          ? scope.filter((a) => !this._metricMatches(a, store[a.id]))
+          : [];
       const total = targets.length;
       log(
         'analysis',
@@ -348,6 +417,7 @@ class ChunkedAnalyzer {
       this._emit({ running: true, albumId, mediaType, done: 0, total });
 
       let i = 0;
+      let failed = 0;
       while (i < total) {
         if (job.cancelled) {
           await this._persistMetrics(scopeIds); // keep what we got
@@ -376,12 +446,23 @@ class ChunkedAnalyzer {
           await Promise.all(
             batch.map(async (a) => {
               try {
-                store[a.id] = await analyzePixels(a.uri);
+                const metric = await analyzePixels(a.localUri || a.uri);
+                store[a.id] = {
+                  ...metric,
+                  v: METRIC_VERSION,
+                  modificationTime: a.modificationTime || 0,
+                  width: a.width || 0,
+                  height: a.height || 0,
+                };
               } catch (e) {
-                store[a.id] = { hash: null, sharpness: 0, brightness: null };
+                // Do not persist a permanent tombstone for a transient iCloud
+                // or decoder failure. The next pass must be allowed to retry.
+                delete store[a.id];
+                failed++;
               }
             })
           );
+          this._metricsGeneration++;
           this._metricsDirty = true;
           i += batch.length;
           // THERMAL DUTY CYCLE, not just a yield. Decoding back-to-back keeps
@@ -457,6 +538,9 @@ class ChunkedAnalyzer {
           const bySize = new Map();
           for (const a of members) {
             const size = sizeMap[a.id] || 0;
+            // Unknown is not a size. Grouping all failed lookups under zero
+            // falsely promotes visually identical files to exact duplicates.
+            if (!(size > 0)) continue;
             if (!bySize.has(size)) bySize.set(size, []);
             bySize.get(size).push(a.id);
           }
@@ -472,21 +556,31 @@ class ChunkedAnalyzer {
         mediaType,
         assetCount: fp.assetCount,
         latestModificationTime: fp.latestModificationTime,
+        newestId: fp.newestId,
+        oldestId: fp.oldestId,
+        edgeIds: fp.edgeIds,
         createdAt: new Date().getTime(),
         clusters,
         bursts,
         lowQuality,
         duplicates, // Array<string[]> — exact-duplicate id groups
       };
-      await AsyncStorage.setItem(
-        this.cacheKey(albumId, mediaType),
-        JSON.stringify(result)
-      );
+      if (failed === 0) {
+        await AsyncStorage.setItem(
+          this.cacheKey(albumId, mediaType),
+          JSON.stringify(result)
+        );
+      } else {
+        // A previous cache is now stale but has the same fingerprint as this
+        // partial run. Remove it so the next visit retries failed assets.
+        await AsyncStorage.removeItem(this.cacheKey(albumId, mediaType));
+      }
       log(
         'analysis',
         `done ${albumId} in ${Math.round((new Date().getTime() - startedAt) / 1000)}s ` +
           `durationMs=${new Date().getTime() - startedAt} ` +
-          `clusters=${clusters.length} low=${lowQuality.length} dupes=${duplicates.length}`
+          `clusters=${clusters.length} low=${lowQuality.length} dupes=${duplicates.length} ` +
+          `failed=${failed}`
       );
       job.resolvers.forEach((r) => r(result));
       finished = true;

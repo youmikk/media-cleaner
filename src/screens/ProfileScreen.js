@@ -14,9 +14,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSettings } from '../context/SettingsContext';
-import { useApp } from '../context/AppContext';
+import { useFavorites, useStats, useTrash } from '../context/AppContext';
 import SuggestionCard from '../components/SuggestionCard';
 import StorageChart from '../components/StorageChart';
 import OptionPicker from '../components/OptionPicker';
@@ -33,6 +32,7 @@ import {
 } from '../utils/albumHelpers';
 import analyzer from '../utils/chunkedAnalyzer';
 import * as suggestionStore from '../utils/suggestionStore';
+import * as suggestionCache from '../utils/suggestionCache';
 import * as statsManager from '../utils/statsManager';
 import * as cacheManager from '../utils/cacheManager';
 import { groupBursts } from '../utils/burstDetection';
@@ -75,10 +75,20 @@ try {
 const GITHUB_URL = 'https://github.com/youmikk/media-cleaner';
 const SUPPORT_EMAIL = 'support@example.com';
 const VERSION = `v${APP_VERSION}`;
-const SUGGESTIONS_KEY = 'analysis_suggestions_v2';
-const SUGGESTIONS_TTL = 24 * 60 * 60 * 1000; // refresh daily
 const NINETY_DAYS = 90 * 24 * 60 * 60 * 1000;
 const SIZE_SCAN_CAP = 300;
+const UPDATE_CHECK_TIMEOUT_MS = 15000;
+
+function withDeadline(promise, deadline) {
+  const remaining = Math.max(1, deadline - Date.now());
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('update check timed out')), remaining);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
 
 /**
  * Profile: smart suggestions, storage chart, usage stats, recycle bin,
@@ -86,7 +96,9 @@ const SIZE_SCAN_CAP = 300;
  */
 export default function ProfileScreen({ navigation }) {
   const { colors, t, settings, setSetting, isAndroid } = useSettings();
-  const { stats, trash, refreshTrash } = useApp();
+  const { stats } = useStats();
+  const { favorites } = useFavorites();
+  const { trash, refreshTrash } = useTrash();
 
   useEffect(() => {
     diagLog('profile', 'mounted');
@@ -100,6 +112,7 @@ export default function ProfileScreen({ navigation }) {
   });
   const [expandedStat, setExpandedStat] = useState(null);
   const [analysisState, setAnalysisState] = useState(null);
+  const [suggestionProgress, setSuggestionProgress] = useState(null);
   const [reviewedSuggestions, setReviewedSuggestions] = useState({
     largest: [],
     screenshots: [],
@@ -230,37 +243,38 @@ export default function ProfileScreen({ navigation }) {
     }
   }, [analysisState?.running, loadAnalysisCache]);
 
-  // ---- Smart suggestions (cached, refreshed daily) ----
-  useEffect(() => {
-    let alive = true;
-    (async () => {
+  // ---- Smart suggestions (cached by the actual library fingerprint) ----
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      (async () => {
       try {
         // Paint first; the daily rescan below is HEAVY (full metadata
         // fetch + hundreds of file stats).
         await new Promise((r) => setTimeout(r, 600));
         if (!alive) return;
-        const raw = await AsyncStorage.getItem(SUGGESTIONS_KEY);
-        if (raw) {
-          const cached = JSON.parse(raw);
-          if (
-            alive &&
-            new Date().getTime() - cached.createdAt < SUGGESTIONS_TTL
-          ) {
-            setSuggestions(cached.data);
-            return;
-          }
+        const fingerprint = await suggestionCache.getLibraryFingerprint();
+        if (!alive) return;
+        const cached = await suggestionCache.getSuggestions(fingerprint);
+        if (cached) {
+          setSuggestions(cached);
+          return;
         }
+        setSuggestionProgress({ done: 0, total: 4 });
 
         // 1) Largest files: photos + videos, sizes sampled on recent assets.
         const [photos, videos] = await Promise.all([
           getAssets(ALL_ALBUM_ID, 'photo'),
           getAssets(ALL_ALBUM_ID, 'video'),
         ]);
+        if (!alive) return;
+        setSuggestionProgress({ done: 1, total: 4 });
         const pool = [...photos.slice(0, SIZE_SCAN_CAP), ...videos.slice(0, SIZE_SCAN_CAP)];
         // ONE batched size query (native module) when available — replaces
         // hundreds of per-file stat calls.
         const sizeMap = await getAssetSizes(pool);
         if (!alive) return;
+        setSuggestionProgress({ done: 2, total: 4 });
         const sized = pool.map((a) => ({
           id: a.id,
           uri: a.uri,
@@ -288,6 +302,8 @@ export default function ProfileScreen({ navigation }) {
             )
             .map((s) => ({ id: s.id, uri: s.uri }));
         }
+        if (!alive) return;
+        setSuggestionProgress({ done: 3, total: 4 });
 
         // 4) Duplicate videos: same duration (±0.5s), resolution and size.
         const videoDupes = [];
@@ -324,18 +340,19 @@ export default function ProfileScreen({ navigation }) {
         };
         if (!alive) return;
         setSuggestions(data);
-        await AsyncStorage.setItem(
-          SUGGESTIONS_KEY,
-          JSON.stringify({ createdAt: new Date().getTime(), data })
-        );
+        setSuggestionProgress({ done: 4, total: 4 });
+        await suggestionCache.saveSuggestions(data, fingerprint);
       } catch (e) {
         // permissions or IO issue — suggestions stay empty
+      } finally {
+        if (alive) setSuggestionProgress(null);
       }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, []);
+      })();
+      return () => {
+        alive = false;
+      };
+    }, [])
+  );
 
   // ---- Update check: OTA first (silent hot update), then GitHub APK ----
   const updatesState = useUpdatesHook ? useUpdatesHook() : {};
@@ -343,8 +360,9 @@ export default function ProfileScreen({ navigation }) {
   const onCheckUpdate = async () => {
     if (checkingUpdate) return;
     setCheckingUpdate(true);
+    const deadline = Date.now() + UPDATE_CHECK_TIMEOUT_MS;
     try {
-      let ota = await checkOTA();
+      let ota = await withDeadline(checkOTA(), deadline);
       // Launch auto-check already downloaded it? Then the server says
       // "nothing newer" but a restart IS pending — treat as ready.
       if (ota !== 'applied' && updatesState.isUpdatePending) ota = 'applied';
@@ -352,7 +370,7 @@ export default function ProfileScreen({ navigation }) {
         // Show the changelog (from the repo) above the restart choice.
         let body = t('update_ota_ready');
         try {
-          const log = await fetchLatestChangelog();
+          const log = await withDeadline(fetchLatestChangelog(), deadline);
           if (log && Array.isArray(log.notes) && log.notes.length > 0) {
             body = `${log.notes.map((n) => `• ${n}`).join('\n')}\n\n${t(
               'update_ota_ready'
@@ -378,7 +396,7 @@ export default function ProfileScreen({ navigation }) {
         ]);
         return;
       }
-      const info = await checkGitHubRelease();
+      const info = await withDeadline(checkGitHubRelease(), deadline);
       if (info.hasUpdate) {
         // GitHub downloads crawl (or stall outright) on mainland networks,
         // so the accelerated link is offered first and the direct one kept
@@ -396,10 +414,12 @@ export default function ProfileScreen({ navigation }) {
         });
         Alert.alert(t('update_available', { version: info.version }), '', buttons);
       } else {
+        diagLog('update', `manual check: current ${APP_VERSION} is latest`);
         Alert.alert(t('check_update'), t('update_latest'));
       }
     } catch (e) {
-      Alert.alert(t('check_update'), t('update_latest'));
+      diagLog('update', `manual check failed: ${(e && e.message) || e}`);
+      Alert.alert(t('check_update'), t('update_check_failed'));
     } finally {
       setCheckingUpdate(false);
     }
@@ -504,18 +524,12 @@ export default function ProfileScreen({ navigation }) {
   };
 
   const cleanAssets = (assetIds, title, sizesById = null, suggestionKey = null) => {
-    navigation.navigate('PhotosTab', {
-      screen: 'Cleaning',
-      params: {
-        albumId: ALL_ALBUM_ID,
-        albumTitle: title,
-        assetIds, // group size comes from the global setting
-        sizesById, // shown as a size badge on each photo (Largest Files)
-        // Which suggestion this session came from. CleaningScreen records the
-        // reviewed ids under this name so the card stops offering the same
-        // photos once they have been dealt with.
-        suggestionKey,
-      },
+    navigation.navigate('SmartCleaning', {
+      albumId: ALL_ALBUM_ID,
+      albumTitle: title,
+      assetIds,
+      sizesById,
+      suggestionKey,
     });
   };
 
@@ -610,6 +624,9 @@ export default function ProfileScreen({ navigation }) {
           total: analysisState.total || 0,
         }
       : null;
+  const activeSuggestionProgress = suggestionProgress
+    ? { ...suggestionProgress, label: t('analyzing_short') }
+    : lowQualityProgress;
 
   const suggestionCards = [
     {
@@ -622,6 +639,7 @@ export default function ProfileScreen({ navigation }) {
           description={t('suggestion_largest_desc')}
           thumbnailUri={visibleSuggestions.largest[0]?.uri}
           count={visibleSuggestions.largest.length}
+          progress={activeSuggestionProgress}
           onClean={() => cleanAssets(visibleSuggestions.largest.map((a) => a.id), t('suggestion_largest'), Object.fromEntries(visibleSuggestions.largest.map((a) => [a.id, a.size])), 'largest')}
         />
       ),
@@ -636,6 +654,7 @@ export default function ProfileScreen({ navigation }) {
           description={t('suggestion_burst_desc')}
           thumbnailUri={suggestions.bursts[0]?.thumb}
           count={suggestions.bursts.length}
+          progress={activeSuggestionProgress}
           onClean={() => navigation.navigate('BurstClean', { groups: suggestions.bursts.map((b) => ({ ids: b.ids })) })}
         />
       ),
@@ -650,6 +669,7 @@ export default function ProfileScreen({ navigation }) {
           description={t('suggestion_screenshots_desc')}
           thumbnailUri={visibleSuggestions.screenshots[0]?.uri}
           count={visibleSuggestions.screenshots.length}
+          progress={activeSuggestionProgress}
           onClean={() => cleanAssets(visibleSuggestions.screenshots.map((a) => a.id), t('suggestion_screenshots'), null, 'screenshots')}
         />
       ),
@@ -664,6 +684,7 @@ export default function ProfileScreen({ navigation }) {
           description={photoDupes.groups.length > 0 ? t('suggestion_dupes_desc') : t('lowquality_need_analysis')}
           thumbnailUri={photoDupes.thumb}
           count={photoDupes.groups.length}
+          progress={activeSuggestionProgress}
           onClean={() => navigation.navigate('BurstClean', { groups: photoDupes.groups.map((ids) => ({ ids })), mode: 'duplicate' })}
         />
       ),
@@ -678,6 +699,7 @@ export default function ProfileScreen({ navigation }) {
           description={t('suggestion_video_dupes_desc')}
           thumbnailUri={null}
           count={(suggestions.videoDupes || []).length}
+          progress={activeSuggestionProgress}
           onClean={() => navigation.navigate('BurstClean', { groups: suggestions.videoDupes, mode: 'duplicate' })}
         />
       ),
@@ -692,22 +714,21 @@ export default function ProfileScreen({ navigation }) {
           description={lowQuality.ids.length > 0 ? t('suggestion_lowquality_desc') : t('lowquality_need_analysis')}
           thumbnailUri={lowQuality.thumb}
           count={lowQuality.ids.length}
-          progress={lowQuality.ids.length === 0 ? lowQualityProgress : null}
+          progress={activeSuggestionProgress}
           onClean={() => cleanAssets(lowQuality.ids.slice(0, 500), t('suggestion_lowquality'), null, 'lowQuality')}
         />
       ),
     },
-    // Cards WITH a thumbnail come first. The comparator used to be
-    // `!b.thumb - !a.thumb`, which sorted them to the BACK — the sign was
-    // inverted, so the one card that could show a preview always ended up
-    // last. Array#sort is stable, so ties keep the authored order above.
-  ].sort((a, b) => Number(!a.thumb) - Number(!b.thumb));
+    // Keep authored order stable. Re-sorting as thumbnails arrive changes
+    // child positions during a horizontal gesture and snaps the list to item 1.
+  ];
 
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
       <ScrollView
         contentContainerStyle={{ paddingBottom: 120 }}
         showsVerticalScrollIndicator={false}
+        nestedScrollEnabled
       >
         <Text style={[styles.header, { color: colors.text }]}>
           {t('profile_title')}
@@ -715,13 +736,30 @@ export default function ProfileScreen({ navigation }) {
 
         {/* Smart suggestions */}
         <Section title={t('suggestions_title')}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <ScrollView
+            horizontal
+            nestedScrollEnabled
+            showsHorizontalScrollIndicator={false}
+          >
             {suggestionCards.map(({ key, node }) => React.cloneElement(node, { key }))}
           </ScrollView>
         </Section>
 
         {/* Tools: photography profile & compressor */}
         <Section title={t('tools_title')}>
+          <Pressable
+            style={[styles.binRow, { backgroundColor: colors.card, marginBottom: 10 }]}
+            onPress={() => navigation.navigate('Favorites')}
+          >
+            <Ionicons name="heart-outline" size={22} color={colors.heart} />
+            <Text style={[styles.rowLabel, { color: colors.text, flex: 1 }]}>
+              {t('my_favorites')}
+            </Text>
+            <Text style={{ color: colors.subtext, fontSize: 13 }}>
+              {Object.keys(favorites || {}).length}
+            </Text>
+            <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
+          </Pressable>
           <Pressable
             style={[styles.binRow, { backgroundColor: colors.card, marginBottom: 10 }]}
             onPress={() => navigation.navigate('Insights')}
@@ -865,18 +903,6 @@ export default function ProfileScreen({ navigation }) {
         {/* Settings */}
         <Section title={t('settings_title')}>
           <SubGroup title={t('settings_group_cleaning')}>
-            <OptionPicker
-              label={t('setting_group_size')}
-              value={settings.groupSize}
-              onChange={(v) => setSetting('groupSize', v)}
-              options={[5, 10, 15, 20].map((n) => ({ value: n, label: String(n) }))}
-            />
-            <OptionPicker
-              label={t('setting_group_size_videos')}
-              value={settings.videoGroupSize || 5}
-              onChange={(v) => setSetting('videoGroupSize', v)}
-              options={[5, 10, 15, 20].map((n) => ({ value: n, label: String(n) }))}
-            />
             <OptionPicker
               label={t('setting_order')}
               value={settings.order}

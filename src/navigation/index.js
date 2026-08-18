@@ -1,5 +1,4 @@
 import React from 'react';
-import { Platform } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import LiquidTabBar from '../components/LiquidTabBar';
@@ -13,24 +12,17 @@ import RecycleBinScreen from '../screens/RecycleBinScreen';
 import BurstCleanScreen from '../screens/BurstCleanScreen';
 import GalleryInsightsScreen from '../screens/GalleryInsightsScreen';
 import CompressScreen from '../screens/CompressScreen';
+import FavoritesScreen from '../screens/FavoritesScreen';
 
-// NATIVE bottom tabs (react-native-bottom-tabs → SwiftUI TabView): on
-// iOS 26 this is the REAL system floating Liquid Glass tab bar. Only
-// present in builds that include the native module — Expo Go and older
-// binaries fall back to the custom LiquidTabBar below.
-let createNativeBottomTabNavigator = null;
-try {
-  // eslint-disable-next-line global-require
-  createNativeBottomTabNavigator =
-    require('react-native-bottom-tabs/react-navigation').createNativeBottomTabNavigator;
-} catch (e) {
-  createNativeBottomTabNavigator = null;
-}
-
-const useNativeTabs = Platform.OS === 'ios' && !!createNativeBottomTabNavigator;
+// react-native-bottom-tabs 1.4 exposes a raw native TabView, not the React
+// Navigation adapter used by older releases. Requiring that missing subpath
+// breaks Metro at bundle time even inside try/catch, so this version uses the
+// custom navigator in every runtime. A future adapter integration can enable
+// this branch only after its native view and navigation contract are present.
+const useNativeTabs = false;
+const NativeTab = null;
 
 const Tab = createBottomTabNavigator();
-const NativeTab = useNativeTabs ? createNativeBottomTabNavigator() : null;
 const PhotosStack = createNativeStackNavigator();
 const VideosStack = createNativeStackNavigator();
 const ProfileStack = createNativeStackNavigator();
@@ -60,7 +52,10 @@ function VideosNavigator() {
       <VideosStack.Screen
         name="VideoCleaning"
         component={VideoCleaningScreen}
-        options={{ gestureEnabled: false }}
+        options={{
+          gestureEnabled: false,
+          presentation: useNativeTabs ? 'fullScreenModal' : 'card',
+        }}
       />
     </VideosStack.Navigator>
   );
@@ -78,6 +73,16 @@ function ProfileNavigator() {
   return (
     <ProfileStack.Navigator screenOptions={{ headerShown: false }}>
       <ProfileStack.Screen name="Profile" component={ProfileScreen} />
+      <ProfileStack.Screen
+        name="Favorites"
+        component={FavoritesScreen}
+        options={fullScreen}
+      />
+      <ProfileStack.Screen
+        name="SmartCleaning"
+        component={CleaningScreen}
+        options={{ ...fullScreen, gestureEnabled: false }}
+      />
       <ProfileStack.Screen
         name="RecycleBin"
         component={RecycleBinScreen}
