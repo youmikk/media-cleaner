@@ -82,6 +82,7 @@ export default function BurstCleanScreen({ route, navigation }) {
           // Thumbnails for video members — persistently CACHED: generated
           // once per video, instant on every later visit.
           for (const a of members) {
+            if (!alive) return;
             if (a.mediaType === 'video') {
               try {
                 const uri = await getVideoThumbnail(a);
@@ -96,6 +97,7 @@ export default function BurstCleanScreen({ route, navigation }) {
           // for photos the album analysis has already seen.
           const scored = [];
           for (const a of assets) {
+            if (!alive) return;
             try {
               const m = await analyzer.metricsFor(a);
               if (m && m.hash) scored.push({ ...a, score: m.sharpness, hash: m.hash });
@@ -198,13 +200,24 @@ export default function BurstCleanScreen({ route, navigation }) {
 
   if (sections === null || working) {
     return (
-      <SafeAreaView edges={['top', 'left', 'right']} style={[styles.center, { backgroundColor: colors.background }]}>
-        <ActivityIndicator size="large" color={colors.accent} />
-        {!working && progress.total > 0 && (
-          <Text style={[styles.progress, { color: colors.subtext }]}>
-            {t('computing_sharpness', progress)}
-          </Text>
+      <SafeAreaView edges={['top', 'left', 'right']} style={[styles.loadingScreen, { backgroundColor: colors.background }]}>
+        {!working && (
+          <Pressable
+            onPress={() => navigation.goBack()}
+            hitSlop={10}
+            style={styles.loadingBack}
+          >
+            <Ionicons name="chevron-back" size={26} color={colors.text} />
+          </Pressable>
         )}
+        <View style={styles.center}>
+          <ActivityIndicator size="large" color={colors.accent} />
+          {!working && progress.total > 0 && (
+            <Text style={[styles.progress, { color: colors.subtext }]}>
+              {t('computing_sharpness', progress)}
+            </Text>
+          )}
+        </View>
       </SafeAreaView>
     );
   }
@@ -323,6 +336,13 @@ export default function BurstCleanScreen({ route, navigation }) {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, paddingHorizontal: 16 },
+  loadingScreen: { flex: 1, paddingHorizontal: 16 },
+  loadingBack: {
+    width: 36,
+    height: 40,
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+  },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   progress: { marginTop: 12, fontSize: 13 },
   topBar: {

@@ -2,7 +2,7 @@ import { Platform } from 'react-native';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as trashManager from './trashManager';
-import { getAssetSizes, invalidateLibraryIndex } from './albumHelpers';
+import { getAssetSizes, pruneLibraryIndex } from './albumHelpers';
 import { log } from './logger';
 
 /**
@@ -97,8 +97,10 @@ export async function batchDelete(assets, { useRecycleBin = false } = {}) {
   }
 
   const bytes = deletable.reduce((sum, a) => sum + sizeOf(a), 0);
-  // The cached library scan now describes a library that no longer exists.
-  invalidateLibraryIndex();
+  // Prune the deleted ids out of the cached library scan rather than dropping
+  // it: a full rescan costs ~5.5s of JS-thread time and would be paid after
+  // EVERY confirmed group, stalling the analyser mid-session.
+  pruneLibraryIndex(ids);
   return { count: deletable.length, bytes, deletedIds: ids, skipped };
 }
 

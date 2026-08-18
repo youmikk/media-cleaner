@@ -65,6 +65,7 @@ export default function AlbumSelectScreen({ navigation }) {
   // Preview for the picked year/month — one scoped media-store query.
   const [rangeThumbs, setRangeThumbs] = useState(null);
   const [progressByAlbum, setProgressByAlbum] = useState({});
+  const [totalCounts, setTotalCounts] = useState({});
   const focusStartedAt = useRef(0);
   const firstThumbLogged = useRef(false);
 
@@ -112,11 +113,14 @@ export default function AlbumSelectScreen({ navigation }) {
       await reviewedStore.primeReviewed(albums.map((a) => a.id));
       if (!alive) return;
       const out = {};
+      const totals = {};
       for (const album of albums) {
         const total = album.id === ALL_ALBUM_ID ? allTotal : album.assetCount;
+        if (total !== undefined && total !== null) totals[album.id] = total;
         if (!total) continue;
         out[album.id] = reviewedStore.getProgressSync(album.id, total);
       }
+      setTotalCounts(totals);
       setProgressByAlbum(out);
     })().catch(() => {});
     return () => {
@@ -445,6 +449,7 @@ export default function AlbumSelectScreen({ navigation }) {
           albums={albums}
           selected={albumId}
           progressByAlbum={progressByAlbum}
+          totalCounts={totalCounts}
           onSelect={(a) => {
             if (a.id !== albumId) setSummary(null); // don't show stale thumbs
             setAlbumId(a.id);
@@ -493,6 +498,9 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
     alignItems: 'center',
     gap: 10,
+    // Kept in sync with AlbumSelectBase's CONTROLS_HEIGHT so the photo and
+    // video tabs centre their card stack at the same height.
+    minHeight: 46,
   },
   centerArea: {
     flex: 1,

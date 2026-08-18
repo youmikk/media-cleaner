@@ -9,7 +9,6 @@ import {
   View,
   Text,
   Pressable,
-  FlatList,
   StyleSheet,
   ActivityIndicator,
   useWindowDimensions,
@@ -21,6 +20,15 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { Image as ExpoImage } from 'expo-image';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  useDerivedValue,
+  withTiming,
+  runOnJS,
+  Easing,
+} from 'react-native-reanimated';
 import { useSettings } from '../context/SettingsContext';
 import { useApp } from '../context/AppContext';
 import VideoCard from '../components/VideoCard';
@@ -29,6 +37,8 @@ import EXIFModal from '../components/EXIFModal';
 import AlbumPicker from '../components/AlbumPicker';
 import AlbumChips from '../components/AlbumChips';
 import GroupConfirmSheet from '../components/GroupConfirmSheet';
+import MoveSheet from '../components/MoveSheet';
+import GlowingTrashBar from '../components/GlowingTrashBar';
 import { incrementUsage } from '../utils/albumUsage';
 import * as reviewedStore from '../utils/reviewedStore';
 import * as MediaLibrary from 'expo-media-library';
@@ -50,6 +60,7 @@ import {
   getAlbums,
   getAssets,
   getAlbumSnapshot,
+  getAlbumFingerprint,
   getCachedAssetList,
   saveCachedAssetList,
   moveAssetsToAlbum,
@@ -64,6 +75,30 @@ function formatDuration(seconds) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+const SWIPE_X = 70;
+const MOVE_THRESHOLD = 120;
+const FLICK_VELOCITY = -900;
+const EASE = { duration: 200, easing: Easing.out(Easing.cubic) };
+
+function VideoStackLayer({ asset, index, screenW, offset, ty, dragId, children }) {
+  const style = useAnimatedStyle(() => {
+    const x = index * screenW + offset.value;
+    return {
+      transform: [
+        { translateX: x },
+        { translateY: dragId.value === asset.id ? ty.value : 0 },
+      ],
+      opacity: Math.max(0.4, 1 - Math.min(1, Math.abs(x) / screenW) * 0.6),
+    };
+  }, [index, screenW, asset.id]);
+
+  return (
+    <Animated.View style={[StyleSheet.absoluteFill, style]}>
+      {children}
+    </Animated.View>
+  );
+}
+
 /**
  * Videos tab — GROUP-AT-A-TIME cleaning feed.
  * The feed only contains the CURRENT group (size from settings). When the
@@ -74,13 +109,14 @@ function formatDuration(seconds) {
 export default function VideoCleaningScreen({ navigation, route }) {
   const { colors, t, settings, recycleBinActive } = useSettings();
   const { recordCleaned, recordViewed, toggleFavorite, isFavorite } = useApp();
-  const { height } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const groupSize =
     route?.params?.groupSize || settings.videoGroupSize || settings.groupSize || 5;
   const initialAlbumId = route?.params?.albumId || ALL_ALBUM_ID;
 
   const [albums, setAlbums] = useState([]);
+  const [totalCounts, setTotalCounts] = useState({});
   const [albumId, setAlbumId] = useState(initialAlbumId);
   const [loading, setLoading] = useState(true);
   const [totalCount, setTotalCount] = useState(0);
@@ -93,18 +129,24 @@ export default function VideoCleaningScreen({ navigation, route }) {
   const [albumOverrides, setAlbumOverrides] = useState({});
   const [videoThumbs, setVideoThumbs] = useState({});
   const [showConfirm, setShowConfirm] = useState(false);
+  const [showMove, setShowMove] = useState(false);
   const [showExif, setShowExif] = useState(false);
   const [completed, setCompleted] = useState(false);
   const [focused, setFocused] = useState(false);
   const [finalStats, setFinalStats] = useState({ count: 0, bytes: 0 });
   const [videoProgress, setVideoProgress] = useState(0);
+  const [mediaHeight, setMediaHeight] = useState(0);
 
-  const listRef = useRef(null);
   const sessionRef = useRef(null);
   const cleanedRef = useRef({ count: 0, bytes: 0 });
   const viewedRef = useRef(new Set());
   const markStackRef = useRef([]);
   const finishedRef = useRef(false);
+  const offset = useSharedValue(0);
+  const ty = useSharedValue(0);
+  const dragId = useSharedValue('');
+  const viewportHeight = mediaHeight || height;
+  const deleteThreshold = viewportHeight * 0.22;
 
   const albumTitle = useMemo(() => {
     const a = albums.find((x) => x.id === albumId);
@@ -123,6 +165,25 @@ export default function VideoCleaningScreen({ navigation, route }) {
       .then(setAlbums)
       .catch(() => {});
   }, [t]);
+
+  useEffect(() => {
+    if (albums.length === 0) return undefined;
+    let alive = true;
+    (async () => {
+      const all = await getAlbumFingerprint(ALL_ALBUM_ID, 'video');
+      if (!alive) return;
+      const totals = { [ALL_ALBUM_ID]: all.assetCount || 0 };
+      albums.forEach((album) => {
+        if (album.id !== ALL_ALBUM_ID && album.assetCount != null) {
+          totals[album.id] = album.assetCount;
+        }
+      });
+      setTotalCounts(totals);
+    })().catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [albums]);
 
   // (Re)load whenever the album filter changes — restarts cleaning.
   useEffect(() => {
@@ -203,6 +264,28 @@ export default function VideoCleaningScreen({ navigation, route }) {
     [currentGroup, markedIds]
   );
   const current = visibleGroup[Math.min(index, Math.max(0, visibleGroup.length - 1))] || null;
+  const currentIndex = Math.min(index, Math.max(0, visibleGroup.length - 1));
+  const stack = useMemo(() => {
+    const out = [];
+    for (let i = currentIndex - 1; i <= currentIndex + 1; i++) {
+      if (i >= 0 && i < visibleGroup.length) {
+        out.push({ asset: visibleGroup[i], index: i });
+      }
+    }
+    return out;
+  }, [visibleGroup, currentIndex]);
+  const restOffset = -currentIndex * width;
+  const deleteProgress = useDerivedValue(() =>
+    Math.min(1, Math.max(0, -ty.value / Math.max(1, deleteThreshold)))
+  );
+
+  useEffect(() => {
+    const target = -currentIndex * width;
+    if (Math.abs(offset.value - target) > 0.5) offset.value = target;
+    dragId.value = '';
+    if (ty.value !== 0) ty.value = 0;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentIndex, visibleGroup.length, width]);
 
   useEffect(() => {
     if (current) {
@@ -213,6 +296,32 @@ export default function VideoCleaningScreen({ navigation, route }) {
     }
     setVideoProgress(0);
   }, [current]);
+
+  // Neighbour posters keep the stack responsive without mounting extra
+  // video players. The same cache is reused by the confirmation sheet.
+  useEffect(() => {
+    let alive = true;
+    const targets = stack
+      .map(({ asset }) => asset)
+      .filter((asset) => asset && !videoThumbs[asset.id]);
+    (async () => {
+      for (const asset of targets) {
+        try {
+          const uri = await getVideoThumbnail(asset);
+          if (!alive) return;
+          setVideoThumbs((currentThumbs) => ({
+            ...currentThumbs,
+            [asset.id]: uri,
+          }));
+        } catch (e) {
+          // A poster is optional; the player still has its own fallback.
+        }
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [stack, videoThumbs]);
 
   // Load-failure fallback WITHOUT touching live players: remount the card
   // with the MediaStore content:// uri; if that fails too, an unplayable
@@ -257,8 +366,108 @@ export default function VideoCleaningScreen({ navigation, route }) {
     setMarkedIds((s) => new Set(s).add(current.id));
     const remainingVisible = visibleGroup.length - 1;
     if (remainingVisible === 0) setShowConfirm(true);
-    else if (index >= remainingVisible) setIndex(remainingVisible - 1);
-  }, [current, visibleGroup.length, index]);
+    else if (currentIndex >= remainingVisible) {
+      setIndex(Math.max(0, remainingVisible - 1));
+    }
+  }, [current, visibleGroup.length, currentIndex]);
+
+  const undo = useCallback(() => {
+    const id = markStackRef.current.pop();
+    if (!id) return;
+    setMarkedIds((currentMarks) => {
+      const next = new Set(currentMarks);
+      next.delete(id);
+      return next;
+    });
+  }, []);
+
+  const endGroupRef = useRef(() => {});
+
+  const onSwipeNext = useCallback(() => {
+    if (currentIndex < visibleGroup.length - 1) {
+      setIndex(currentIndex + 1);
+    } else {
+      endGroupRef.current();
+    }
+  }, [currentIndex, visibleGroup.length]);
+
+  const onSwipePrev = useCallback(() => {
+    if (currentIndex > 0) setIndex(currentIndex - 1);
+  }, [currentIndex]);
+
+  const onSwipeDelete = useCallback(() => {
+    if (current) markCurrent();
+  }, [current, markCurrent]);
+
+  const onSwipeDown = useCallback(() => {
+    if (current) setShowMove(true);
+  }, [current]);
+
+  const gestureHandlersRef = useRef({});
+  gestureHandlersRef.current = {
+    next: onSwipeNext,
+    prev: onSwipePrev,
+    del: onSwipeDelete,
+    down: onSwipeDown,
+  };
+  const callNext = useCallback(() => gestureHandlersRef.current.next(), []);
+  const callPrev = useCallback(() => gestureHandlersRef.current.prev(), []);
+  const callDelete = useCallback(() => gestureHandlersRef.current.del(), []);
+  const callDown = useCallback(() => gestureHandlersRef.current.down(), []);
+  const currentId = current ? current.id : '';
+
+  const pan = Gesture.Pan()
+    .enabled(!showConfirm && !showMove && !!current)
+    .onStart(() => {
+      'worklet';
+      ty.value = 0;
+      dragId.value = currentId;
+    })
+    .onUpdate((event) => {
+      'worklet';
+      if (Math.abs(event.translationX) > Math.abs(event.translationY)) {
+        offset.value = restOffset + event.translationX;
+        ty.value = 0;
+      } else {
+        dragId.value = currentId;
+        ty.value = event.translationY;
+        offset.value = restOffset;
+      }
+    })
+    .onEnd((event) => {
+      'worklet';
+      const horizontal = Math.abs(event.translationX) > Math.abs(event.translationY);
+      if (horizontal) {
+        const goNext = event.translationX < -SWIPE_X || event.velocityX < -800;
+        const goPrev = event.translationX > SWIPE_X || event.velocityX > 800;
+        if (goNext && currentIndex < visibleGroup.length - 1) {
+          offset.value = withTiming(restOffset - width, { duration: 110 }, (finished) => {
+            if (finished) runOnJS(callNext)();
+          });
+        } else if (goPrev && currentIndex > 0) {
+          offset.value = withTiming(restOffset + width, { duration: 110 }, (finished) => {
+            if (finished) runOnJS(callPrev)();
+          });
+        } else if (goNext) {
+          offset.value = withTiming(restOffset, EASE);
+          runOnJS(callNext)();
+        } else {
+          offset.value = withTiming(restOffset, EASE);
+        }
+      } else if (
+        event.translationY < -deleteThreshold ||
+        (event.translationY < -60 && event.velocityY < FLICK_VELOCITY)
+      ) {
+        ty.value = withTiming(-viewportHeight, { duration: 140 }, (finished) => {
+          if (finished) runOnJS(callDelete)();
+        });
+      } else if (event.translationY > MOVE_THRESHOLD) {
+        ty.value = withTiming(0, EASE);
+        runOnJS(callDown)();
+      } else {
+        ty.value = withTiming(0, EASE);
+      }
+    });
 
   // Spare / re-mark from the confirm sheet and its full-screen viewer.
   const unmark = (id) => {
@@ -285,7 +494,6 @@ export default function VideoCleaningScreen({ navigation, route }) {
     setProcessedGroups((g) => g + 1);
     setIndex(0);
     setVideoProgress(0);
-    if (listRef.current) listRef.current.scrollToOffset({ offset: 0, animated: false });
   }, [currentGroup]);
 
   const [deleting, setDeleting] = useState(false);
@@ -341,6 +549,7 @@ export default function VideoCleaningScreen({ navigation, route }) {
     if (currentGroup.some((v) => stack.has(v.id))) setShowConfirm(true);
     else advanceGroup();
   }, [currentGroup, advanceGroup, showConfirm]);
+  endGroupRef.current = endGroup;
 
   const closeConfirm = () => {
     if (visibleGroup.length === 0) {
@@ -474,45 +683,10 @@ export default function VideoCleaningScreen({ navigation, route }) {
     settleSession();
   };
 
-  const onViewableItemsChanged = useRef(({ viewableItems }) => {
-    if (viewableItems.length > 0) setIndex(viewableItems[0].index ?? 0);
-  }).current;
-
-  // Swiping PAST the last video of the group ends the group (confirm sheet
-  // only if something is marked).
-  //
-  // The old test needed contentOffset to exceed the content height by 40px.
-  // That only ever happens with iOS rubber-banding: Android clamps scroll
-  // offset to the content bounds, so the gesture could not end a group at
-  // all there — with a long final video the user was simply stuck on it.
-  // onMomentumScrollEnd + "already on the last item and still pulling" works
-  // on both platforms.
-  const onScroll = (e) => {
-    const y = e.nativeEvent.contentOffset.y;
-    if (
-      visibleGroup.length > 0 &&
-      y > (visibleGroup.length - 1) * height + 40 &&
-      !showConfirm
-    ) {
-      endGroup();
-    }
-  };
-
-  const onScrollEndDrag = (e) => {
-    if (showConfirm || visibleGroup.length === 0) return;
-    const { contentOffset, velocity } = e.nativeEvent;
-    const last = (visibleGroup.length - 1) * height;
-    // Pulling up (negative velocity = content moving up) while already at
-    // the final item.
-    const atLast = contentOffset.y >= last - height * 0.15;
-    const pullingPastEnd = velocity && velocity.y < -0.2;
-    if (atLast && pullingPastEnd) endGroup();
-  };
-
   // The last video finishing its playback ends the group too.
   const onActiveEnded = useCallback(() => {
-    if (index === visibleGroup.length - 1 && !showConfirm) endGroup();
-  }, [index, visibleGroup.length, showConfirm, endGroup]);
+    if (currentIndex === visibleGroup.length - 1 && !showConfirm) endGroup();
+  }, [currentIndex, visibleGroup.length, showConfirm, endGroup]);
 
   const isEmpty = !loading && !completed && totalCount === 0;
 
@@ -558,77 +732,74 @@ export default function VideoCleaningScreen({ navigation, route }) {
 
   return (
     <View style={{ flex: 1, backgroundColor: '#000' }}>
-      <FlatList
-        ref={listRef}
-        data={visibleGroup}
-        keyExtractor={(item) => item.id}
-        extraData={[index, focused, showConfirm]}
-        renderItem={({ item, index: i }) => {
-          // OOM guard: ONLY the current video gets a real player — three
-          // live ExoPlayers each pre-buffering high-bitrate video was
-          // enough to OutOfMemoryError low-end devices. Neighbours (±1)
-          // render a poster frame so swipes still feel instant; everything
-          // else (and the whole feed when the tab is blurred) is a black
-          // placeholder — leaving the tab RELEASES the player.
-          const near = focused && Math.abs(i - index) <= 1;
-          if (!near) {
-            return <View style={{ height, backgroundColor: '#000' }} />;
-          }
-          const alt = altUris[item.id];
-          if (i !== index && alt !== null) {
+      <GlowingTrashBar progress={deleteProgress} />
+
+      <GestureDetector gesture={pan}>
+        <View
+          style={styles.mediaArea}
+          onLayout={(event) => setMediaHeight(event.nativeEvent.layout.height)}
+        >
+          {stack.map(({ asset, index: stackIndex }) => {
+            const isCurrent = stackIndex === currentIndex;
+            const alt = altUris[asset.id];
             return (
-              <View style={{ height, backgroundColor: '#000' }}>
-                {Platform.OS === 'android' ? (
-                  <ExpoImage
-                    source={{ uri: item.uri }}
-                    style={StyleSheet.absoluteFill}
-                    contentFit="contain"
-                    transition={0}
+              <VideoStackLayer
+                key={asset.id}
+                asset={asset}
+                index={stackIndex}
+                screenW={width}
+                offset={offset}
+                ty={ty}
+                dragId={dragId}
+              >
+                {isCurrent && focused && alt !== null ? (
+                  <VideoCard
+                    key={`${asset.id}${alt ? ':alt' : ''}`}
+                    asset={alt ? { ...asset, uri: alt } : asset}
+                    active={!showConfirm}
+                    height={viewportHeight}
+                    onProgress={setVideoProgress}
+                    onEnded={onActiveEnded}
+                    onLoadError={() => handleLoadError(asset)}
                   />
-                ) : null}
-              </View>
+                ) : alt === null ? (
+                  <View style={[styles.center, styles.videoCanvas]}>
+                    <Ionicons
+                      name="videocam-off-outline"
+                      size={44}
+                      color="rgba(255,255,255,0.5)"
+                    />
+                  </View>
+                ) : (
+                  <View style={styles.videoCanvas}>
+                    <ExpoImage
+                      source={{ uri: videoThumbs[asset.id] || asset.uri }}
+                      style={StyleSheet.absoluteFill}
+                      contentFit="contain"
+                      transition={0}
+                      cachePolicy="memory-disk"
+                    />
+                    <View style={styles.posterShade} />
+                    <Ionicons
+                      name="play-circle-outline"
+                      size={48}
+                      color="rgba(255,255,255,0.78)"
+                      style={styles.posterIcon}
+                    />
+                  </View>
+                )}
+              </VideoStackLayer>
             );
-          }
-          if (alt === null) {
-            // Both sources failed — never mount a player for this one.
-            return (
-              <View style={[styles.center, { height, backgroundColor: '#000' }]}>
-                <Ionicons name="videocam-off-outline" size={44} color="rgba(255,255,255,0.5)" />
-              </View>
-            );
-          }
-          const playAsset = alt ? { ...item, uri: alt } : item;
-          return (
-            <VideoCard
-              key={`${item.id}${alt ? ':alt' : ''}`}
-              asset={playAsset}
-              active={i === index && !showConfirm}
-              height={height}
-              onProgress={i === index ? setVideoProgress : undefined}
-              onEnded={i === index ? onActiveEnded : undefined}
-              onLoadError={() => handleLoadError(item)}
-            />
-          );
-        }}
-        pagingEnabled
-        showsVerticalScrollIndicator={false}
-        onViewableItemsChanged={onViewableItemsChanged}
-        viewabilityConfig={{ itemVisiblePercentThreshold: 60 }}
-        getItemLayout={(_, i) => ({ length: height, offset: height * i, index: i })}
-        onScroll={onScroll}
-        onScrollEndDrag={onScrollEndDrag}
-        scrollEventThrottle={64}
-        windowSize={3}
-        initialNumToRender={1}
-        maxToRenderPerBatch={2}
-        removeClippedSubviews
-      />
+          })}
+        </View>
+      </GestureDetector>
 
       {/* Top bar: album filter · group progress (x / group size) · exit */}
       <View style={[styles.topBar, { top: insets.top + 6 }]}>
         <AlbumPicker
           albums={albums}
           selected={albumId}
+          totalCounts={totalCounts}
           onSelect={(a) => setAlbumId(a.id)}
         />
         <Text style={styles.topText} numberOfLines={1}>
@@ -641,6 +812,50 @@ export default function VideoCleaningScreen({ navigation, route }) {
         <Pressable onPress={exit} hitSlop={10} style={styles.exitBtn}>
           <Ionicons name="close" size={22} color="#fff" />
         </Pressable>
+      </View>
+
+      <View
+        style={[styles.overallProgressWrap, { top: insets.top + 62 }]}
+        pointerEvents="none"
+      >
+        <View style={styles.overallProgressHeader}>
+          <Text style={styles.progressLabel}>
+            {t('video_progress', {
+              done: Math.min(
+                totalCount,
+                processedGroups * groupSize + currentGroup.length - visibleGroup.length
+              ),
+              total: totalCount,
+            })}
+          </Text>
+          <Text style={styles.progressLabel}>
+            {currentGroup.length > 0
+              ? `${Math.min(currentIndex + 1, currentGroup.length)}/${currentGroup.length}`
+              : '0/0'}
+          </Text>
+        </View>
+        <View style={styles.overallTrack}>
+          <View
+            style={[
+              styles.overallFill,
+              {
+                width: `${Math.round(
+                  totalCount > 0
+                    ? Math.min(
+                        100,
+                        ((processedGroups * groupSize +
+                          currentGroup.length -
+                          visibleGroup.length) /
+                          totalCount) *
+                          100
+                      )
+                    : 0
+                )}%`,
+                backgroundColor: colors.accent,
+              },
+            ]}
+          />
+        </View>
       </View>
 
       {/* Right floating actions (lifted above the tab bar) */}
@@ -660,6 +875,13 @@ export default function VideoCleaningScreen({ navigation, route }) {
         </Pressable>
         <Pressable onPress={shareCurrent} style={styles.actionBtn}>
           <Ionicons name="share-outline" size={26} color="#fff" />
+        </Pressable>
+        <Pressable
+          onPress={undo}
+          disabled={markStackRef.current.length === 0}
+          style={[styles.actionBtn, { opacity: markStackRef.current.length ? 1 : 0.35 }]}
+        >
+          <Ionicons name="arrow-undo" size={26} color="#fff" />
         </Pressable>
       </View>
 
@@ -704,6 +926,16 @@ export default function VideoCleaningScreen({ navigation, route }) {
 
       <EXIFModal visible={showExif} asset={current} onClose={() => setShowExif(false)} />
 
+      <MoveSheet
+        visible={showMove}
+        excludeAlbumId={albumId}
+        onClose={() => setShowMove(false)}
+        onSelect={async (album) => {
+          setShowMove(false);
+          await moveCurrentTo(album);
+        }}
+      />
+
       <GroupConfirmSheet
         visible={showConfirm}
         assets={currentGroup.filter((v) => markedIds.has(v.id))}
@@ -745,6 +977,43 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     padding: 8,
   },
+  mediaArea: { flex: 1, overflow: 'hidden', backgroundColor: '#000' },
+  videoCanvas: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#000',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  posterShade: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.14)',
+  },
+  posterIcon: { position: 'absolute' },
+  overallProgressWrap: {
+    position: 'absolute',
+    left: 18,
+    right: 18,
+    zIndex: 10,
+  },
+  overallProgressHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 5,
+  },
+  progressLabel: {
+    color: 'rgba(255,255,255,0.86)',
+    fontSize: 11,
+    fontWeight: '600',
+    textShadowColor: 'rgba(0,0,0,0.7)',
+    textShadowRadius: 3,
+  },
+  overallTrack: {
+    height: 4,
+    borderRadius: 2,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.28)',
+  },
+  overallFill: { height: 4, borderRadius: 2 },
   actions: { position: 'absolute', right: 14, gap: 18, alignItems: 'center' },
   actionBtn: {
     backgroundColor: 'rgba(0,0,0,0.35)',

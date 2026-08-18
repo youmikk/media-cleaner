@@ -30,6 +30,10 @@ import { log } from '../utils/logger';
 const MIN_GROUP = 2;
 const MAX_GROUP = 20;
 const DEFAULT_GROUP = 5;
+// Shared with AlbumSelectScreen's controls row: pinning the height means the
+// stepper here and the time picker there reserve exactly the same space, so
+// the card stack below lands at the same y on both tabs.
+const CONTROLS_HEIGHT = 46;
 
 /**
  * Shared album-select layout for Photos and Videos tabs:
@@ -47,6 +51,7 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
   const [thumbs, setThumbs] = useState([]);
   const [analysisState, setAnalysisState] = useState(null);
   const [progressByAlbum, setProgressByAlbum] = useState({});
+  const [totalCounts, setTotalCounts] = useState({});
   const [stalePrompt, setStalePrompt] = useState(false);
   const focusStartedAt = useRef(0);
   const firstThumbLogged = useRef(false);
@@ -97,11 +102,14 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
       await reviewedStore.primeReviewed(albums.map((a) => a.id));
       if (!alive) return;
       const out = {};
+      const totals = {};
       for (const album of albums) {
         const total = album.id === ALL_ALBUM_ID ? allTotal : album.assetCount;
+        if (total !== undefined && total !== null) totals[album.id] = total;
         if (!total) continue;
         out[album.id] = reviewedStore.getProgressSync(album.id, total);
       }
+      setTotalCounts(totals);
       setProgressByAlbum(out);
     })().catch(() => {});
     return () => {
@@ -207,6 +215,8 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
   };
 
   const cardW = Math.min(Math.round(width * 0.58), 250);
+  const albumCount =
+    totalCounts[albumId] ?? albums.find((a) => a.id === albumId)?.assetCount ?? 0;
 
   return (
     <SafeAreaView style={[styles.screen, { backgroundColor: colors.background }]}>
@@ -219,6 +229,7 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
           albums={albums}
           selected={albumId}
           progressByAlbum={progressByAlbum}
+          totalCounts={totalCounts}
           onSelect={(a) => setAlbumId(a.id)}
         />
         <View
@@ -257,13 +268,17 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
           isVideo={isVideo}
           onPress={startCleaning}
         />
+        <Text style={[styles.count, { color: colors.subtext }]}>
+          {albumCount === 0
+            ? t(isVideo ? 'no_videos' : 'no_photos')
+            : t(isVideo ? 'video_count' : 'photo_count', { count: albumCount })}
+        </Text>
+        {albumCount > 0 && (
+          <Text style={[styles.hint, { color: colors.subtext }]}>
+            {t('start_hint')}
+          </Text>
+        )}
       </View>
-
-      <Text style={[styles.hint, { color: colors.subtext }]}>
-        {thumbs.length === 0
-          ? t(isVideo ? 'no_videos' : 'no_photos')
-          : t('start_hint')}
-      </Text>
 
       <AnalysisProgress
         state={analysisState}
@@ -284,13 +299,17 @@ export default function AlbumSelectBase({ mediaType, cleaningRoute, navigation }
 
 const styles = StyleSheet.create({
   screen: { flex: 1, paddingHorizontal: 16 },
-  header: { fontSize: 30, fontWeight: '800', marginTop: 12, marginBottom: 18 },
+  // Header / controls / card-area metrics are kept IDENTICAL to
+  // AlbumSelectScreen (the photo tab). Both centre the stack in the leftover
+  // flex space, so any difference in the fixed rows above shifts the card —
+  // which is why the video tab used to sit visibly lower than the photo one.
+  header: { fontSize: 30, fontWeight: '800', marginTop: 12, marginBottom: 14 },
   controls: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     gap: 12,
-    marginBottom: 26,
+    minHeight: CONTROLS_HEIGHT,
   },
   stepper: {
     flexDirection: 'row',
@@ -305,10 +324,11 @@ const styles = StyleSheet.create({
   stepperValue: { fontSize: 17, fontWeight: '800' },
   stepperLabel: { fontSize: 10 },
   cards: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    flexGrow: 0,
-    minHeight: 260,
+    marginBottom: 90,
   },
-  hint: { textAlign: 'center', marginTop: 24, fontSize: 13 },
+  count: { marginTop: 26, fontSize: 15, fontWeight: '700' },
+  hint: { textAlign: 'center', marginTop: 6, fontSize: 12 },
 });

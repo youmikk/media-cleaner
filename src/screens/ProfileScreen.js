@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -20,6 +20,7 @@ import { useApp } from '../context/AppContext';
 import SuggestionCard from '../components/SuggestionCard';
 import StorageChart from '../components/StorageChart';
 import OptionPicker from '../components/OptionPicker';
+import DeletionModePicker from '../components/DeletionModePicker';
 import { LANGUAGES } from '../i18n';
 import {
   getAssets,
@@ -31,6 +32,7 @@ import {
   ALL_ALBUM_ID,
 } from '../utils/albumHelpers';
 import analyzer from '../utils/chunkedAnalyzer';
+import * as suggestionStore from '../utils/suggestionStore';
 import * as statsManager from '../utils/statsManager';
 import * as cacheManager from '../utils/cacheManager';
 import { groupBursts } from '../utils/burstDetection';
@@ -97,12 +99,40 @@ export default function ProfileScreen({ navigation }) {
     videoDupes: [],
   });
   const [expandedStat, setExpandedStat] = useState(null);
+  const [analysisState, setAnalysisState] = useState(null);
+  const [reviewedSuggestions, setReviewedSuggestions] = useState({
+    largest: [],
+    screenshots: [],
+    lowQuality: [],
+  });
+  const analysisWasRunningRef = useRef(false);
 
   useFocusEffect(
     useCallback(() => {
       refreshTrash();
+      let alive = true;
+      Promise.all([
+        suggestionStore.getReviewed('largest'),
+        suggestionStore.getReviewed('screenshots'),
+        suggestionStore.getReviewed('lowQuality'),
+      ]).then(([largest, screenshots, lowQualityIds]) => {
+        if (!alive) return;
+        setReviewedSuggestions({
+          largest: [...largest],
+          screenshots: [...screenshots],
+          lowQuality: [...lowQualityIds],
+        });
+      }).catch(() => {});
+      return () => {
+        alive = false;
+      };
     }, [refreshTrash])
   );
+
+  useEffect(() => analyzer.subscribe((next) => {
+    setAnalysisState(next);
+    if (next?.running) analysisWasRunningRef.current = true;
+  }), []);
 
   // Real gallery size, measured off the system index. It used to come from
   // stats.originalSizeBytes, which is only written when a cleaning session
@@ -145,6 +175,38 @@ export default function ProfileScreen({ navigation }) {
   // analyzer's cached metrics.
   const [lowQuality, setLowQuality] = useState({ ids: [], thumb: null });
   const [photoDupes, setPhotoDupes] = useState({ groups: [], thumb: null });
+  const loadAnalysisCache = useCallback(async (isAlive = () => true) => {
+    const cache = await analyzer.getCached(ALL_ALBUM_ID, 'photo');
+    if (!isAlive()) return;
+    if (!cache) {
+      setLowQuality({ ids: [], thumb: null });
+      setPhotoDupes({ groups: [], thumb: null });
+      if (settings.similarDetection && !analysisState?.running) {
+        analyzer.analyzeAlbum(ALL_ALBUM_ID, { mediaType: 'photo' });
+      }
+      return;
+    }
+    const processed = await suggestionStore.getReviewed('lowQuality');
+    if (!isAlive()) return;
+    const ids = (cache.lowQuality || [])
+      .map((item) => item.id)
+      .filter((id) => !processed.has(id));
+    let thumb = null;
+    if (ids.length > 0) {
+      const first = await getAssetsByIds(ids.slice(0, 1));
+      thumb = first[0]?.uri || null;
+    }
+    if (isAlive()) setLowQuality({ ids, thumb });
+    if (cache.duplicates) {
+      let dupeThumb = null;
+      if (cache.duplicates.length > 0) {
+        const first = await getAssetsByIds(cache.duplicates[0].slice(0, 1));
+        dupeThumb = first[0]?.uri || null;
+      }
+      if (isAlive()) setPhotoDupes({ groups: cache.duplicates, thumb: dupeThumb });
+    }
+  }, [analysisState?.running, settings.similarDetection]);
+
   useFocusEffect(
     useCallback(() => {
       let alive = true;
@@ -152,37 +214,21 @@ export default function ProfileScreen({ navigation }) {
       // analysis cache synchronously during the switch blanks the screen
       // on slower Androids.
       const timer = setTimeout(() => {
-      if (!alive) return;
-      analyzer
-        .getCached(ALL_ALBUM_ID, 'photo')
-        .then(async (cache) => {
-          if (!alive || !cache) return;
-          if (cache.lowQuality) {
-            const ids = cache.lowQuality.map((x) => x.id);
-            let thumb = null;
-            if (ids.length > 0) {
-              const first = await getAssetsByIds(ids.slice(0, 1));
-              thumb = first[0]?.uri || null;
-            }
-            if (alive) setLowQuality({ ids, thumb });
-          }
-          if (cache.duplicates) {
-            let thumb = null;
-            if (cache.duplicates.length > 0) {
-              const first = await getAssetsByIds(cache.duplicates[0].slice(0, 1));
-              thumb = first[0]?.uri || null;
-            }
-            if (alive) setPhotoDupes({ groups: cache.duplicates, thumb });
-          }
-        })
-        .catch(() => {});
+        if (alive) loadAnalysisCache(() => alive).catch(() => {});
       }, 400);
       return () => {
         alive = false;
         clearTimeout(timer);
       };
-    }, [])
+    }, [loadAnalysisCache])
   );
+
+  useEffect(() => {
+    if (!analysisState?.running && analysisWasRunningRef.current) {
+      analysisWasRunningRef.current = false;
+      loadAnalysisCache().catch(() => {});
+    }
+  }, [analysisState?.running, loadAnalysisCache]);
 
   // ---- Smart suggestions (cached, refreshed daily) ----
   useEffect(() => {
@@ -419,20 +465,45 @@ export default function ProfileScreen({ navigation }) {
   };
 
   // ---- Settings handlers ----
+  const scheduleReminder = async (hour) => {
+    const ok = await enableDailyReminder(t, hour, 0);
+    if (!ok) {
+      Alert.alert(t('setting_reminder'), t('permission_denied'));
+      return false;
+    }
+    return true;
+  };
+
   const onToggleReminder = async (value) => {
     if (value) {
-      const ok = await enableDailyReminder(t);
-      if (!ok) {
-        Alert.alert(t('setting_reminder'), t('permission_denied'));
-        return;
-      }
+      if (!(await scheduleReminder(settings.reminderHour || 19))) return;
     } else {
       await disableDailyReminder();
     }
     setSetting('dailyReminder', value);
   };
 
-  const cleanAssets = (assetIds, title, sizesById = null) => {
+  const onReminderHourChange = async (value) => {
+    setSetting('reminderHour', value);
+    if (settings.dailyReminder) await scheduleReminder(value);
+  };
+
+  const onDeleteModeChange = (value) => {
+    if (value === settings.recycleBin) return;
+    Alert.alert(
+      t('delete_mode_warning_title'),
+      t(value ? 'delete_mode_warning_recycle' : 'delete_mode_warning_direct'),
+      [
+        { text: t('cancel'), style: 'cancel' },
+        {
+          text: t('create'),
+          onPress: () => setSetting('recycleBin', value),
+        },
+      ]
+    );
+  };
+
+  const cleanAssets = (assetIds, title, sizesById = null, suggestionKey = null) => {
     navigation.navigate('PhotosTab', {
       screen: 'Cleaning',
       params: {
@@ -440,6 +511,10 @@ export default function ProfileScreen({ navigation }) {
         albumTitle: title,
         assetIds, // group size comes from the global setting
         sizesById, // shown as a size badge on each photo (Largest Files)
+        // Which suggestion this session came from. CleaningScreen records the
+        // reviewed ids under this name so the card stops offering the same
+        // photos once they have been dealt with.
+        suggestionKey,
       },
     });
   };
@@ -448,6 +523,20 @@ export default function ProfileScreen({ navigation }) {
     <View style={styles.section}>
       <Text style={[styles.sectionTitle, { color: colors.text }]}>{title}</Text>
       {children}
+    </View>
+  );
+
+  // Settings used to be one 11-row card mixing group sizes, playback, delete
+  // mode, reminders and appearance — impossible to scan. SubGroup breaks it
+  // into captioned cards so related switches sit together.
+  const SubGroup = ({ title, children }) => (
+    <View style={styles.subGroup}>
+      <Text style={[styles.subGroupTitle, { color: colors.subtext }]}>
+        {title}
+      </Text>
+      <View style={[styles.settingsCard, { backgroundColor: colors.card }]}>
+        {children}
+      </View>
     </View>
   );
 
@@ -489,21 +578,51 @@ export default function ProfileScreen({ navigation }) {
     },
   ];
 
-  // Keep cards with a usable thumbnail first. This makes the suggestions
-  // feel immediately actionable while empty-result cards remain available
-  // after them.
+  // Suggestions the user has already been through are dropped from the
+  // cards. The ids are recorded by CleaningScreen when a group is confirmed
+  // (kept photos included) — otherwise the very same "10 largest files" came
+  // back on the next visit, since the daily suggestion cache is unaware that
+  // anything was reviewed. lowQuality is filtered where it is loaded, because
+  // its thumbnail is resolved from the surviving ids.
+  const visibleSuggestions = useMemo(() => {
+    const drop = (list, reviewed) => {
+      if (!reviewed || reviewed.length === 0) return list;
+      const seen = new Set(reviewed);
+      return list.filter((item) => !seen.has(item.id));
+    };
+    return {
+      largest: drop(suggestions.largest || [], reviewedSuggestions.largest),
+      screenshots: drop(
+        suggestions.screenshots || [],
+        reviewedSuggestions.screenshots
+      ),
+    };
+  }, [suggestions.largest, suggestions.screenshots, reviewedSuggestions]);
+
+  // Analysis progress for the low-quality card: that suggestion is the only
+  // one that has to wait on the pixel analyser, so without a bar it just
+  // reads "needs analysis" for several minutes with no sign of life.
+  const lowQualityProgress =
+    analysisState?.running && analysisState.mediaType !== 'video'
+      ? {
+          label: t('analyzing_short'),
+          done: analysisState.done || 0,
+          total: analysisState.total || 0,
+        }
+      : null;
+
   const suggestionCards = [
     {
       key: 'largest',
-      thumb: suggestions.largest[0]?.uri,
+      thumb: visibleSuggestions.largest[0]?.uri,
       node: (
         <SuggestionCard
           icon="albums-outline"
           title={t('suggestion_largest')}
           description={t('suggestion_largest_desc')}
-          thumbnailUri={suggestions.largest[0]?.uri}
-          count={suggestions.largest.length}
-          onClean={() => cleanAssets(suggestions.largest.map((a) => a.id), t('suggestion_largest'), Object.fromEntries(suggestions.largest.map((a) => [a.id, a.size])))}
+          thumbnailUri={visibleSuggestions.largest[0]?.uri}
+          count={visibleSuggestions.largest.length}
+          onClean={() => cleanAssets(visibleSuggestions.largest.map((a) => a.id), t('suggestion_largest'), Object.fromEntries(visibleSuggestions.largest.map((a) => [a.id, a.size])), 'largest')}
         />
       ),
     },
@@ -523,15 +642,15 @@ export default function ProfileScreen({ navigation }) {
     },
     {
       key: 'screenshots',
-      thumb: suggestions.screenshots[0]?.uri,
+      thumb: visibleSuggestions.screenshots[0]?.uri,
       node: (
         <SuggestionCard
           icon="phone-portrait-outline"
           title={t('suggestion_screenshots')}
           description={t('suggestion_screenshots_desc')}
-          thumbnailUri={suggestions.screenshots[0]?.uri}
-          count={suggestions.screenshots.length}
-          onClean={() => cleanAssets(suggestions.screenshots.map((a) => a.id), t('suggestion_screenshots'))}
+          thumbnailUri={visibleSuggestions.screenshots[0]?.uri}
+          count={visibleSuggestions.screenshots.length}
+          onClean={() => cleanAssets(visibleSuggestions.screenshots.map((a) => a.id), t('suggestion_screenshots'), null, 'screenshots')}
         />
       ),
     },
@@ -573,11 +692,16 @@ export default function ProfileScreen({ navigation }) {
           description={lowQuality.ids.length > 0 ? t('suggestion_lowquality_desc') : t('lowquality_need_analysis')}
           thumbnailUri={lowQuality.thumb}
           count={lowQuality.ids.length}
-          onClean={() => cleanAssets(lowQuality.ids.slice(0, 500), t('suggestion_lowquality'))}
+          progress={lowQuality.ids.length === 0 ? lowQualityProgress : null}
+          onClean={() => cleanAssets(lowQuality.ids.slice(0, 500), t('suggestion_lowquality'), null, 'lowQuality')}
         />
       ),
     },
-  ].sort((a, b) => Number(!b.thumb) - Number(!a.thumb));
+    // Cards WITH a thumbnail come first. The comparator used to be
+    // `!b.thumb - !a.thumb`, which sorted them to the BACK — the sign was
+    // inverted, so the one card that could show a preview always ended up
+    // last. Array#sort is stable, so ties keep the authored order above.
+  ].sort((a, b) => Number(!a.thumb) - Number(!b.thumb));
 
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
@@ -740,7 +864,7 @@ export default function ProfileScreen({ navigation }) {
 
         {/* Settings */}
         <Section title={t('settings_title')}>
-          <View style={[styles.settingsCard, { backgroundColor: colors.card }]}>
+          <SubGroup title={t('settings_group_cleaning')}>
             <OptionPicker
               label={t('setting_group_size')}
               value={settings.groupSize}
@@ -767,32 +891,52 @@ export default function ProfileScreen({ navigation }) {
               value={settings.similarDetection}
               onChange={(v) => setSetting('similarDetection', v)}
             />
-            {!isAndroid && (
-              <>
-                <ToggleRow
-                  label={t('setting_live_autoplay')}
-                  value={settings.liveAutoplay}
-                  onChange={(v) => setSetting('liveAutoplay', v)}
-                />
-                <ToggleRow
-                  label={t('setting_live_muted')}
-                  value={settings.liveMuted !== false}
-                  onChange={(v) => setSetting('liveMuted', v)}
-                />
-              </>
-            )}
-            {isAndroid && (
+          </SubGroup>
+
+          {!isAndroid && (
+            <SubGroup title={t('settings_group_playback')}>
               <ToggleRow
-                label={t('setting_recycle')}
-                value={settings.recycleBin}
-                onChange={(v) => setSetting('recycleBin', v)}
+                label={t('setting_live_autoplay')}
+                value={settings.liveAutoplay}
+                onChange={(v) => setSetting('liveAutoplay', v)}
               />
-            )}
+              <ToggleRow
+                label={t('setting_live_muted')}
+                value={settings.liveMuted !== false}
+                onChange={(v) => setSetting('liveMuted', v)}
+              />
+            </SubGroup>
+          )}
+
+          {isAndroid && (
+            <SubGroup title={t('settings_group_deletion')}>
+              <DeletionModePicker
+                value={settings.recycleBin}
+                onChange={onDeleteModeChange}
+              />
+            </SubGroup>
+          )}
+
+          <SubGroup title={t('settings_group_reminder')}>
             <ToggleRow
               label={t('setting_reminder')}
               value={settings.dailyReminder}
               onChange={onToggleReminder}
             />
+            {settings.dailyReminder && (
+              <OptionPicker
+                label={t('setting_reminder_time')}
+                value={settings.reminderHour || 19}
+                onChange={onReminderHourChange}
+                options={[8, 12, 18, 19, 20, 21].map((hour) => ({
+                  value: hour,
+                  label: `${String(hour).padStart(2, '0')}:00`,
+                }))}
+              />
+            )}
+          </SubGroup>
+
+          <SubGroup title={t('settings_group_appearance')}>
             <OptionPicker
               label={t('setting_theme')}
               value={settings.theme}
@@ -812,7 +956,7 @@ export default function ProfileScreen({ navigation }) {
                 ...LANGUAGES.map((l) => ({ value: l.code, label: l.label })),
               ]}
             />
-          </View>
+          </SubGroup>
         </Section>
 
         {/* Footer */}
@@ -849,6 +993,15 @@ const styles = StyleSheet.create({
   header: { fontSize: 30, fontWeight: '800', marginTop: 12, marginBottom: 6 },
   section: { marginTop: 20 },
   sectionTitle: { fontSize: 17, fontWeight: '700', marginBottom: 10 },
+  subGroup: { marginBottom: 14 },
+  subGroupTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+    marginBottom: 6,
+    marginLeft: 4,
+  },
   statRow: { flexDirection: 'row', gap: 10 },
   statCard: {
     flex: 1,

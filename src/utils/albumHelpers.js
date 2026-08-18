@@ -346,6 +346,7 @@ export async function getAssetSize(asset) {
  * slice of it during one screen visit share a single scan.
  */
 let scanCache = null; // {at, mediaType, index}
+let scanPromise = null;
 const SCAN_TTL_MS = 60000;
 
 function buildIndex(raw) {
@@ -387,6 +388,10 @@ export async function getLibraryIndex(mediaType = 'all', { force = false } = {})
   // eslint-disable-next-line global-require
   const PhotoMove = require('../../modules/photo-move');
   if (!PhotoMove.hasScanLibrary()) return null;
+  if (!force && scanPromise && scanPromise.mediaType === mediaType) {
+    return scanPromise.promise;
+  }
+  const promise = (async () => {
   try {
     const started = new Date().getTime();
     const raw = await PhotoMove.scanLibrary(mediaType, 0);
@@ -402,13 +407,72 @@ export async function getLibraryIndex(mediaType = 'all', { force = false } = {})
     log('size', `scan failed: ${(e && e.message) || e}`);
     return null;
   }
+  })();
+  scanPromise = { mediaType, promise };
+  try {
+    return await promise;
+  } finally {
+    if (scanPromise && scanPromise.promise === promise) scanPromise = null;
+  }
 }
 
 /** Drop the cached scan — call after deleting or moving assets. */
 export function invalidateLibraryIndex() {
   scanCache = null;
+  scanPromise = null;
   fingerprintMemoryCache.clear();
   albumsMemoryCache.clear();
+}
+
+/**
+ * Delete-aware alternative to invalidateLibraryIndex(): remove the given ids
+ * from the cached scan instead of throwing the whole thing away.
+ *
+ * Deleting does not change the size of any SURVIVING asset, so a full rescan
+ * afterwards recomputes information we already hold. It is also expensive —
+ * ~5.5s of JS-thread work on a 4700-asset library — and it was being paid
+ * once per confirmed group, because the very next album snapshot re-triggered
+ * it. Worse, the analyser's batch loop ran straight into it (the log shows
+ * `analysis-slow … spent=5580ms budget=84ms`), so low-quality detection
+ * stalled for seconds at a time throughout a cleaning session.
+ *
+ * The album/fingerprint caches ARE still cleared — counts really did change.
+ */
+export function pruneLibraryIndex(deletedIds = []) {
+  fingerprintMemoryCache.clear();
+  albumsMemoryCache.clear();
+  scanPromise = null;
+  if (!scanCache || deletedIds.length === 0) return;
+  // Ids arrive in expo-media-library's "<id>/L0/001" form on iOS; the scan is
+  // keyed by the bare MediaStore/PhotoKit id.
+  const gone = new Set(deletedIds.map((id) => String(id).split('/')[0]));
+  const old = scanCache.index;
+  const ids = [];
+  const creationTime = [];
+  const mediaType = [];
+  for (let i = 0; i < old.ids.length; i++) {
+    if (gone.has(old.ids[i])) {
+      old.sizeById.delete(old.ids[i]);
+      continue;
+    }
+    ids.push(old.ids[i]);
+    creationTime.push(old.creationTime[i]);
+    mediaType.push(old.mediaType[i]);
+  }
+  scanCache = {
+    // Keep the ORIGINAL timestamp: pruning refreshes the contents but must
+    // not extend the scan's 60s life, or a library changed outside the app
+    // could stay stale indefinitely across a long session.
+    at: scanCache.at,
+    mediaType: scanCache.mediaType,
+    index: {
+      ids,
+      creationTime,
+      mediaType,
+      sizeById: old.sizeById,
+      total: ids.length,
+    },
+  };
 }
 
 /**
@@ -922,11 +986,25 @@ export function formatBytes(bytes) {
 export function formatDate(ms, language) {
   if (!ms) return '—';
   const d = new Date(ms);
-  return d.toLocaleString(language === 'zh' ? 'zh-CN' : 'en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  if (Number.isNaN(d.getTime())) return '—';
+  // toLocaleString with an options bag needs Intl. Hermes ships it on both
+  // platforms now, but an older installed binary (or a build with Intl
+  // stripped) throws "undefined is not a function" here — which used to take
+  // the whole basic-info block of the EXIF sheet down with it. Fall back to a
+  // hand-built stamp instead of losing every row.
+  try {
+    return d.toLocaleString(language === 'zh' ? 'zh-CN' : 'en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch (e) {
+    const pad = (n) => String(n).padStart(2, '0');
+    return (
+      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+      `${pad(d.getHours())}:${pad(d.getMinutes())}`
+    );
+  }
 }

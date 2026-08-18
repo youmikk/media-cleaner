@@ -1,9 +1,14 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
-export const APP_VERSION = '1.21.0';
+export const APP_VERSION = '1.21.1';
 const REPO = 'youmikk/media-cleaner';
 const RELEASES_API = `https://api.github.com/repos/${REPO}/releases/latest`;
+const RELEASE_API_URLS = [
+  RELEASES_API,
+  `https://ghproxy.net/${RELEASES_API}`,
+  `https://gh-proxy.com/${RELEASES_API}`,
+];
 const LAST_CHECK_KEY = '@mediacleaner/last_update_check';
 const UPDATE_ID_KEY = '@mediacleaner/last_update_id';
 const CHECK_INTERVAL = 24 * 60 * 60 * 1000; // silent auto-check once a day
@@ -28,9 +33,12 @@ const DOWNLOAD_MIRRORS = [
   'https://gh-proxy.com/',
 ];
 
-/** True when a mirrored download is worth offering for this url. */
+const RELEASE_ASSET_RE =
+  /^https:\/\/github\.com\/[^/]+\/[^/]+\/releases\/download\/[^/]+\/[^/?]+\.(apk|ipa)(?:\?.*)?$/i;
+
+/** Only real release assets may be sent through a download accelerator. */
 export function canMirror(url) {
-  return !!url && /^https:\/\/github\.com\//.test(url);
+  return RELEASE_ASSET_RE.test(String(url || ''));
 }
 
 /** Same asset through a China-friendly proxy. */
@@ -83,6 +91,35 @@ function isNewer(remote, local) {
     if ((r[i] || 0) < (l[i] || 0)) return false;
   }
   return false;
+}
+
+function resolveManifestAsset(value, manifest, tag) {
+  if (!value) return null;
+  return String(value)
+    .replace(/\{version\}/g, String(manifest.version || ''))
+    .replace(/\{tag\}/g, String(tag || ''));
+}
+
+function manifestDownloadUrl(manifest, platform, tag) {
+  const direct =
+    platform === 'android'
+      ? manifest.androidUrl || manifest.apkUrl
+      : platform === 'ios'
+        ? manifest.iosUrl || manifest.ipaUrl
+        : null;
+  if (direct && RELEASE_ASSET_RE.test(direct)) return direct;
+
+  const assetName =
+    platform === 'android'
+      ? manifest.androidAsset || manifest.apkAsset
+      : platform === 'ios'
+        ? manifest.iosAsset || manifest.ipaAsset
+        : null;
+  const resolvedName = resolveManifestAsset(assetName, manifest, tag);
+  if (!resolvedName || !/\.(apk|ipa)$/i.test(resolvedName)) return null;
+  return `https://github.com/${REPO}/releases/download/${encodeURIComponent(
+    tag
+  )}/${encodeURIComponent(resolvedName)}`;
 }
 
 /**
@@ -173,16 +210,21 @@ export async function fetchLatestChangelog() {
 /**
  * B) New-package check against GitHub Releases.
  * Returns { hasUpdate, version, url } — url prefers the platform's install
- * package and falls back to the release page. Pair it with mirrorUrl() when
- * offering the actual download.
+ * package and falls back to the release page. Pair it with mirrorUrl() only
+ * when url is a real release asset URL.
  */
 export async function checkGitHubRelease(platform = Platform.OS) {
-  // The API is the only source that knows the exact asset URL, so it goes
-  // first — but on a short leash, because it is also the one most likely to
-  // hang from mainland China.
-  const release = await fetchJson(RELEASES_API, {
-    Accept: 'application/vnd.github+json',
-  });
+  // The API knows the exact asset URL. Try it through the same lightweight
+  // proxy services used for downloads when api.github.com is unreachable in
+  // mainland China.
+  let release = null;
+  for (const apiUrl of RELEASE_API_URLS) {
+    // eslint-disable-next-line no-await-in-loop
+    release = await fetchJson(apiUrl, {
+      Accept: 'application/vnd.github+json',
+    });
+    if (release && (release.tag_name || release.name)) break;
+  }
   if (release && (release.tag_name || release.name)) {
     const version = release.tag_name || release.name || '';
     const extension =
@@ -192,29 +234,31 @@ export async function checkGitHubRelease(platform = Platform.OS) {
           (a.name || '').toLowerCase().endsWith(extension)
         )
       : null;
+    const downloadUrl = packageAsset && packageAsset.browser_download_url;
     return {
       // Do not offer an Android-only release to iOS (or vice versa).
       hasUpdate: isNewer(version, APP_VERSION) && (!extension || !!packageAsset),
       version,
-      url:
-        (packageAsset && packageAsset.browser_download_url) ||
-        release.html_url,
+      url: downloadUrl || release.html_url,
+      downloadUrl: downloadUrl || null,
     };
   }
 
-  // API blocked or rate-limited: the committed manifest still answers "is
-  // there a newer version", which is the part the user needs to know. It
-  // cannot name the asset (the filename carries a build number), so this
-  // path points at the release page instead.
+  // API blocked or rate-limited: the manifest contains a stable asset name
+  // or direct URL, so this path can still produce a real download link.
   for (const url of RELEASE_URLS) {
     // eslint-disable-next-line no-await-in-loop
     const manifest = await fetchJson(url, { 'Cache-Control': 'no-cache' });
     if (manifest && manifest.version) {
       const tag = manifest.tag || `v${manifest.version}`;
+      const downloadUrl = manifestDownloadUrl(manifest, platform, tag);
       return {
-        hasUpdate: isNewer(manifest.version, APP_VERSION),
+        hasUpdate:
+          isNewer(manifest.version, APP_VERSION) &&
+          (platform !== 'android' || !!downloadUrl),
         version: tag,
-        url: `https://github.com/${REPO}/releases/tag/${tag}`,
+        url: downloadUrl || `https://github.com/${REPO}/releases/tag/${tag}`,
+        downloadUrl,
       };
     }
   }

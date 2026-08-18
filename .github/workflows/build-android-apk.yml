@@ -108,7 +108,9 @@ jobs:
         id: apk
         run: |
           SRC=android/app/build/outputs/apk/release/app-release.apk
-          OUT="MediaCleaner-${{ steps.meta.outputs.version }}-${{ github.run_number }}.apk"
+          # Stable names let the CDN-served release manifest construct the
+          # direct asset URL when the GitHub API is unreachable.
+          OUT="MediaCleaner-${{ steps.meta.outputs.version }}.apk"
           cp "$SRC" "$OUT"
           echo "path=$OUT" >> "$GITHUB_OUTPUT"
           ls -lh "$OUT"

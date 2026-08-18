@@ -40,6 +40,7 @@ import BottomInfoBar from '../components/BottomInfoBar';
 import GlowingTrashBar from '../components/GlowingTrashBar';
 import EXIFModal from '../components/EXIFModal';
 import SimilarModal from '../components/SimilarModal';
+import PhotoViewer from '../components/PhotoViewer';
 import MoveSheet from '../components/MoveSheet';
 import AlbumChips from '../components/AlbumChips';
 import GroupConfirmSheet from '../components/GroupConfirmSheet';
@@ -47,6 +48,7 @@ import { incrementUsage } from '../utils/albumUsage';
 import { batchDelete } from '../utils/deletionManager';
 import * as sessionManager from '../utils/sessionManager';
 import * as reviewedStore from '../utils/reviewedStore';
+import * as suggestionStore from '../utils/suggestionStore';
 import * as PhotoMove from '../../modules/photo-move';
 import { log } from '../utils/logger';
 import analyzer from '../utils/chunkedAnalyzer';
@@ -155,6 +157,10 @@ export default function CleaningScreen({ route, navigation }) {
     assetIds = null,
     resume = false,
     sizesById = null,
+    // Set when the session was started from a smart-suggestion card. Every
+    // confirmed group is recorded under this name so the card stops offering
+    // photos the user has already been through.
+    suggestionKey = null,
     timeRange = null, // {start, end} — year / year-month scope
   } = route.params;
   const { colors, t, settings, setSetting, recycleBinActive, language } = useSettings();
@@ -177,6 +183,8 @@ export default function CleaningScreen({ route, navigation }) {
   const [clusters, setClusters] = useState([]);
   const [showExif, setShowExif] = useState(false);
   const [showSimilar, setShowSimilar] = useState(false);
+  // Full-screen pinch/pan/double-tap viewer for the photo under the finger.
+  const [showZoom, setShowZoom] = useState(false);
   const [showMove, setShowMove] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [completed, setCompleted] = useState(false);
@@ -242,6 +250,10 @@ export default function CleaningScreen({ route, navigation }) {
   const ty = useSharedValue(0);
   // Asset id the CURRENT gesture owns; only that card follows `ty`.
   const dragId = useSharedValue('');
+  // Latched false once a pinch has opened the viewer, so the continuous
+  // onUpdate stream costs exactly one JS hop per gesture.
+  const zoomArmed = useSharedValue(true);
+  const openZoom = useCallback(() => setShowZoom(true), []);
   const deleteProgress = useDerivedValue(() =>
     Math.min(1, Math.max(0, -ty.value / DELETE_THRESHOLD))
   );
@@ -878,7 +890,7 @@ export default function CleaningScreen({ route, navigation }) {
   const hasPrev = currentIdx > 0;
 
   const pan = Gesture.Pan()
-    .enabled(!showConfirm && !showMove && !showSimilar && !showExif)
+    .enabled(!showConfirm && !showMove && !showSimilar && !showExif && !showZoom)
     .onStart(() => {
       'worklet';
       // Claim the vertical axis for THIS card only.
@@ -942,6 +954,32 @@ export default function CleaningScreen({ route, navigation }) {
         ty.value = withTiming(0, EASE);
       }
     });
+
+  // Pinching the card opens the full-screen zoomable viewer. It cannot zoom
+  // in place: the card is one layer of a filmstrip that is itself being
+  // translated, and PhotoCard may be hosting a LivePhotoView with its own
+  // gesture recognizer. Pinch runs SIMULTANEOUSLY with the pan (they read
+  // different inputs); the threshold keeps an incidental two-finger drag
+  // from opening the viewer.
+  const pinch = Gesture.Pinch()
+    .enabled(!showConfirm && !showMove && !showSimilar && !showExif && !showZoom)
+    .onBegin(() => {
+      'worklet';
+      zoomArmed.value = true;
+    })
+    .onUpdate((e) => {
+      'worklet';
+      // onUpdate fires continuously — fire the JS hop exactly once per pinch.
+      if (zoomArmed.value && e.scale > 1.15) {
+        zoomArmed.value = false;
+        // Put the strip back where it belongs — the pan may have nudged it.
+        ty.value = 0;
+        offset.value = restOffset;
+        runOnJS(openZoom)();
+      }
+    });
+
+  const photoGesture = Gesture.Simultaneous(pan, pinch);
 
   // ---- Move flow (shared by swipe-down sheet AND the quick chips) ----
   // Categorizing ≠ deleting: the photo STAYS in the cleaning flow; only the
@@ -1217,6 +1255,12 @@ export default function CleaningScreen({ route, navigation }) {
       const ids = group.map((a) => a.id);
       ids.forEach((id) => reviewedSetRef.current.add(id));
       reviewedStore.addReviewed(albumId, ids); // fire & forget
+    } else if (suggestionKey && group.length > 0) {
+      // Suggestion sessions are ephemeral and album-scoped reviewing would be
+      // wrong here (the ids span the whole library), so they get their own
+      // per-suggestion ledger. Without it the "10 largest files" card kept
+      // offering the same photos after they had been dealt with.
+      suggestionStore.addReviewed(suggestionKey, group.map((a) => a.id));
     }
     setShowConfirm(false);
     setPi(0);
@@ -1431,6 +1475,7 @@ export default function CleaningScreen({ route, navigation }) {
         // Reviewed ids are coalesced in memory (see reviewedStore) — leaving
         // the screen is the point at which they must be on disk.
         await reviewedStore.flushReviewed();
+        if (suggestionKey) await suggestionStore.flushReviewed();
         if (session && finish) {
           await sessionManager.finishSession(
             { ...session, afterAssets: allRef.current },
@@ -1563,7 +1608,7 @@ export default function CleaningScreen({ route, navigation }) {
       {/* Filmstrip: current photo ± 1 neighbour, laid out side by side and
           moved as ONE strip. The gesture lives on the STATIC container, so
           it survives the card sliding out from under the finger. */}
-      <GestureDetector gesture={pan}>
+      <GestureDetector gesture={photoGesture}>
         <View style={styles.photoArea}>
           {stack.map(({ asset, index }) => {
             const isCurrent = index === currentIdx;
@@ -1675,6 +1720,16 @@ export default function CleaningScreen({ route, navigation }) {
         visible={showExif}
         asset={displayAsset}
         onClose={() => setShowExif(false)}
+      />
+
+      {/* Pinch-opened zoom. It is fed the whole VISIBLE group so the viewer's
+          own swipe/chevrons page through the same photos the strip shows,
+          and it starts on whichever one was under the finger. */}
+      <PhotoViewer
+        visible={showZoom}
+        assets={visible}
+        initialIndex={currentIdx}
+        onClose={() => setShowZoom(false)}
       />
 
       <SimilarModal

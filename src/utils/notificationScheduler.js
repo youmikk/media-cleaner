@@ -10,16 +10,15 @@ Notifications.setNotificationHandler({
 });
 
 /**
- * Enable the daily cleanup reminder: picks a random time between 8:00 and
- * 20:00 and schedules a repeating daily local notification.
+ * Enable the daily cleanup reminder at the user's chosen local hour.
  * Returns true when scheduled, false when permission was denied.
  */
-export async function enableDailyReminder(t) {
+export async function enableDailyReminder(t, hour = 19, minute = 0) {
   const granted = await ensureNotificationPermission();
   if (!granted) return false;
   await Notifications.cancelAllScheduledNotificationsAsync();
-  const hour = 8 + Math.floor(Math.random() * 12); // 8..19
-  const minute = Math.floor(Math.random() * 60);
+  const safeHour = Math.max(0, Math.min(23, Number(hour) || 0));
+  const safeMinute = Math.max(0, Math.min(59, Number(minute) || 0));
   await Notifications.scheduleNotificationAsync({
     content: {
       title: t('reminder_notif_title'),
@@ -27,8 +26,8 @@ export async function enableDailyReminder(t) {
     },
     trigger: {
       type: Notifications.SchedulableTriggerInputTypes.DAILY,
-      hour,
-      minute,
+      hour: safeHour,
+      minute: safeMinute,
     },
   });
   return true;

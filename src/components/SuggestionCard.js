@@ -7,8 +7,19 @@ import { useSettings } from '../context/SettingsContext';
 /**
  * Horizontal smart-suggestion card with thumbnail, description and CTA.
  */
-export default function SuggestionCard({ icon, title, description, thumbnailUri, count, onClean }) {
+export default function SuggestionCard({
+  icon,
+  title,
+  description,
+  thumbnailUri,
+  count,
+  onClean,
+  progress = null,
+}) {
   const { colors, t } = useSettings();
+  const progressPercent = progress?.total
+    ? Math.min(100, Math.round((progress.done / progress.total) * 100))
+    : 0;
   return (
     <View style={[styles.card, { backgroundColor: colors.card }]}>
       <View style={styles.thumbWrap}>
@@ -31,6 +42,26 @@ export default function SuggestionCard({ icon, title, description, thumbnailUri,
       <Text style={[styles.desc, { color: colors.subtext }]} numberOfLines={2}>
         {description}
       </Text>
+      {progress && progress.total > 0 && (
+        <View style={styles.progressWrap}>
+          <View style={styles.progressRow}>
+            <Text style={[styles.progressText, { color: colors.subtext }]} numberOfLines={1}>
+              {progress.label}
+            </Text>
+            <Text style={[styles.progressValue, { color: colors.accent }]}>
+              {progressPercent}%
+            </Text>
+          </View>
+          <View style={[styles.progressTrack, { backgroundColor: colors.chartTrack }]}>
+            <View
+              style={[
+                styles.progressFill,
+                { width: `${progressPercent}%`, backgroundColor: colors.accent },
+              ]}
+            />
+          </View>
+        </View>
+      )}
       <Pressable
         onPress={onClean}
         disabled={count === 0}
@@ -52,9 +83,10 @@ export default function SuggestionCard({ icon, title, description, thumbnailUri,
 const styles = StyleSheet.create({
   card: {
     width: 190,
-    borderRadius: 18,
+    borderRadius: 8,
     padding: 14,
     marginRight: 12,
+    minHeight: 244,
   },
   thumbWrap: { marginBottom: 10 },
   thumb: { width: '100%', height: 96, borderRadius: 12 },
@@ -73,6 +105,17 @@ const styles = StyleSheet.create({
   badgeText: { color: '#fff', fontSize: 11, fontWeight: '800' },
   title: { fontSize: 15, fontWeight: '700' },
   desc: { fontSize: 12, marginTop: 3, minHeight: 32 },
+  progressWrap: { marginTop: 8 },
+  progressRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 6,
+  },
+  progressText: { flex: 1, fontSize: 10 },
+  progressValue: { fontSize: 10, fontWeight: '800' },
+  progressTrack: { height: 4, borderRadius: 2, marginTop: 5, overflow: 'hidden' },
+  progressFill: { height: 4, borderRadius: 2 },
   cta: {
     marginTop: 10,
     borderRadius: 12,

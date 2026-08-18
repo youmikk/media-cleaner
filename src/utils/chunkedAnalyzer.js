@@ -98,6 +98,7 @@ class ChunkedAnalyzer {
     this.state = {
       running: false,
       albumId: null,
+      mediaType: null,
       done: 0,
       total: 0,
       lowPower: false,
@@ -344,7 +345,7 @@ class ChunkedAnalyzer {
         `start ${albumId}/${mediaType} scope=${scope.length} todo=${total}`
           + ` concurrency=${CONCURRENCY} lowPower=${this.lowPower}`
       );
-      this._emit({ running: true, albumId, done: 0, total });
+      this._emit({ running: true, albumId, mediaType, done: 0, total });
 
       let i = 0;
       while (i < total) {
@@ -495,7 +496,13 @@ class ChunkedAnalyzer {
       finished = true;
     } finally {
       this.current = null;
-      this._emit({ running: false, albumId: null, done: 0, total: 0 });
+      this._emit({
+        running: false,
+        albumId: null,
+        mediaType: null,
+        done: 0,
+        total: 0,
+      });
       if (finished) this._next();
     }
   }

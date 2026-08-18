@@ -18,6 +18,8 @@ const translations = {
     start_hint: 'Tap a card to start cleaning',
     analyzing: 'Analyzing photos… ({done}/{total})',
     analyzing_videos: 'Analyzing videos… ({done}/{total})',
+    // Short form for the narrow suggestion card, which shows the % separately.
+    analyzing_short: 'Analyzing…',
     analysis_paused_low_power: 'Analysis paused – low power mode',
     analysis_low_power_chunk: 'Low power mode – analyzing slowly',
     eta_minutes: '~{min} min left',
@@ -60,6 +62,9 @@ const translations = {
     exit: 'Exit',
     no_photos: 'No photos found in this album.',
     no_videos: 'No videos found in this album.',
+    // Overall cleaning progress across the whole video album (the per-group
+    // "3/5" counter is rendered next to it).
+    video_progress: 'Cleaned {done} / {total}',
     permission_title: 'Photo access needed',
     permission_message:
       'MediaCleaner needs access to your photo library to help you clean it. Nothing leaves your device.',
@@ -92,17 +97,40 @@ const translations = {
     recycle_bin: 'Recycle Bin',
     recycle_empty: 'Recycle bin is empty',
     recycle_usage: 'Recycle bin uses {size}',
+    recycle_view_list: 'List',
+    recycle_view_grid: 'Grid',
+    recycle_columns: '{count} per row',
     days_left: '{days} days left',
     select_all: 'Select All',
     restore: 'Restore',
     delete_forever: 'Delete forever',
     settings_title: 'Settings',
+    // Captions for the sub-groups the settings card is split into.
+    settings_group_cleaning: 'Cleaning',
+    settings_group_playback: 'Playback',
+    settings_group_deletion: 'Deletion',
+    settings_group_reminder: 'Reminders',
+    settings_group_appearance: 'Appearance',
     setting_order: 'Photo cleaning order',
     order_random: 'Random',
     order_date: 'By Date',
     setting_similar: 'Similar photo detection',
     setting_recycle: 'Recycle Bin (30 days)',
+    setting_delete_mode: 'Deletion mode',
+    delete_mode_title: 'Choose deletion mode',
+    delete_mode_direct: 'Delete directly',
+    delete_mode_direct_desc: 'Free storage immediately after system confirmation',
+    delete_mode_recycle: 'App recycle bin',
+    delete_mode_recycle_desc: 'Keep a restorable copy for 30 days; uses extra storage',
+    delete_mode_recommended: 'Recommended',
+    delete_mode_tip_title: 'Direct deletion is recommended',
+    delete_mode_tip_desc: 'It releases storage immediately, and every batch still requires system confirmation.',
     setting_reminder: 'Daily cleanup reminder',
+    setting_reminder_time: 'Reminder time',
+    reminder_time_desc: 'Choose when the daily reminder appears',
+    delete_mode_warning_title: 'Deletion mode',
+    delete_mode_warning_direct: 'Direct deletion cannot be restored by MediaCleaner on Android.',
+    delete_mode_warning_recycle: 'The app recycle bin keeps a copy for 30 days and uses extra storage.',
     setting_theme: 'Theme',
     theme_system: 'System',
     theme_light: 'Light',
@@ -161,17 +189,7 @@ const translations = {
     clear_cache_confirm: 'Clear',
     clear_cache_done: 'Freed about {size}. Albums will be re-scanned the next time you open them.',
     clear_cache_message:
-      'This clears about {size}:\n' +
-      '· Album index and home preview caches\n' +
-      '· Similar / burst / low-quality analysis results\n' +
-      '· Image and video thumbnail caches\n' +
-      '\nWhat happens next:\n' +
-      '· Albums are re-scanned and re-analyzed on next open — a large library can take several minutes\n' +
-      '· The home cards and full-size photos load more slowly the first time\n' +
-      '\nNOT touched:\n' +
-      '· Your photos and videos — nothing is deleted\n' +
-      '· Recycle bin, favorites, usage statistics, all settings\n' +
-      '· A paused cleaning session and its reviewed history',
+      'Clear about {size} of scan and thumbnail caches? Your media, recycle bin, settings and cleaning progress are not affected. Albums will be scanned again when reopened.',
     update_checking: 'Checking…',
     insights_title: 'Photography Profile',
     insights_desc: 'Your shooting habits at a glance',
@@ -269,6 +287,7 @@ const translations = {
     start_hint: '点击卡片开始清理',
     analyzing: '正在分析照片… ({done}/{total})',
     analyzing_videos: '正在分析视频… ({done}/{total})',
+    analyzing_short: '正在分析…',
     analysis_paused_low_power: '分析已暂停 – 低电量模式',
     analysis_low_power_chunk: '低电量模式 – 正在缓慢分析',
     eta_minutes: '约剩 {min} 分钟',
@@ -311,6 +330,7 @@ const translations = {
     exit: '退出',
     no_photos: '该相册中没有照片。',
     no_videos: '该相册中没有视频。',
+    video_progress: '已清理 {done} / {total}',
     permission_title: '需要照片权限',
     permission_message: 'MediaCleaner 需要访问你的照片库以帮助你清理。所有数据均保留在本机。',
     permission_retry: '授予权限',
@@ -342,17 +362,39 @@ const translations = {
     recycle_bin: '回收站',
     recycle_empty: '回收站是空的',
     recycle_usage: '回收站占用：{size}',
+    recycle_view_list: '列表',
+    recycle_view_grid: '网格',
+    recycle_columns: '每行 {count} 个',
     days_left: '剩余 {days} 天',
     select_all: '全选',
     restore: '恢复',
     delete_forever: '永久删除',
     settings_title: '设置',
+    settings_group_cleaning: '清理',
+    settings_group_playback: '播放',
+    settings_group_deletion: '删除方式',
+    settings_group_reminder: '提醒',
+    settings_group_appearance: '外观',
     setting_order: '照片清理顺序',
     order_random: '随机',
     order_date: '按日期',
     setting_similar: '相似照片检测',
     setting_recycle: '回收站（30 天）',
+    setting_delete_mode: '删除模式',
+    delete_mode_title: '选择删除模式',
+    delete_mode_direct: '直接删除',
+    delete_mode_direct_desc: '系统确认后立即释放存储空间',
+    delete_mode_recycle: '应用回收站',
+    delete_mode_recycle_desc: '保留 30 天可恢复副本，但会额外占用空间',
+    delete_mode_recommended: '推荐',
+    delete_mode_tip_title: '建议使用直接删除',
+    delete_mode_tip_desc: '可立即释放存储空间，每批删除仍需经过系统确认。',
     setting_reminder: '每日清理提醒',
+    setting_reminder_time: '提醒时间',
+    reminder_time_desc: '选择每日提醒出现的时间',
+    delete_mode_warning_title: '删除模式',
+    delete_mode_warning_direct: '直接删除后，MediaCleaner 无法在安卓设备上恢复文件。',
+    delete_mode_warning_recycle: '应用回收站会保留 30 天副本，并额外占用存储空间。',
     setting_theme: '主题',
     theme_system: '跟随系统',
     theme_light: '浅色',
@@ -411,17 +453,7 @@ const translations = {
     clear_cache_confirm: '清理',
     clear_cache_done: '已释放约 {size}。下次打开相册时会重新扫描。',
     clear_cache_message:
-      '将清理约 {size}：\n' +
-      '· 相册索引与首页预览缓存\n' +
-      '· 相似 / 连拍 / 低质量的分析结果\n' +
-      '· 图片与视频的缩略图缓存\n' +
-      '\n清理之后：\n' +
-      '· 下次打开相册需要重新扫描并重新分析，大相册可能要几分钟\n' +
-      '· 首页卡片和大图第一次加载会慢一些\n' +
-      '\n不会动的：\n' +
-      '· 你的照片和视频，一张都不会删\n' +
-      '· 回收站、收藏、使用统计、全部设置\n' +
-      '· 暂停中的清理进度和已审阅记录',
+      '确认清理约 {size} 的扫描与缩略图缓存？照片、回收站、设置和清理进度不会受影响；再次打开相册时会重新扫描。',
     update_checking: '检查中…',
     insights_title: '摄影画像',
     insights_desc: '你的拍摄习惯一目了然',

@@ -31,33 +31,51 @@ export default function EXIFModal({ visible, asset, onClose }) {
     let alive = true;
     (async () => {
       const out = [];
+      // Each basic row is pushed through `row()`, which swallows its own
+      // failure. They used to share one try block, so a single bad value
+      // (the log showed a bare "undefined is not a function" here) replaced
+      // filename, dates, dimensions and size with one Debug line.
+      const row = (label, produce) => {
+        try {
+          const value = produce();
+          if (value !== null && value !== undefined && value !== '') {
+            out.push([label, value]);
+          }
+        } catch (e) {
+          logError('exif.row', e);
+        }
+      };
       try {
         const info = await MediaLibrary.getAssetInfoAsync(asset.id);
-        out.push([t('exif_file'), info.filename || '—']);
-        out.push([t('exif_created'), formatDate(info.creationTime, language)]);
-        out.push([t('exif_modified'), formatDate(info.modificationTime, language)]);
-        out.push([t('exif_dimensions'), `${info.width} × ${info.height}`]);
-        if (info.duration)
-          out.push([t('exif_duration'), `${info.duration.toFixed(1)}s`]);
-        const size = await getAssetSize(info);
-        if (size) out.push([t('exif_size'), formatBytes(size)]);
+        row(t('exif_file'), () => info.filename || '—');
+        row(t('exif_created'), () => formatDate(info.creationTime, language));
+        row(t('exif_modified'), () => formatDate(info.modificationTime, language));
+        row(t('exif_dimensions'), () => `${info.width} × ${info.height}`);
+        row(t('exif_duration'), () =>
+          info.duration ? `${Number(info.duration).toFixed(1)}s` : null
+        );
+        let size = 0;
+        try {
+          size = await getAssetSize(info);
+        } catch (e) {
+          size = 0;
+        }
+        row(t('exif_size'), () => (size ? formatBytes(size) : null));
         // PROGRESSIVE: show the basic rows IMMEDIATELY — camera fields and
         // the (network-bound) location row stream in as they resolve.
         if (alive) setRows([...out]);
 
         // Location: coordinates shown right away, geocoding upgrades the
         // row when it answers within 4s — it must never block the modal.
-        if (info.location) {
-          const coords = `${info.location.latitude.toFixed(5)}, ${info.location.longitude.toFixed(5)}`;
+        const lat = info.location && Number(info.location.latitude);
+        const lng = info.location && Number(info.location.longitude);
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
+          const coords = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
           const locIndex = out.length;
           out.push([t('exif_location'), coords]);
           if (alive) setRows([...out]);
           Promise.race([
-            reverseGeocode(
-              info.location.latitude,
-              info.location.longitude,
-              language
-            ),
+            reverseGeocode(lat, lng, language),
             new Promise((r) => setTimeout(() => r(null), 4000)),
           ])
             .then((address) => {

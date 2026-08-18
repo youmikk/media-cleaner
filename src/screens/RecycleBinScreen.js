@@ -6,6 +6,7 @@ import {
   FlatList,
   StyleSheet,
   Alert,
+  useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
@@ -21,17 +22,43 @@ import { Image } from 'expo-image';
 const RECYCLE_ROW_HEIGHT = 86;
 const RECYCLE_ROW_GAP = 8;
 const RECYCLE_ITEM_LENGTH = RECYCLE_ROW_HEIGHT + RECYCLE_ROW_GAP;
+// Column counts offered by the grid toggle. Tapping the chip cycles through
+// them, so keep the list short — three sensible densities, not a slider.
+const COLUMN_CHOICES = [3, 4, 5];
+const GRID_GAP = 6;
+const SCREEN_PADDING = 16;
 
 /**
  * Recycle bin: 30-day retention list with multi-select restore / permanent
  * delete. Items with fewer than 7 days remaining are shown in red.
+ *
+ * Two layouts: the detailed row list, and a thumbnail grid whose tiles carry
+ * a translucent size strip along the bottom edge. The choice (and the grid
+ * density) is persisted — browsing a few hundred deleted photos is a lot
+ * easier in the grid, and re-picking it on every visit got old fast.
  */
 export default function RecycleBinScreen({ navigation }) {
-  const { colors, t } = useSettings();
+  const { colors, t, settings, setSetting } = useSettings();
   const { trash, refreshTrash } = useApp();
+  const { width } = useWindowDimensions();
   const [selected, setSelected] = useState({});
   const [busy, setBusy] = useState(false);
   const [thumbs, setThumbs] = useState({});
+
+  const isGrid = settings.recycleView === 'grid';
+  const columns = COLUMN_CHOICES.includes(settings.recycleColumns)
+    ? settings.recycleColumns
+    : COLUMN_CHOICES[0];
+  const tileSize =
+    (width - SCREEN_PADDING * 2 - GRID_GAP * (columns - 1)) / columns;
+
+  const cycleColumns = () => {
+    const next =
+      COLUMN_CHOICES[
+        (COLUMN_CHOICES.indexOf(columns) + 1) % COLUMN_CHOICES.length
+      ];
+    setSetting('recycleColumns', next);
+  };
 
   useFocusEffect(
     useCallback(() => {
@@ -83,6 +110,9 @@ export default function RecycleBinScreen({ navigation }) {
     () => trash.reduce((total, entry) => total + (Number(entry.size) || 0), 0),
     [trash]
   );
+
+  const toggleOne = (item) =>
+    setSelected((s) => ({ ...s, [item.fileUri]: !s[item.fileUri] }));
 
   const toggleAll = () => {
     if (allSelected) setSelected({});
@@ -145,6 +175,122 @@ export default function RecycleBinScreen({ navigation }) {
     ]);
   };
 
+  const renderRow = (item) => {
+    const isSel = !!selected[item.fileUri];
+    const urgent = item.daysLeft < 7;
+    const thumb = thumbs[item.fileUri];
+    return (
+      <Pressable
+        style={[styles.row, { backgroundColor: colors.card }]}
+        onPress={() => toggleOne(item)}
+      >
+        <Ionicons
+          name={isSel ? 'checkbox' : 'square-outline'}
+          size={20}
+          color={isSel ? colors.accent : colors.subtext}
+        />
+        <View style={styles.thumbWrap}>
+          {thumb ? (
+            <Image
+              source={{ uri: thumb }}
+              style={styles.thumb}
+              contentFit="cover"
+              cachePolicy="memory-disk"
+              transition={100}
+            />
+          ) : (
+            <Ionicons
+              name={item.mediaType === 'video' ? 'videocam' : 'image'}
+              size={20}
+              color={colors.subtext}
+            />
+          )}
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text
+            style={{ color: colors.text, fontSize: 14, fontWeight: '600' }}
+            numberOfLines={1}
+          >
+            {item.filename}
+          </Text>
+          <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
+            {formatBytes(item.size)}
+          </Text>
+        </View>
+        <Text
+          style={{
+            color: urgent ? colors.danger : colors.subtext,
+            fontSize: 12,
+            fontWeight: urgent ? '800' : '500',
+          }}
+        >
+          {t('days_left', { days: item.daysLeft })}
+        </Text>
+      </Pressable>
+    );
+  };
+
+  const renderTile = (item) => {
+    const isSel = !!selected[item.fileUri];
+    const urgent = item.daysLeft < 7;
+    const thumb = thumbs[item.fileUri];
+    return (
+      <Pressable
+        style={[
+          styles.tile,
+          {
+            width: tileSize,
+            height: tileSize,
+            backgroundColor: colors.card,
+            borderColor: isSel ? colors.accent : 'transparent',
+          },
+        ]}
+        onPress={() => toggleOne(item)}
+      >
+        {thumb ? (
+          <Image
+            source={{ uri: thumb }}
+            style={styles.thumb}
+            contentFit="cover"
+            cachePolicy="memory-disk"
+            transition={100}
+          />
+        ) : (
+          <View style={styles.tilePlaceholder}>
+            <Ionicons
+              name={item.mediaType === 'video' ? 'videocam' : 'image'}
+              size={22}
+              color={colors.subtext}
+            />
+          </View>
+        )}
+        {item.mediaType === 'video' && (
+          <View style={styles.tileVideoBadge}>
+            <Ionicons name="play" size={10} color="#fff" />
+          </View>
+        )}
+        {/* Translucent strip along the bottom edge: file size, plus the
+            days-left counter once it turns urgent. Pure white on the scrim
+            rather than a theme colour — it sits over arbitrary photo pixels. */}
+        <View style={styles.tileFooter}>
+          <Text style={styles.tileFooterText} numberOfLines={1}>
+            {formatBytes(item.size)}
+          </Text>
+          {urgent && (
+            <Text style={[styles.tileFooterText, styles.tileFooterUrgent]}>
+              {item.daysLeft}d
+            </Text>
+          )}
+        </View>
+        {isSel && (
+          <View style={[styles.tileCheck, { backgroundColor: colors.accent }]}>
+            <Ionicons name="checkmark" size={13} color="#fff" />
+          </View>
+        )}
+      </Pressable>
+    );
+  };
+
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
       <View style={styles.topBar}>
@@ -154,7 +300,16 @@ export default function RecycleBinScreen({ navigation }) {
         <Text style={[styles.title, { color: colors.text }]}>
           {t('recycle_bin')}
         </Text>
-        <View style={{ width: 26 }} />
+        <Pressable
+          onPress={() => setSetting('recycleView', isGrid ? 'list' : 'grid')}
+          hitSlop={10}
+        >
+          <Ionicons
+            name={isGrid ? 'list-outline' : 'grid-outline'}
+            size={24}
+            color={colors.accent}
+          />
+        </Pressable>
       </View>
 
       {trash.length === 0 ? (
@@ -166,88 +321,63 @@ export default function RecycleBinScreen({ navigation }) {
         </View>
       ) : (
         <>
-          <Pressable style={styles.selectAll} onPress={toggleAll}>
-            <Ionicons
-              name={allSelected ? 'checkbox' : 'square-outline'}
-              size={20}
-              color={colors.accent}
-            />
-            <Text style={{ color: colors.text, fontSize: 14, fontWeight: '600' }}>
-              {t('select_all')}
-            </Text>
-          </Pressable>
+          <View style={styles.toolBar}>
+            <Pressable style={styles.selectAll} onPress={toggleAll}>
+              <Ionicons
+                name={allSelected ? 'checkbox' : 'square-outline'}
+                size={20}
+                color={colors.accent}
+              />
+              <Text style={{ color: colors.text, fontSize: 14, fontWeight: '600' }}>
+                {t('select_all')}
+              </Text>
+            </Pressable>
+            {isGrid && (
+              <Pressable
+                style={[styles.columnChip, { backgroundColor: colors.card }]}
+                onPress={cycleColumns}
+              >
+                <Ionicons name="apps-outline" size={14} color={colors.subtext} />
+                <Text style={{ color: colors.subtext, fontSize: 12, fontWeight: '700' }}>
+                  {t('recycle_columns', { count: columns })}
+                </Text>
+              </Pressable>
+            )}
+          </View>
           <Text style={[styles.totalSize, { color: colors.subtext }]}>
             {t('recycle_usage', { size: formatBytes(trashBytes) })}
           </Text>
 
           <FlatList
+            // numColumns cannot change on a mounted FlatList, so the layout
+            // and density are baked into the key and it remounts instead.
+            key={isGrid ? `grid-${columns}` : 'list'}
             data={trash}
             keyExtractor={(item) => item.fileUri}
+            numColumns={isGrid ? columns : 1}
+            columnWrapperStyle={isGrid ? styles.gridRow : undefined}
             contentContainerStyle={{ paddingBottom: 140 }}
             // Every row has a fixed 58px thumbnail plus 14px vertical padding;
             // telling FlatList the exact geometry avoids measuring each row
-            // while scrolling a large recycle bin.
-            getItemLayout={(_, index) => ({
-              length: RECYCLE_ITEM_LENGTH,
-              offset: RECYCLE_ITEM_LENGTH * index,
-              index,
-            })}
-            renderItem={({ item }) => {
-              const isSel = !!selected[item.fileUri];
-              const urgent = item.daysLeft < 7;
-              const thumb = thumbs[item.fileUri];
-              return (
-                <Pressable
-                  style={[styles.row, { backgroundColor: colors.card }]}
-                  onPress={() =>
-                    setSelected((s) => ({ ...s, [item.fileUri]: !s[item.fileUri] }))
-                  }
-                >
-                  <Ionicons
-                    name={isSel ? 'checkbox' : 'square-outline'}
-                    size={20}
-                    color={isSel ? colors.accent : colors.subtext}
-                  />
-                  <View style={styles.thumbWrap}>
-                    {thumb ? (
-                      <Image
-                        source={{ uri: thumb }}
-                        style={styles.thumb}
-                        contentFit="cover"
-                        cachePolicy="memory-disk"
-                        transition={100}
-                      />
-                    ) : (
-                      <Ionicons
-                        name={item.mediaType === 'video' ? 'videocam' : 'image'}
-                        size={20}
-                        color={colors.subtext}
-                      />
-                    )}
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text
-                      style={{ color: colors.text, fontSize: 14, fontWeight: '600' }}
-                      numberOfLines={1}
-                    >
-                      {item.filename}
-                    </Text>
-                    <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
-                      {formatBytes(item.size)}
-                    </Text>
-                  </View>
-                  <Text
-                    style={{
-                      color: urgent ? colors.danger : colors.subtext,
-                      fontSize: 12,
-                      fontWeight: urgent ? '800' : '500',
-                    }}
-                  >
-                    {t('days_left', { days: item.daysLeft })}
-                  </Text>
-                </Pressable>
-              );
-            }}
+            // while scrolling a large recycle bin. In grid mode FlatList
+            // passes getItemLayout straight through to VirtualizedList, whose
+            // item count is Math.ceil(n / numColumns) — so the index here is a
+            // ROW index, not an item index, and the square tiles make the row
+            // pitch known up front.
+            getItemLayout={
+              isGrid
+                ? (_, rowIndex) => ({
+                    length: tileSize + GRID_GAP,
+                    offset: (tileSize + GRID_GAP) * rowIndex,
+                    index: rowIndex,
+                  })
+                : (_, index) => ({
+                    length: RECYCLE_ITEM_LENGTH,
+                    offset: RECYCLE_ITEM_LENGTH * index,
+                    index,
+                  })
+            }
+            renderItem={({ item }) => (isGrid ? renderTile(item) : renderRow(item))}
           />
 
           {selectedEntries.length > 0 && (
@@ -294,6 +424,71 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     paddingVertical: 12,
+  },
+  toolBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  columnChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+  },
+  gridRow: { gap: GRID_GAP, marginBottom: GRID_GAP },
+  tile: {
+    borderRadius: 10,
+    overflow: 'hidden',
+    borderWidth: 2,
+  },
+  tilePlaceholder: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(128,128,128,0.12)',
+  },
+  tileFooter: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 3,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  tileFooterText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  tileFooterUrgent: { color: '#ff6b6b' },
+  tileVideoBadge: {
+    position: 'absolute',
+    left: 4,
+    top: 4,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  tileCheck: {
+    position: 'absolute',
+    right: 4,
+    top: 4,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   totalSize: {
     fontSize: 13,

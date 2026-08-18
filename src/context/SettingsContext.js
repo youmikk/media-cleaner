@@ -20,8 +20,13 @@ export const DEFAULT_SETTINGS = {
   similarDetection: true,
   liveAutoplay: true, // iOS: auto-play Live Photos in the cleaning flow
   liveMuted: true, // iOS: mute Live Photo playback
-  recycleBin: true, // Android only
+  recycleBin: false, // Android only; direct deletion is the default
   dailyReminder: false,
+  reminderHour: 19,
+  // Recycle-bin browsing: 'list' is the detailed row layout, 'grid' the
+  // thumbnail wall. Persisted so the choice survives leaving the screen.
+  recycleView: 'list',
+  recycleColumns: 3,
   theme: 'system', // 'system' | 'light' | 'dark'
   language: 'system', // 'system' (follow device) | 'zh' | 'en'
 };
