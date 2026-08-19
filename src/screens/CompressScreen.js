@@ -4,10 +4,8 @@ import {
   Text,
   Pressable,
   FlatList,
-  Switch,
   StyleSheet,
   ActivityIndicator,
-  Alert,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -18,6 +16,9 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { useSettings } from '../context/SettingsContext';
 import { useStats } from '../context/AppContext';
 import { batchDelete } from '../utils/deletionManager';
+import IconButton from '../components/IconButton';
+import AppSwitch from '../components/AppSwitch';
+import { showAppAlert } from '../components/AppDialog';
 import {
   getAssets,
   getAssetSizes,
@@ -210,7 +211,7 @@ export default function CompressScreen({ navigation }) {
     if (aborted) return; // screen is gone; don't touch navigation
     const message =
       failedVideos.length > 0 ? t('compress_video_unavailable') : '';
-    Alert.alert(t('compress_done', { size: formatBytes(savedBytes) }), message, [
+    showAppAlert(t('compress_done', { size: formatBytes(savedBytes) }), message, [
       { text: t('done'), onPress: () => navigation.goBack() },
     ]);
   };
@@ -218,13 +219,17 @@ export default function CompressScreen({ navigation }) {
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
       <View style={styles.topBar}>
-        <Pressable onPress={() => navigation.goBack()} hitSlop={10}>
-          <Ionicons name="chevron-back" size={26} color={colors.text} />
-        </Pressable>
+        <IconButton
+          name="chevron-back"
+          label={t('back')}
+          onPress={() => navigation.goBack()}
+          color={colors.text}
+          iconSize={26}
+        />
         <Text style={[styles.title, { color: colors.text }]}>
           {t('compress_title')}
         </Text>
-        <View style={{ width: 26 }} />
+        <View style={{ width: 48 }} />
       </View>
 
       {/* Quality picker */}
@@ -288,10 +293,10 @@ export default function CompressScreen({ navigation }) {
         <Text style={[styles.label, { color: colors.text }]}>
           {t('compress_delete_original')}
         </Text>
-        <Switch
+        <AppSwitch
           value={deleteOriginal}
           onValueChange={setDeleteOriginal}
-          trackColor={{ true: colors.accent }}
+          label={t('compress_delete_original')}
         />
       </View>
 

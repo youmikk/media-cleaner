@@ -5,7 +5,6 @@ import {
   Pressable,
   FlatList,
   StyleSheet,
-  Alert,
   useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -17,6 +16,8 @@ import * as trashManager from '../utils/trashManager';
 import { formatBytes } from '../utils/albumHelpers';
 import { getTrashImageThumbnail, getVideoThumbnail } from '../utils/thumbCache';
 import { Image } from 'expo-image';
+import IconButton from '../components/IconButton';
+import { showAppAlert } from '../components/AppDialog';
 
 const RECYCLE_ROW_HEIGHT = 86;
 const RECYCLE_ROW_GAP = 8;
@@ -167,12 +168,14 @@ export default function RecycleBinScreen({ navigation }) {
       setBusy(false);
       setSelected({});
       refreshTrash();
-      if (failed > 0) Alert.alert(t('recycle_bin'), t('restore_failed_some'));
+      if (failed > 0) {
+        showAppAlert(t('recycle_bin'), t('restore_failed_some'));
+      }
     }
   };
 
   const deleteSelected = () => {
-    Alert.alert(t('delete_forever'), '', [
+    showAppAlert(t('delete_forever'), '', [
       { text: t('cancel'), style: 'cancel' },
       {
         text: t('delete_forever'),
@@ -311,22 +314,22 @@ export default function RecycleBinScreen({ navigation }) {
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
       <View style={styles.topBar}>
-        <Pressable onPress={() => navigation.goBack()} hitSlop={10}>
-          <Ionicons name="chevron-back" size={26} color={colors.text} />
-        </Pressable>
+        <IconButton
+          name="chevron-back"
+          label={t('back')}
+          onPress={() => navigation.goBack()}
+          color={colors.text}
+          iconSize={26}
+        />
         <Text style={[styles.title, { color: colors.text }]}>
           {t('recycle_bin')}
         </Text>
-        <Pressable
+        <IconButton
+          name={isGrid ? 'list-outline' : 'grid-outline'}
+          label={t(isGrid ? 'recycle_view_list' : 'recycle_view_grid')}
           onPress={() => setSetting('recycleView', isGrid ? 'list' : 'grid')}
-          hitSlop={10}
-        >
-          <Ionicons
-            name={isGrid ? 'list-outline' : 'grid-outline'}
-            size={24}
-            color={colors.accent}
-          />
-        </Pressable>
+          color={colors.accent}
+        />
       </View>
 
       {trash.length === 0 ? (

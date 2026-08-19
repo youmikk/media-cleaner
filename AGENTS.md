@@ -48,7 +48,7 @@ Also: use `expo-file-system/legacy` (the SDK 54 stable API — `getInfoAsync`, `
 - `@mediacleaner/*` — settings, sessions, favorites, tutorial flag, reviewed sets.
 - bare prefixes — analyzer caches: `analysis_v3_<albumId>`, `analysis_metrics_v2` (global), `album_summary_<id>`, `asset_list_v1_<type>_<id>`.
 
-Android AsyncStorage silently rejects values over ~2 MB, which loses the *whole* entry. Every large writer caps itself (`MAX_METRIC_ENTRIES = 6000`, asset-list payloads skipped above 1.8 MB, `reviewedStore` CAP 20000). Preserve these caps when touching those files.
+Android AsyncStorage silently rejects values over ~2 MB, which loses the *whole* entry. Every large writer caps each value (`MAX_METRIC_ENTRIES = 6000`, asset-list payloads skipped above 1.8 MB, `reviewedStore` shards capped at 20000 ids). Preserve these per-value caps when touching those files.
 
 ### Analysis engine (`src/utils/chunkedAnalyzer.js` + `imageHashing.js`)
 
@@ -65,7 +65,7 @@ Key invariants:
 
 - `sessionManager` stores sessions **keyed by type** (`active_session_photo` / `active_session_video`). A video session must never overwrite a paused photo session — that bug wiped the saved shuffle order.
 - Sessions from suggestion cards (largest files, low quality) set `ephemeral: true`: never persisted, and `finishSession` skips `discardSession` for them so the real paused session survives.
-- `reviewedStore` records confirmed groups per album (kept photos included) so they leave the random pool permanently until the round auto-resets.
+- `reviewedStore` records confirmed groups in one global set per media type (kept items included). Decisions are shared across overlapping categories, completed categories stay at 100%, and only genuinely new asset ids enter later cleaning sessions. Do not auto-reset the reviewed pool.
 - Photo transitions are a **card stack** (next photo pre-rendered underneath) — not a swap — to avoid the "same photo after swipe" class of bug.
 
 ### Video memory discipline (`VideoCard.js`)

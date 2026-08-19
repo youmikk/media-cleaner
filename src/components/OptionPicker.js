@@ -4,6 +4,7 @@ import {
   View,
   Text,
   Pressable,
+  Platform,
   StyleSheet,
   useWindowDimensions,
 } from 'react-native';
@@ -11,10 +12,10 @@ import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
 import GlassSurface from './GlassSurface';
+import AppBottomSheet from './AppBottomSheet';
 
-// NATIVE system menu (@react-native-menu/menu → UIMenu / PopupMenu).
-// Present only in builds that include the native module — Expo Go and
-// older binaries fall back to the JS menu below.
+// Native system menu is an iOS-only enhancement. Android always uses the
+// app-owned bottom sheet so OEM PopupMenu styling cannot leak into the UI.
 let MenuView = null;
 try {
   // eslint-disable-next-line global-require
@@ -32,7 +33,13 @@ try {
  * NOTE: real Liquid Glass views must NOT be transform-animated (borders
  * drop and the surface "flies") — the Modal's own fade is the appearance.
  */
-export default function OptionPicker({ label, value, options, onChange }) {
+export default function OptionPicker({
+  label,
+  value,
+  options,
+  onChange,
+  divider = true,
+}) {
   const { colors } = useSettings();
   const { height: SCREEN_H } = useWindowDimensions();
   const [open, setOpen] = useState(false);
@@ -54,9 +61,13 @@ export default function OptionPicker({ label, value, options, onChange }) {
   );
 
   const openMenu = (pressEvent) => {
-    // Press-point fallback: measureInWindow can fail silently on some
-    // Android versions — pageY always exists, so the menu still anchors
-    // to the tapped row instead of jumping to the screen center.
+    if (Platform.OS === 'android') {
+      setAnchor(null);
+      setOpen(true);
+      return;
+    }
+    // Press-point fallback: measureInWindow can fail silently, but pageY still
+    // lets the iOS fallback menu anchor instead of jumping to screen center.
     const pageY =
       pressEvent && pressEvent.nativeEvent ? pressEvent.nativeEvent.pageY : null;
     const est = 34 + options.length * 44 + 6; // header + 44pt per option
@@ -117,22 +128,33 @@ export default function OptionPicker({ label, value, options, onChange }) {
     </>
   );
 
-  // Builds WITH the native module: a real system menu (UIMenu / PopupMenu),
-  // so the open/dismiss animation is UIKit's own — nothing is hand-rolled.
+  // iOS builds WITH the native module use a real UIMenu, so the
+  // open/dismiss animation is UIKit's own — nothing is hand-rolled.
   //
   // Layering matters: the MenuView is an INVISIBLE tap target rendered FIRST,
   // and the value label sits on top of it with pointerEvents="none" (touches
   // fall straight through). When iOS rebuilds the menu's host view it can
   // repaint underneath the text but never over it, which is what used to
   // show up as a flash in the selected value.
-  if (MenuView) {
+  if (Platform.OS === 'ios' && MenuView) {
     return (
-      <View style={[styles.row, { borderColor: colors.border }]}>
+      <View
+        style={[
+          styles.row,
+          divider && {
+            borderBottomWidth: StyleSheet.hairlineWidth,
+            borderBottomColor: colors.border,
+          },
+        ]}
+      >
         <Text style={[styles.label, { color: colors.text }]}>{label}</Text>
         <View style={styles.valueWrap}>
           <MenuView
             style={styles.menuOverlay}
             title={label}
+            accessibilityRole="button"
+            accessibilityLabel={`${label}, ${current ? current.label : ''}`}
+            accessibilityState={{ expanded: false }}
             onPressAction={({ nativeEvent }) => {
               const opt = options.find(
                 (o) => String(o.value) === nativeEvent.event
@@ -158,11 +180,90 @@ export default function OptionPicker({ label, value, options, onChange }) {
     );
   }
 
+  if (Platform.OS === 'android') {
+    return (
+      <>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`${label}, ${current ? current.label : ''}`}
+          accessibilityState={{ expanded: open }}
+          android_ripple={{ color: colors.accentSoft }}
+          style={[
+            styles.row,
+            divider && {
+              borderBottomWidth: StyleSheet.hairlineWidth,
+              borderBottomColor: colors.border,
+            },
+          ]}
+          onPress={openMenu}
+        >
+          {rowContent}
+        </Pressable>
+
+        <AppBottomSheet
+          visible={open}
+          title={label}
+          onClose={() => setOpen(false)}
+        >
+          <View style={styles.androidOptions}>
+            {options.map((opt) => {
+              const selected = opt.value === value;
+              return (
+                <Pressable
+                  key={String(opt.value)}
+                  onPress={() => select(opt)}
+                  android_ripple={{ color: colors.accentSoft }}
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: selected }}
+                  style={[
+                    styles.androidOption,
+                    {
+                      backgroundColor: selected
+                        ? colors.accentSoft
+                        : 'transparent',
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.androidOptionText,
+                      {
+                        color: selected ? colors.accent : colors.text,
+                        fontWeight: selected ? '700' : '500',
+                      },
+                    ]}
+                  >
+                    {opt.label}
+                  </Text>
+                  <Ionicons
+                    name={selected ? 'radio-button-on' : 'radio-button-off'}
+                    size={24}
+                    color={selected ? colors.accent : colors.subtext}
+                  />
+                </Pressable>
+              );
+            })}
+          </View>
+        </AppBottomSheet>
+      </>
+    );
+  }
+
   return (
     <>
       <Pressable
         ref={rowRef}
-        style={[styles.row, { borderColor: colors.border }]}
+        accessibilityRole="button"
+        accessibilityLabel={`${label}, ${current ? current.label : ''}`}
+        accessibilityState={{ expanded: open }}
+        style={({ pressed }) => [
+          styles.row,
+          divider && {
+            borderBottomWidth: StyleSheet.hairlineWidth,
+            borderBottomColor: colors.border,
+          },
+          pressed && { backgroundColor: colors.chartTrack },
+        ]}
         onPress={(e) => openMenu(e)}
       >
         {rowContent}
@@ -208,6 +309,8 @@ export default function OptionPicker({ label, value, options, onChange }) {
                     <Pressable
                       key={String(opt.value)}
                       onPress={() => select(opt)}
+                      accessibilityRole="radio"
+                      accessibilityState={{ checked: selected }}
                       style={({ pressed }) => [
                         styles.option,
                         i > 0 && {
@@ -253,11 +356,12 @@ export default function OptionPicker({ label, value, options, onChange }) {
 
 const styles = StyleSheet.create({
   row: {
+    minHeight: 56,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 14,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 2,
+    paddingVertical: 10,
     gap: 10,
   },
   label: { fontSize: 14, fontWeight: '600', flexShrink: 1 },
@@ -307,4 +411,15 @@ const styles = StyleSheet.create({
   },
   checkSlot: { width: 20, alignItems: 'center' },
   optionText: { fontSize: 16, flexShrink: 1 },
+  androidOptions: { gap: 4, paddingBottom: 4 },
+  androidOption: {
+    minHeight: 56,
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    overflow: 'hidden',
+  },
+  androidOptionText: { flex: 1, minWidth: 0, fontSize: 16 },
 });

@@ -170,7 +170,13 @@ export default function PhotoViewer({
 
         {/* Top bar: close · counter · badges */}
         <View style={[styles.topBar, { top: insets.top + 8 }]}>
-          <Pressable onPress={onClose} hitSlop={10} style={styles.roundBtn}>
+          <Pressable
+            onPress={onClose}
+            hitSlop={10}
+            style={styles.roundBtn}
+            accessibilityRole="button"
+            accessibilityLabel={t('close')}
+          >
             <Ionicons name="close" size={22} color="#fff" />
           </Pressable>
           <Text style={styles.counter}>
@@ -196,6 +202,8 @@ export default function PhotoViewer({
             onPress={goPrev}
             hitSlop={10}
             style={[styles.chev, { left: 8 }]}
+            accessibilityRole="button"
+            accessibilityLabel={t('previous')}
           >
             <Ionicons name="chevron-back" size={26} color="#fff" />
           </Pressable>
@@ -205,6 +213,8 @@ export default function PhotoViewer({
             onPress={goNext}
             hitSlop={10}
             style={[styles.chev, { right: 8 }]}
+            accessibilityRole="button"
+            accessibilityLabel={t('next')}
           >
             <Ionicons name="chevron-forward" size={26} color="#fff" />
           </Pressable>
@@ -214,6 +224,9 @@ export default function PhotoViewer({
         {selected && onToggleSelect && asset && (
           <Pressable
             onPress={() => onToggleSelect(asset.id)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: isSel }}
+            accessibilityLabel={isSel ? t('viewer_marked') : t('viewer_mark')}
             style={[
               styles.markBtn,
               {

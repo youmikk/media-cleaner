@@ -5,11 +5,13 @@ import {
   Text,
   Pressable,
   SectionList,
+  Platform,
   StyleSheet,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
 import { pickerStyles } from './pickerButtonStyle';
+import AppBottomSheet from './AppBottomSheet';
 
 function monthLabel(year, month, language) {
   if (language === 'zh') return `${year}年${month + 1}月`;
@@ -57,15 +59,130 @@ export default function TimePicker({ years = [], value, onSelect }) {
       end: new Date(year, month + 1, 1).getTime(),
     });
 
+  const timeList = (
+    <SectionList
+      style={styles.list}
+      sections={[{ data: years }]}
+      keyExtractor={(item) => String(item.year)}
+      ListHeaderComponent={
+        <Pressable
+          accessibilityRole="radio"
+          accessibilityState={{ checked: !value }}
+          android_ripple={{ color: colors.accentSoft }}
+          style={({ pressed }) => [
+            styles.row,
+            pressed && Platform.OS !== 'android' && {
+              backgroundColor: colors.chartTrack,
+            },
+          ]}
+          onPress={() => pick(null)}
+        >
+          <Text
+            style={[
+              styles.rowText,
+              {
+                color: !value ? colors.accent : colors.text,
+                fontWeight: !value ? '700' : '400',
+              },
+            ]}
+          >
+            {t('time_all')}
+          </Text>
+          {!value && (
+            <Ionicons name="checkmark" size={18} color={colors.accent} />
+          )}
+        </Pressable>
+      }
+      renderItem={({ item }) => (
+        <View>
+          <View style={styles.row}>
+            <Pressable
+              style={styles.yearButton}
+              android_ripple={{ color: colors.accentSoft }}
+              accessibilityRole="button"
+              onPress={() => pickYear(item.year)}
+            >
+              <Text style={[styles.rowText, { color: colors.text }]}>
+                {yearLabel(item.year, language)}
+                <Text style={{ color: colors.subtext, fontSize: 13 }}>
+                  {'  '}({item.count})
+                </Text>
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={yearLabel(item.year, language)}
+              accessibilityState={{ expanded: expandedYear === item.year }}
+              android_ripple={{
+                color: colors.accentSoft,
+                borderless: true,
+                radius: 24,
+              }}
+              style={styles.expandButton}
+              onPress={() =>
+                setExpandedYear(
+                  expandedYear === item.year ? null : item.year
+                )
+              }
+            >
+              <Ionicons
+                name={
+                  expandedYear === item.year ? 'chevron-up' : 'chevron-down'
+                }
+                size={20}
+                color={colors.subtext}
+              />
+            </Pressable>
+          </View>
+          {expandedYear === item.year &&
+            item.months.map(([m, count]) => (
+              <Pressable
+                key={m}
+                accessibilityRole="button"
+                android_ripple={{ color: colors.accentSoft }}
+                style={({ pressed }) => [
+                  styles.row,
+                  styles.monthRow,
+                  pressed && Platform.OS !== 'android' && {
+                    backgroundColor: colors.chartTrack,
+                  },
+                ]}
+                onPress={() => pickMonth(item.year, m)}
+              >
+                <Text style={[styles.rowText, { color: colors.text }]}>
+                  {monthLabel(item.year, m, language)}
+                  <Text style={{ color: colors.subtext, fontSize: 13 }}>
+                    {'  '}({count})
+                  </Text>
+                </Text>
+              </Pressable>
+            ))}
+        </View>
+      )}
+    />
+  );
+
   return (
     <>
       <Pressable
-        style={[
+        accessibilityRole="button"
+        accessibilityLabel={`${t('time_title')}, ${
+          value ? value.label : t('time_all')
+        }`}
+        accessibilityState={{ expanded: open }}
+        style={({ pressed }) => [
           pickerStyles.button,
           styles.button,
-          { backgroundColor: colors.card, borderColor: colors.border },
+          {
+            backgroundColor:
+              pressed && Platform.OS !== 'android'
+                ? colors.chartTrack
+                : colors.card,
+            borderColor: colors.border,
+          },
         ]}
         onPress={() => setOpen(true)}
+        android_ripple={{ color: colors.accentSoft }}
       >
         <Ionicons name="calendar-outline" size={18} color={colors.accent} />
         <Text
@@ -77,96 +194,35 @@ export default function TimePicker({ years = [], value, onSelect }) {
         <Ionicons name="chevron-down" size={16} color={colors.subtext} />
       </Pressable>
 
-      <Modal
-        visible={open}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setOpen(false)}
-      >
-        <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>
-          <Pressable
-            style={[styles.sheet, { backgroundColor: colors.card }]}
-            onPress={() => {}}
-          >
-            <Text style={[styles.title, { color: colors.text }]}>
-              {t('time_title')}
-            </Text>
-            <SectionList
-              style={{ maxHeight: 440 }}
-              sections={[{ data: years }]}
-              keyExtractor={(item) => String(item.year)}
-              ListHeaderComponent={
-                <Pressable style={styles.row} onPress={() => pick(null)}>
-                  <Text
-                    style={[
-                      styles.rowText,
-                      {
-                        color: !value ? colors.accent : colors.text,
-                        fontWeight: !value ? '700' : '400',
-                      },
-                    ]}
-                  >
-                    {t('time_all')}
-                  </Text>
-                  {!value && (
-                    <Ionicons name="checkmark" size={18} color={colors.accent} />
-                  )}
-                </Pressable>
-              }
-              renderItem={({ item }) => (
-                <View>
-                  <View style={styles.row}>
-                    <Pressable
-                      style={{ flex: 1 }}
-                      onPress={() => pickYear(item.year)}
-                    >
-                      <Text style={[styles.rowText, { color: colors.text }]}>
-                        {yearLabel(item.year, language)}
-                        <Text style={{ color: colors.subtext, fontSize: 13 }}>
-                          {'  '}({item.count})
-                        </Text>
-                      </Text>
-                    </Pressable>
-                    <Pressable
-                      hitSlop={10}
-                      onPress={() =>
-                        setExpandedYear(
-                          expandedYear === item.year ? null : item.year
-                        )
-                      }
-                    >
-                      <Ionicons
-                        name={
-                          expandedYear === item.year
-                            ? 'chevron-up'
-                            : 'chevron-down'
-                        }
-                        size={18}
-                        color={colors.subtext}
-                      />
-                    </Pressable>
-                  </View>
-                  {expandedYear === item.year &&
-                    item.months.map(([m, count]) => (
-                      <Pressable
-                        key={m}
-                        style={[styles.row, styles.monthRow]}
-                        onPress={() => pickMonth(item.year, m)}
-                      >
-                        <Text style={[styles.rowText, { color: colors.text }]}>
-                          {monthLabel(item.year, m, language)}
-                          <Text style={{ color: colors.subtext, fontSize: 13 }}>
-                            {'  '}({count})
-                          </Text>
-                        </Text>
-                      </Pressable>
-                    ))}
-                </View>
-              )}
-            />
+      {Platform.OS === 'android' ? (
+        <AppBottomSheet
+          visible={open}
+          title={t('time_title')}
+          onClose={() => setOpen(false)}
+        >
+          {timeList}
+        </AppBottomSheet>
+      ) : (
+        <Modal
+          visible={open}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setOpen(false)}
+        >
+          <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>
+            <Pressable
+              style={[styles.sheet, { backgroundColor: colors.card }]}
+              onPress={() => {}}
+              accessibilityViewIsModal
+            >
+              <Text style={[styles.title, { color: colors.text }]}>
+                {t('time_title')}
+              </Text>
+              {timeList}
+            </Pressable>
           </Pressable>
-        </Pressable>
-      </Modal>
+        </Modal>
+      )}
     </>
   );
 }
@@ -175,6 +231,7 @@ const styles = StyleSheet.create({
   // Geometry is shared with the album picker (pickerStyles.button); the
   // label is short, so this one only takes the room it needs.
   button: { flexShrink: 1 },
+  list: { maxHeight: 440 },
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.35)',
@@ -188,11 +245,27 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 17, fontWeight: '700', marginBottom: 10 },
   row: {
+    minHeight: 52,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 13,
+    paddingHorizontal: 4,
     gap: 10,
+    overflow: 'hidden',
   },
-  monthRow: { paddingLeft: 22, paddingVertical: 10 },
+  yearButton: {
+    minHeight: 52,
+    flex: 1,
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  expandButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  monthRow: { paddingLeft: 22 },
   rowText: { fontSize: 15 },
 });

@@ -43,7 +43,17 @@ export default function SuggestionCard({
         {description}
       </Text>
       {progress && progress.total > 0 && (
-        <View style={styles.progressWrap}>
+        <View
+          style={styles.progressWrap}
+          accessibilityRole="progressbar"
+          accessibilityLabel={`${title}, ${progress.label}`}
+          accessibilityValue={{
+            min: 0,
+            max: 100,
+            now: progressPercent,
+            text: `${progressPercent}%`,
+          }}
+        >
           <View style={styles.progressRow}>
             <Text style={[styles.progressText, { color: colors.subtext }]} numberOfLines={1}>
               {progress.label}
@@ -65,9 +75,15 @@ export default function SuggestionCard({
       <Pressable
         onPress={onClean}
         disabled={count === 0}
-        style={[
+        accessibilityRole="button"
+        accessibilityLabel={`${title}, ${
+          count === 0 ? t('nothing_found') : t('clean_now')
+        }`}
+        accessibilityState={{ disabled: count === 0 }}
+        style={({ pressed }) => [
           styles.cta,
           { backgroundColor: count === 0 ? colors.chartTrack : colors.accent },
+          pressed && styles.ctaPressed,
         ]}
       >
         <Text
@@ -119,8 +135,10 @@ const styles = StyleSheet.create({
   cta: {
     marginTop: 10,
     borderRadius: 12,
-    paddingVertical: 9,
+    minHeight: 44,
     alignItems: 'center',
+    justifyContent: 'center',
   },
+  ctaPressed: { opacity: 0.72 },
   ctaText: { fontSize: 13, fontWeight: '700' },
 });

@@ -12,6 +12,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
 import { getAssets, ALL_ALBUM_ID } from '../utils/albumHelpers';
+import IconButton from '../components/IconButton';
 
 /**
  * 摄影画像 / Photography Profile — shooting-habit analytics computed from
@@ -112,13 +113,17 @@ export default function GalleryInsightsScreen({ navigation }) {
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
       <View style={styles.topBar}>
-        <Pressable onPress={() => navigation.goBack()} hitSlop={10}>
-          <Ionicons name="chevron-back" size={26} color={colors.text} />
-        </Pressable>
+        <IconButton
+          name="chevron-back"
+          label={t('back')}
+          onPress={() => navigation.goBack()}
+          color={colors.text}
+          iconSize={26}
+        />
         <Text style={[styles.title, { color: colors.text }]}>
           {t('insights_title')}
         </Text>
-        <View style={{ width: 26 }} />
+        <View style={{ width: 48 }} />
       </View>
 
       {!stats ? (

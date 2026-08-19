@@ -37,12 +37,131 @@ import { log } from '../utils/logger';
 // "random" order can show a DIFFERENT three without a rescan.
 const THUMB_POOL = 12;
 // Everything below the cached summary reads BIG AsyncStorage values and
-// JSON.parses them on the JS thread: the saved session order (up to 20k
-// ids), the reviewed set (another 20k) and the analysis cache (megabytes).
+// JSON.parses them on the JS thread: the saved session order, reviewed
+// ledger shards and the analysis cache (megabytes).
 // Doing that the instant the tab appears blocks the very thread the three
 // preview images need to attach and decode — on Android the cards sat
 // blank for seconds. Let the cached summary paint first, then catch up.
 const DEFER_MS = 450;
+const summaryRefreshJobs = new Map();
+const latestSummaryRefreshKey = new Map();
+const exactProgressJobs = new Map();
+let exactProgressChain = Promise.resolve();
+
+function scheduleExactProgress(key, work) {
+  const existing = exactProgressJobs.get(key);
+  if (existing) return existing;
+  const task = exactProgressChain
+    .catch(() => {})
+    .then(work)
+    .finally(() => {
+      if (exactProgressJobs.get(key) === task) exactProgressJobs.delete(key);
+    });
+  exactProgressJobs.set(key, task);
+  exactProgressChain = task;
+  return task;
+}
+
+function summaryFingerprintKey(fingerprint) {
+  return JSON.stringify(fingerprint || {});
+}
+
+function joinSummaryRefresh(
+  albumId,
+  mediaType,
+  fingerprint,
+  firstPagePromise,
+  listener
+) {
+  const key = `${mediaType}/${albumId}/${summaryFingerprintKey(fingerprint)}`;
+  let entry = summaryRefreshJobs.get(key);
+  if (!entry) {
+    entry = { listeners: new Set(), latest: null, promise: null };
+    summaryRefreshJobs.set(key, entry);
+    const albumKey = `${mediaType}/${albumId}`;
+    latestSummaryRefreshKey.set(albumKey, key);
+    const publish = (summary) => {
+      entry.latest = summary;
+      for (const notify of entry.listeners) notify(summary);
+    };
+    entry.promise = (async () => {
+      const all = [];
+      let after;
+      let hasNext = true;
+      let first = true;
+      if (firstPagePromise) {
+        const page = await firstPagePromise;
+        for (const asset of page.assets) all.push(asset);
+        hasNext = page.hasNext;
+        after = page.endCursor;
+        publish({
+          count: fingerprint.assetCount || all.length,
+          thumbs: all
+            .slice(0, THUMB_POOL)
+            .map((asset) => ({ id: asset.id, uri: asset.uri })),
+          years: [],
+        });
+        first = false;
+      }
+      while (hasNext && all.length < 20000) {
+        // eslint-disable-next-line no-await-in-loop
+        const page = await getAssetsPage(
+          albumId,
+          mediaType,
+          after,
+          null,
+          'background'
+        );
+        for (const asset of page.assets) all.push(asset);
+        hasNext = page.hasNext;
+        after = page.endCursor;
+        if (first) {
+          publish({
+            count: fingerprint.assetCount || all.length,
+            thumbs: all
+              .slice(0, THUMB_POOL)
+              .map((asset) => ({ id: asset.id, uri: asset.uri })),
+            years: [],
+          });
+          first = false;
+        }
+      }
+      const fresh = {
+        count: fingerprint.assetCount || all.length,
+        thumbs: all
+          .slice(0, THUMB_POOL)
+          .map((asset) => ({ id: asset.id, uri: asset.uri })),
+        years: buildYearHistogram(all),
+      };
+      publish(fresh);
+      // A newer fingerprint may have started while this scan was running.
+      // Only the newest generation may publish the album's single cache key.
+      if (latestSummaryRefreshKey.get(albumKey) === key) {
+        await saveAlbumSummary(
+          albumId,
+          { fingerprint, summary: fresh },
+          mediaType
+        );
+      }
+      return fresh;
+    })().finally(() => {
+      if (summaryRefreshJobs.get(key) === entry) summaryRefreshJobs.delete(key);
+      if (latestSummaryRefreshKey.get(albumKey) === key) {
+        latestSummaryRefreshKey.delete(albumKey);
+      }
+    });
+  }
+  if (listener) {
+    entry.listeners.add(listener);
+    if (entry.latest) listener(entry.latest);
+  }
+  return {
+    promise: entry.promise,
+    unsubscribe: () => {
+      if (listener) entry.listeners.delete(listener);
+    },
+  };
+}
 
 /**
  * Album-select entry for BOTH the Photos and the Videos tab (`mediaType`).
@@ -81,9 +200,118 @@ export default function AlbumSelectScreen({
   // Preview for the picked year/month — one scoped media-store query.
   const [rangeThumbs, setRangeThumbs] = useState(null);
   const [progressByAlbum, setProgressByAlbum] = useState({});
+  const [progressLoadingByAlbum, setProgressLoadingByAlbum] = useState({});
   const [totalCounts, setTotalCounts] = useState({});
+  const progressFocusedRef = useRef(false);
+  const progressLoadedRef = useRef(new Set());
   const focusStartedAt = useRef(0);
   const firstThumbLogged = useRef(false);
+
+  useFocusEffect(
+    useCallback(() => {
+      progressFocusedRef.current = true;
+      progressLoadedRef.current.clear();
+      setProgressLoadingByAlbum({});
+      return () => {
+        progressFocusedRef.current = false;
+      };
+    }, [])
+  );
+
+  const loadExactProgress = useCallback(
+    (album) => {
+      if (!album?.id) return;
+      const targetId = album.id;
+      const key = `${mediaType}/${targetId}`;
+      if (progressLoadedRef.current.has(key)) return;
+      progressLoadedRef.current.add(key);
+      if (progressFocusedRef.current) {
+        setProgressLoadingByAlbum((current) => ({
+          ...current,
+          [targetId]: true,
+        }));
+      }
+      scheduleExactProgress(key, async () => {
+        const albumScope = reviewedStore.albumScopeFor(mediaType, targetId);
+        try {
+          await reviewedStore.primeReviewed([reviewScope, albumScope]);
+          const knownTotal = album.assetCount ?? totalCounts[targetId] ?? 0;
+          let assets = await getCachedAssetList(
+            targetId,
+            mediaType,
+            'background'
+          );
+          if (!assets && knownTotal > 20000) {
+            // Exact progress requires the current/history intersection.
+            // Stream every id for a huge album only while its row is visible.
+            assets = [];
+            let after;
+            let hasNext = true;
+            while (hasNext) {
+              // eslint-disable-next-line no-await-in-loop
+              const page = await getAssetsPage(
+                targetId,
+                mediaType,
+                after,
+                null,
+                'background'
+              );
+              reviewedStore.rememberAlbumMembership(
+                mediaType,
+                targetId,
+                page.assets
+              );
+              for (const asset of page.assets) assets.push(asset.id);
+              hasNext = page.hasNext;
+              after = page.endCursor;
+            }
+          } else if (!assets) {
+            assets = await getAssets(
+              targetId,
+              mediaType,
+              undefined,
+              'background'
+            );
+          }
+          reviewedStore.rememberAlbumMembership(mediaType, targetId, assets);
+          return reviewedStore.getAlbumProgressSync(
+            mediaType,
+            targetId,
+            assets
+          );
+        } finally {
+          reviewedStore.releaseReviewed(albumScope);
+        }
+      })
+        .then((progress) => {
+          if (!progressFocusedRef.current) return;
+          setProgressByAlbum((current) => ({
+            ...current,
+            [targetId]: progress,
+          }));
+        })
+        .catch(() => {
+          progressLoadedRef.current.delete(key);
+        })
+        .finally(() => {
+          if (!progressFocusedRef.current) return;
+          setProgressLoadingByAlbum((current) => {
+            if (!current[targetId]) return current;
+            const next = { ...current };
+            delete next[targetId];
+            return next;
+          });
+        });
+    },
+    [mediaType, reviewScope, totalCounts]
+  );
+
+  const loadVisibleProgress = useCallback(
+    (visibleAlbums) => {
+      for (const album of visibleAlbums || []) loadExactProgress(album);
+    },
+    [loadExactProgress]
+  );
 
   useFocusEffect(
     useCallback(() => {
@@ -116,75 +344,32 @@ export default function AlbumSelectScreen({
   // the whole list: a phone can have 150+ albums, and asking the reviewed
   // store for them one at a time was 150 getItem calls (plus 150 JSON
   // parses) on the JS thread every time this tab came into focus.
-  useEffect(() => {
-    if (albums.length === 0) return undefined;
-    let alive = true;
-    (async () => {
-      const allEntry = albums.find((a) => a.id === ALL_ALBUM_ID);
-      let allTotal = allEntry ? allEntry.assetCount : 0;
-      if (allEntry && !allTotal) {
-        allTotal = (await getAlbumFingerprint(ALL_ALBUM_ID, mediaType)).assetCount;
-        if (!alive) return;
-      }
-      // Prime the global ledger and every album ledger in one bounded batch.
-      // Progress is shared across overlapping collections, but the album
-      // ledger also contains ids reviewed before an asset was deleted.
-      await reviewedStore.primeReviewed([
-        reviewScope,
-        ...albums.map((album) => reviewedStore.albumScopeFor(mediaType, album.id)),
-      ]);
-      if (!alive) return;
-      const out = {};
-      const totals = {};
-      for (const album of albums) {
-        const total = album.id === ALL_ALBUM_ID ? allTotal : album.assetCount;
-        if (total !== undefined && total !== null) totals[album.id] = total;
-      }
-      setTotalCounts(totals);
-      setProgressByAlbum(out);
-
-      // Resolve every category in the background. This is deliberately
-      // throttled: opening the picker should never launch one MediaStore
-      // cursor per album at once, but every row should eventually show the
-      // same progress for an asset handled from any overlapping view.
-      const pending = albums.filter((album) => (totals[album.id] || 0) > 0);
-      const CONCURRENCY = 2;
-      for (let i = 0; i < pending.length && alive; i += CONCURRENCY) {
-        const batch = pending.slice(i, i + CONCURRENCY);
-        const results = await Promise.all(
-          batch.map(async (album) => {
-            try {
-              const assets =
-                (await getCachedAssetList(album.id, mediaType)) ||
-                (await getAssets(album.id, mediaType));
-              if (!alive) return null;
-              reviewedStore.rememberAlbumMembership(mediaType, album.id, assets);
-              return [
-                album.id,
-                reviewedStore.getAlbumProgressSync(mediaType, album.id, assets),
-              ];
-            } catch (e) {
-              return null;
-            }
-          })
-        );
-        if (!alive) return;
-        setProgressByAlbum((current) => {
-          const next = { ...current };
-          for (const result of results) {
-            if (result) next[result[0]] = result[1];
-          }
-          return next;
-        });
-        // Yield one frame between bridge batches so the picker and cards stay
-        // responsive on large libraries.
-        await new Promise((resolve) => requestAnimationFrame(resolve));
-      }
-    })().catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [albums, mediaType, reviewScope]);
+  useFocusEffect(
+    useCallback(() => {
+      if (albums.length === 0) return undefined;
+      let alive = true;
+      (async () => {
+        const allEntry = albums.find((a) => a.id === ALL_ALBUM_ID);
+        let allTotal = allEntry ? allEntry.assetCount : 0;
+        if (allEntry && !allTotal) {
+          allTotal = (
+            await getAlbumFingerprint(ALL_ALBUM_ID, mediaType)
+          ).assetCount;
+          if (!alive) return;
+        }
+        const totals = {};
+        for (const album of albums) {
+          const total =
+            album.id === ALL_ALBUM_ID ? allTotal : album.assetCount;
+          if (total !== undefined && total !== null) totals[album.id] = total;
+        }
+        setTotalCounts(totals);
+      })().catch(() => {});
+      return () => {
+        alive = false;
+      };
+    }, [albums, mediaType, reviewScope])
+  );
 
   useFocusEffect(
     useCallback(() => {
@@ -230,7 +415,10 @@ export default function AlbumSelectScreen({
               if (alive) setSessionPreview(null);
               return;
             }
-            const order = (await sessionManager.getOrder(mediaType)) || [];
+            const order =
+              pending.segmented && Array.isArray(pending.windowIds)
+                ? pending.windowIds
+                : (await sessionManager.getOrder(mediaType)) || [];
             const gs = pending.groupSize || 5;
             // SAME rule as resume: confirmed (reviewed) ids are dropped, the
             // interrupted group is the first gs unreviewed ids — the cards
@@ -238,6 +426,10 @@ export default function AlbumSelectScreen({
             const reviewed = await reviewedStore.getReviewed(
               reviewScope
             );
+            if (!reviewed) {
+              if (alive) setSessionPreview(null);
+              return;
+            }
             const ids = order.filter((id) => !reviewed.has(id)).slice(0, gs);
             if (ids.length === 0) {
               if (alive) setSessionPreview(null);
@@ -261,37 +453,19 @@ export default function AlbumSelectScreen({
     }, [albumId, settings.order, mediaType, reviewScope])
   );
 
-  // Exact progress for the album currently shown. Reviewed ids are global,
-  // so intersect them with this album's ids; this is what keeps All Photos,
-  // QQ, Camera and every other overlapping collection in sync.
+  // Exact progress for the selected album. Other rows are resolved lazily
+  // when they become visible in the picker; count-only math is incorrect
+  // after deletions because it cannot know the current/history intersection.
   useFocusEffect(
     useCallback(() => {
-      let alive = true;
-      const timer = setTimeout(async () => {
-        try {
-          const albumScope = reviewedStore.albumScopeFor(mediaType, albumId);
-          await reviewedStore.primeReviewed([reviewScope, albumScope]);
-          if (!alive) return;
-          const assets =
-            (await getCachedAssetList(albumId, mediaType)) ||
-            (await getAssets(albumId, mediaType));
-          if (!alive) return;
-          reviewedStore.rememberAlbumMembership(mediaType, albumId, assets);
-          const progress = reviewedStore.getAlbumProgressSync(
-            mediaType,
-            albumId,
-            assets
-          );
-          setProgressByAlbum((p) => ({ ...p, [albumId]: progress }));
-        } catch (e) {
-          // Progress is best-effort; the album itself remains usable.
-        }
-      }, DEFER_MS);
+      const timer = setTimeout(
+        () => loadExactProgress({ id: albumId }),
+        DEFER_MS
+      );
       return () => {
-        alive = false;
         clearTimeout(timer);
       };
-    }, [albumId, mediaType, reviewScope, summary?.count, totalCounts])
+    }, [albumId, loadExactProgress, summary?.count, totalCounts])
   );
 
   // Time-scoped preview. createdAfter/createdBefore let the media store do
@@ -321,6 +495,7 @@ export default function AlbumSelectScreen({
   useFocusEffect(
     useCallback(() => {
     let alive = true;
+    let unsubscribeRefresh = () => {};
     (async () => {
       try {
         const cached = await getAlbumSummary(albumId, mediaType);
@@ -352,7 +527,6 @@ export default function AlbumSelectScreen({
           ? null
           : getAssetsPage(albumId, mediaType);
         const fp = await fpPromise;
-        if (!alive) return;
         if (
           cached &&
           cached.fingerprint &&
@@ -365,75 +539,33 @@ export default function AlbumSelectScreen({
           return; // unchanged — ZERO scanning this visit
         }
 
-        // Album changed (or first visit): stream pages, show early.
-        // `all` is appended IN PLACE. `all = [...all, ...page.assets]` meant
-        // re-copying everything accumulated so far on each of ~66 pages —
-        // roughly 440k element copies on a 13k-photo library, on the JS
-        // thread, right after returning from a cleaning session (a deletion
-        // always changes the fingerprint, so this path always runs).
-        const all = [];
-        let after;
-        let hasNext = true;
-        let first = true;
-        if (firstPagePromise) {
-          const page = await firstPagePromise;
-          if (!alive) return;
-          for (const a of page.assets) all.push(a);
-          hasNext = page.hasNext;
-          after = page.endCursor;
-          setSummary((s) => ({
-            count: fp.assetCount || all.length,
-            thumbs: all.slice(0, THUMB_POOL).map((a) => ({ id: a.id, uri: a.uri })),
-            years: s ? s.years : [],
-          }));
-          if (!firstThumbLogged.current && all.length > 0) {
-            firstThumbLogged.current = true;
-            log(
-              'perf',
-              `home first-thumbnails ${Date.now() - focusStartedAt.current}ms ` +
-                `screen=${mediaType}s source=media-library count=${Math.min(3, all.length)}`
-            );
-          }
-          first = false;
-        }
-        while (hasNext && all.length < 20000) {
-          const page = await getAssetsPage(albumId, mediaType, after);
-          if (!alive) return;
-          for (const a of page.assets) all.push(a);
-          hasNext = page.hasNext;
-          after = page.endCursor;
-          if (first) {
-            setSummary((s) => ({
-              count: fp.assetCount || all.length,
-              thumbs: all.slice(0, THUMB_POOL).map((a) => ({ id: a.id, uri: a.uri })),
-              years: s ? s.years : [],
-            }));
-            if (!firstThumbLogged.current && all.length > 0) {
+        const refresh = joinSummaryRefresh(
+          albumId,
+          mediaType,
+          fp,
+          firstPagePromise,
+          (next) => {
+            if (!alive) return;
+            setSummary(next);
+            if (!firstThumbLogged.current && next.thumbs?.length) {
               firstThumbLogged.current = true;
               log(
                 'perf',
                 `home first-thumbnails ${Date.now() - focusStartedAt.current}ms ` +
-                  `screen=${mediaType}s source=media-library count=${Math.min(3, all.length)}`
+                  `screen=${mediaType}s source=media-library count=${Math.min(3, next.thumbs.length)}`
               );
             }
-            first = false;
           }
-        }
-        const fresh = {
-          // REAL total from the media store — never the scan cap.
-          count: fp.assetCount || all.length,
-          thumbs: all.slice(0, THUMB_POOL).map((a) => ({ id: a.id, uri: a.uri })),
-          years: buildYearHistogram(all),
-        };
-        if (!alive) return;
-        setSummary(fresh);
-        saveAlbumSummary(albumId, { fingerprint: fp, summary: fresh }, mediaType);
+        );
+        unsubscribeRefresh = refresh.unsubscribe;
+        await refresh.promise;
       } catch (e) {
         if (alive) setSummary({ count: 0, thumbs: [], years: [] });
       }
     })();
     return () => {
       alive = false;
+      unsubscribeRefresh();
     };
     }, [albumId, mediaType])
   );
@@ -445,7 +577,13 @@ export default function AlbumSelectScreen({
   // analysis cache — so even the CHECK waits for the cards to paint.
   // Videos have no pixel-analysis pipeline, so this is photos only.
   useEffect(() => {
-    if (isVideo || !settings.similarDetection) return undefined;
+    if (
+      isVideo ||
+      !settings.similarDetection ||
+      (summary && summary.count === 0)
+    ) {
+      return undefined;
+    }
     let alive = true;
     let startTimer;
     const checkTimer = setTimeout(() => {
@@ -465,7 +603,7 @@ export default function AlbumSelectScreen({
       clearTimeout(checkTimer);
       if (startTimer) clearTimeout(startTimer);
     };
-  }, [albumId, settings.similarDetection, isVideo]);
+  }, [albumId, settings.similarDetection, isVideo, summary?.count]);
 
   // Scoped count straight from the cached histogram — no asset scanning.
   const filteredCount = useMemo(() => {
@@ -504,8 +642,8 @@ export default function AlbumSelectScreen({
     const timeRange = timeFilter
       ? { start: timeFilter.start, end: timeFilter.end }
       : null;
-    // Cleaning decisions feed one shared progress ledger, but the pool that
-    // decides when to auto-reset is independent per album/time scope.
+    // The same global decision set feeds every overlapping category. A photo
+    // handled from QQ must not reappear from All Photos or a time scope.
     reviewedStore.activateRound(mediaType, albumId, timeRange);
     navigation.navigate(cleaningRoute, {
       albumId,
@@ -559,7 +697,9 @@ export default function AlbumSelectScreen({
           albums={albums}
           selected={albumId}
           progressByAlbum={progressByAlbum}
+          progressLoadingByAlbum={progressLoadingByAlbum}
           totalCounts={totalCounts}
+          onVisibleAlbums={loadVisibleProgress}
           onSelect={(a) => {
             if (a.id !== albumId) setSummary(null); // don't show stale thumbs
             setAlbumId(a.id);

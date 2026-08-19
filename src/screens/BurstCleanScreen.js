@@ -7,7 +7,6 @@ import {
   StyleSheet,
   ActivityIndicator,
   useWindowDimensions,
-  Alert,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { getVideoThumbnail } from '../utils/thumbCache';
@@ -22,6 +21,8 @@ import analyzer from '../utils/chunkedAnalyzer';
 import { batchDelete } from '../utils/deletionManager';
 import ProgressBar from '../components/ProgressBar';
 import * as suggestionCache from '../utils/suggestionCache';
+import IconButton from '../components/IconButton';
+import { showAppAlert } from '../components/AppDialog';
 
 // Members whose hash differs from the group's reference by more than this
 // are NOT real burst duplicates — drop them from the group.
@@ -191,7 +192,7 @@ export default function BurstCleanScreen({ route, navigation }) {
   const cell = (width - 16 * 2 - 8 * 3) / 4;
 
   const confirm = () => {
-    Alert.alert(t('burst_confirm', { count: selectedIds.length }), '', [
+    showAppAlert(t('burst_confirm', { count: selectedIds.length }), '', [
       { text: t('cancel'), style: 'cancel' },
       {
         text: t('delete_all_marked'),
@@ -240,13 +241,14 @@ export default function BurstCleanScreen({ route, navigation }) {
     return (
       <SafeAreaView edges={['top', 'left', 'right']} style={[styles.loadingScreen, { backgroundColor: colors.background }]}>
         {!working && (
-          <Pressable
+          <IconButton
+            name="chevron-back"
+            label={t('back')}
             onPress={() => navigation.goBack()}
-            hitSlop={10}
+            color={colors.text}
+            iconSize={26}
             style={styles.loadingBack}
-          >
-            <Ionicons name="chevron-back" size={26} color={colors.text} />
-          </Pressable>
+          />
         )}
         <View style={styles.center}>
           <ActivityIndicator size="large" color={colors.accent} />
@@ -266,13 +268,17 @@ export default function BurstCleanScreen({ route, navigation }) {
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
       <View style={styles.topBar}>
-        <Pressable onPress={() => navigation.goBack()} hitSlop={10}>
-          <Ionicons name="chevron-back" size={26} color={colors.text} />
-        </Pressable>
+        <IconButton
+          name="chevron-back"
+          label={t('back')}
+          onPress={() => navigation.goBack()}
+          color={colors.text}
+          iconSize={26}
+        />
         <Text style={[styles.title, { color: colors.text }]}>
           {isDuplicate ? t('dupes_title') : t('burst_title')}
         </Text>
-        <View style={{ width: 26 }} />
+        <View style={{ width: 48 }} />
       </View>
       <Text style={[styles.hint, { color: colors.subtext }]}>
         {isDuplicate ? t('dupes_keep_hint') : t('burst_keep_hint')}

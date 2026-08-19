@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
-import { Modal, View, Text, Pressable, StyleSheet } from 'react-native';
+import { View, Text, Pressable, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
+import SettingsRow from './SettingsRow';
+import AppBottomSheet from './AppBottomSheet';
 
 /** Android deletion-mode row and its compact, theme-aware choice sheet. */
 export default function DeletionModePicker({ value, onChange }) {
@@ -15,88 +17,61 @@ export default function DeletionModePicker({ value, onChange }) {
 
   return (
     <>
-      <Pressable
-        style={[styles.settingRow, { borderColor: colors.border }]}
+      <SettingsRow
+        icon={value ? 'trash-bin-outline' : 'trash-outline'}
+        iconColor={value ? colors.accent : colors.danger}
+        iconBackgroundColor={value ? colors.accentSoft : colors.dangerSoft}
+        title={t('setting_delete_mode')}
+        subtitle={t(value ? 'delete_mode_recycle' : 'delete_mode_direct')}
         onPress={() => setOpen(true)}
+        divider={false}
+        compact
+      />
+
+      <AppBottomSheet
+        visible={open}
+        title={t('delete_mode_title')}
+        onClose={() => setOpen(false)}
       >
         <View
           style={[
-            styles.settingIcon,
-            { backgroundColor: value ? colors.accentSoft : colors.dangerSoft },
+            styles.recommendation,
+            { backgroundColor: colors.accentSoft },
           ]}
         >
-          <Ionicons
-            name={value ? 'trash-bin-outline' : 'trash-outline'}
-            size={19}
-            color={value ? colors.accent : colors.danger}
+          <Ionicons name="bulb-outline" size={20} color={colors.accent} />
+          <View style={styles.recommendationCopy}>
+            <Text style={[styles.recommendationTitle, { color: colors.text }]}>
+              {t('delete_mode_tip_title')}
+            </Text>
+            <Text style={[styles.description, { color: colors.subtext }]}>
+              {t('delete_mode_tip_desc')}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.options}>
+          <ModeOption
+            icon="trash-outline"
+            title={t('delete_mode_direct')}
+            description={t('delete_mode_direct_desc')}
+            selected={!value}
+            recommended
+            colors={colors}
+            t={t}
+            onPress={() => choose(false)}
+          />
+          <ModeOption
+            icon="archive-outline"
+            title={t('delete_mode_recycle')}
+            description={t('delete_mode_recycle_desc')}
+            selected={value}
+            colors={colors}
+            t={t}
+            onPress={() => choose(true)}
           />
         </View>
-        <View style={styles.settingCopy}>
-          <Text style={[styles.settingLabel, { color: colors.text }]}>
-            {t('setting_delete_mode')}
-          </Text>
-          <Text style={[styles.settingValue, { color: colors.subtext }]}>
-            {t(value ? 'delete_mode_recycle' : 'delete_mode_direct')}
-          </Text>
-        </View>
-        <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
-      </Pressable>
-
-      <Modal
-        visible={open}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setOpen(false)}
-      >
-        <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>
-          <Pressable
-            style={[styles.sheet, { backgroundColor: colors.card }]}
-            onPress={() => {}}
-          >
-            <View style={[styles.handle, { backgroundColor: colors.chartTrack }]} />
-            <Text style={[styles.title, { color: colors.text }]}>
-              {t('delete_mode_title')}
-            </Text>
-
-            <View
-              style={[
-                styles.recommendation,
-                { backgroundColor: colors.accentSoft },
-              ]}
-            >
-              <Ionicons name="bulb-outline" size={20} color={colors.accent} />
-              <View style={styles.recommendationCopy}>
-                <Text style={[styles.recommendationTitle, { color: colors.text }]}>
-                  {t('delete_mode_tip_title')}
-                </Text>
-                <Text style={[styles.description, { color: colors.subtext }]}>
-                  {t('delete_mode_tip_desc')}
-                </Text>
-              </View>
-            </View>
-
-            <ModeOption
-              icon="trash-outline"
-              title={t('delete_mode_direct')}
-              description={t('delete_mode_direct_desc')}
-              selected={!value}
-              recommended
-              colors={colors}
-              t={t}
-              onPress={() => choose(false)}
-            />
-            <ModeOption
-              icon="archive-outline"
-              title={t('delete_mode_recycle')}
-              description={t('delete_mode_recycle_desc')}
-              selected={value}
-              colors={colors}
-              t={t}
-              onPress={() => choose(true)}
-            />
-          </Pressable>
-        </Pressable>
-      </Modal>
+      </AppBottomSheet>
     </>
   );
 }
@@ -113,12 +88,16 @@ function ModeOption({
 }) {
   return (
     <Pressable
-      style={[
+      accessibilityRole="radio"
+      accessibilityState={{ checked: selected }}
+      android_ripple={{ color: colors.accentSoft }}
+      style={({ pressed }) => [
         styles.option,
         {
           backgroundColor: selected ? colors.accentSoft : colors.elevated,
           borderColor: selected ? colors.accent : colors.border,
         },
+        pressed && { opacity: 0.92 },
       ]}
       onPress={onPress}
     >
@@ -152,44 +131,7 @@ function ModeOption({
 }
 
 const styles = StyleSheet.create({
-  settingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 11,
-    paddingVertical: 11,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  settingIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  settingCopy: { flex: 1 },
-  settingLabel: { fontSize: 14, fontWeight: '600' },
-  settingValue: { fontSize: 12, marginTop: 2 },
-  backdrop: {
-    flex: 1,
-    justifyContent: 'flex-end',
-    backgroundColor: 'rgba(0,0,0,0.42)',
-  },
-  sheet: {
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
-    paddingHorizontal: 16,
-    paddingTop: 10,
-    paddingBottom: 34,
-    gap: 10,
-  },
-  handle: {
-    width: 38,
-    height: 4,
-    borderRadius: 2,
-    alignSelf: 'center',
-    marginBottom: 4,
-  },
-  title: { fontSize: 18, fontWeight: '800', textAlign: 'center' },
+  options: { gap: 8, paddingBottom: 4 },
   recommendation: {
     flexDirection: 'row',
     gap: 10,
@@ -203,6 +145,7 @@ const styles = StyleSheet.create({
     minHeight: 78,
     borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
     padding: 13,
     flexDirection: 'row',
     alignItems: 'center',

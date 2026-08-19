@@ -1,9 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { InteractionManager, Platform } from 'react-native';
+import { AppState, InteractionManager, Platform } from 'react-native';
 import { getAssets, getAssetSizes, getAlbumFingerprint } from './albumHelpers';
 import { analyzePixels, hammingDistance } from './imageHashing';
 import { groupBursts } from './burstDetection';
 import { log } from './logger';
+import { runMediaWork } from './mediaWorkScheduler';
 import {
   subscribeLowPower,
   subscribeMemoryWarning,
@@ -22,7 +23,7 @@ const METRIC_VERSION = 3;
 // downscaled — 6 concurrent 48MP photos ≈ >1GB peak and OOM-kills the app
 // on big libraries. Keep the spike bounded. photoo-style adaptive value:
 // half the CPU cores, clamped 1..3 (native core count when available).
-let CONCURRENCY = Platform.OS === 'android' ? 3 : 4;
+let CONCURRENCY = 3;
 try {
   // eslint-disable-next-line global-require
   const PhotoMove = require('../../modules/photo-move');
@@ -54,6 +55,46 @@ const PERSIST_INTERVAL_MS = 8000;
 // than running hot. Slightly looser when only one decode runs at a time.
 const TARGET_MS_PER_PHOTO = CONCURRENCY > 1 ? 28 : 40;
 const MAX_COOLDOWN_MS = 120; // never stall a batch longer than this
+
+// One decode budget shared by album analysis and on-demand burst scoring.
+// Without this, metricsFor() could add another full-resolution decode on top
+// of the analyzer's batch and exceed the memory ceiling this constant exists
+// to enforce. Same-asset requests also share one in-flight result.
+let activeDecodes = 0;
+const decodeQueue = [];
+const pixelInFlight = new Map();
+
+function withDecodeSlot(work) {
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      activeDecodes += 1;
+      Promise.resolve()
+        .then(work)
+        .then(resolve, reject)
+        .finally(() => {
+          activeDecodes -= 1;
+          const next = decodeQueue.shift();
+          if (next) next();
+        });
+    };
+    if (activeDecodes < CONCURRENCY) run();
+    else decodeQueue.push(run);
+  });
+}
+
+function analyzeAssetPixels(asset) {
+  const key = `${asset.id}:${asset.modificationTime || 0}:${asset.width || 0}x${
+    asset.height || 0
+  }`;
+  if (pixelInFlight.has(key)) return pixelInFlight.get(key);
+  const task = withDecodeSlot(() =>
+    analyzePixels(asset.localUri || asset.uri)
+  ).finally(() => {
+    if (pixelInFlight.get(key) === task) pixelInFlight.delete(key);
+  });
+  pixelInFlight.set(key, task);
+  return task;
+}
 
 // Low-quality thresholds
 const BLUR_THRESHOLD = 45;
@@ -92,7 +133,8 @@ class ChunkedAnalyzer {
     this.listeners = new Set();
     this.lowPower = false;
     this.memoryPaused = false;
-    this.suspended = false; // e.g. while a cleaning session is active
+    this.appActive = !['background', 'inactive'].includes(AppState.currentState);
+    this.suspendCount = 0; // nested screens each own one suspend token
     this.metrics = null; // id -> {hash, sharpness, brightness}
     this._metricsDirty = false;
     this._metricsGeneration = 0;
@@ -219,9 +261,16 @@ class ChunkedAnalyzer {
 
   /** Metrics for one asset — instant when already analyzed. */
   async metricsFor(asset) {
+    this._initPowerAdaptation();
     const store = await this._loadMetrics();
     if (this._metricMatches(asset, store[asset.id])) return store[asset.id];
-    const m = await analyzePixels(asset.localUri || asset.uri);
+    while (!this.appActive || this.memoryPaused || this.suspendCount > 0) {
+      await sleep(400);
+    }
+    const m = await runMediaWork(
+      () => analyzeAssetPixels(asset),
+      'interactive'
+    );
     store[asset.id] = {
       ...m,
       v: METRIC_VERSION,
@@ -255,6 +304,9 @@ class ChunkedAnalyzer {
         this._emit({ memoryPaused: false });
       }, 8000);
     });
+    AppState.addEventListener('change', (state) => {
+      this.appActive = state === 'active';
+    });
   }
 
   subscribe(cb) {
@@ -287,7 +339,7 @@ class ChunkedAnalyzer {
     const cache = await this.getCached(albumId, mediaType);
     if (!cache) return { cache: null, stale: false };
     try {
-      const fp = await getAlbumFingerprint(albumId, mediaType);
+      const fp = await getAlbumFingerprint(albumId, mediaType, 'background');
       const stale =
         fp.assetCount !== cache.assetCount ||
         fp.latestModificationTime !== cache.latestModificationTime ||
@@ -373,11 +425,11 @@ class ChunkedAnalyzer {
   /** Pause heavy work while the user is actively cleaning — keeps swipes
    *  buttery. resume() picks up exactly where it left off. */
   suspend() {
-    this.suspended = true;
+    this.suspendCount += 1;
   }
 
   resume() {
-    this.suspended = false;
+    this.suspendCount = Math.max(0, this.suspendCount - 1);
   }
 
   async _next() {
@@ -397,7 +449,12 @@ class ChunkedAnalyzer {
       const store = await this._loadMetrics();
       // Only the newest MAX_HASHED are ever analysed, so only fetch that
       // many. This used to page the ENTIRE library and discard the tail.
-      const scope = await getAssets(albumId, mediaType, MAX_HASHED);
+      const scope = await getAssets(
+        albumId,
+        mediaType,
+        MAX_HASHED,
+        'background'
+      );
       // Ids this pass depends on — eviction must not take them out from
       // under us (see _persistMetrics).
       const scopeIds = new Set(scope.map((a) => a.id));
@@ -432,7 +489,10 @@ class ChunkedAnalyzer {
           finished = true; // re-queued by analyzeAlbum
           return;
         }
-        while ((this.memoryPaused || this.suspended) && !job.cancelled)
+        while (
+          (!this.appActive || this.memoryPaused || this.suspendCount > 0) &&
+          !job.cancelled
+        )
           await sleep(400);
 
         const chunk = chunkSizeFor(this.lowPower);
@@ -440,27 +500,33 @@ class ChunkedAnalyzer {
         // YIELD the JS thread after EVERY small batch — the analyzer must
         // never hold the thread long enough for touches to feel laggy.
         while (i < end && !job.cancelled && !job.pauseRequested) {
-          if (this.suspended || this.memoryPaused) break;
+          if (!this.appActive || this.suspendCount > 0 || this.memoryPaused) {
+            break;
+          }
           const batchStart = new Date().getTime();
           const batch = targets.slice(i, Math.min(i + CONCURRENCY, end));
-          await Promise.all(
-            batch.map(async (a) => {
-              try {
-                const metric = await analyzePixels(a.localUri || a.uri);
-                store[a.id] = {
-                  ...metric,
-                  v: METRIC_VERSION,
-                  modificationTime: a.modificationTime || 0,
-                  width: a.width || 0,
-                  height: a.height || 0,
-                };
-              } catch (e) {
-                // Do not persist a permanent tombstone for a transient iCloud
-                // or decoder failure. The next pass must be allowed to retry.
-                delete store[a.id];
-                failed++;
-              }
-            })
+          await runMediaWork(
+            () =>
+              Promise.all(
+                batch.map(async (a) => {
+                  try {
+                    const metric = await analyzeAssetPixels(a);
+                    store[a.id] = {
+                      ...metric,
+                      v: METRIC_VERSION,
+                      modificationTime: a.modificationTime || 0,
+                      width: a.width || 0,
+                      height: a.height || 0,
+                    };
+                  } catch (e) {
+                    // Do not persist a permanent tombstone for a transient iCloud
+                    // or decoder failure. The next pass must be allowed to retry.
+                    delete store[a.id];
+                    failed++;
+                  }
+                })
+              ),
+            'background'
           );
           this._metricsGeneration++;
           this._metricsDirty = true;
@@ -532,7 +598,9 @@ class ChunkedAnalyzer {
           if (members.length >= 2) candidates.push(...members);
         }
         const sizeMap =
-          candidates.length > 0 ? await getAssetSizes(candidates) : {};
+          candidates.length > 0
+            ? await getAssetSizes(candidates, { priority: 'background' })
+            : {};
         for (const members of buckets.values()) {
           if (members.length < 2) continue;
           const bySize = new Map();
@@ -550,7 +618,7 @@ class ChunkedAnalyzer {
         }
       }
 
-      const fp = await getAlbumFingerprint(albumId, mediaType);
+      const fp = await getAlbumFingerprint(albumId, mediaType, 'background');
       const result = {
         albumId,
         mediaType,

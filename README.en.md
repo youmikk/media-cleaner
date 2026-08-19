@@ -1,32 +1,34 @@
-# MediaCleaner 🧹
+# MediaCleaner
 
 [中文](./README.md) · **English**
 
-An open-source **photo & video cleaner** for iOS and Android, built with **React Native + Expo SDK 54** (managed workflow). Swipe through your gallery in small groups, batch-delete per group, detect similar / duplicate / burst / low-quality shots on-device, and watch how much space you reclaim — fully offline; nothing ever leaves your device.
+MediaCleaner is an open-source, fully offline photo and video cleaner for iOS and Android. It breaks large libraries into reviewable groups, supports album and time filters, and detects similar, duplicate, burst, and low-quality photos on-device. Cleaning progress, analysis caches, and favorites stay local; photos and videos are never uploaded.
 
-**License:** MIT · **Version:** v1.0.0
+The app uses React Native 0.81 and Expo SDK 54 (managed workflow), with one local native module for batched media queries, low-resolution grayscale decoding, and in-place album moves on Android.
+
+**License:** MIT · **Version:** v1.22.0
 
 ## Features
 
-**Cleaning flows.** The Photos tab splits an album into groups of the global group size (5/10/15/20). Photos switch as a **card stack** — the next photo is pre-rendered underneath, so transitions are flicker-free and never show a stale frame. Swipe left/right to browse; **swipe up to mark for deletion** — a glowing red trash bar slides down with the gesture and past ~40% of screen height the photo is marked with haptic feedback; **swipe down to move** to another album. Marks are only a pre-selection: actual deletion happens ONCE per group in the confirmation sheet, so the **system dialog appears once per batch**. Skip keeps the whole group; exiting deletes nothing. The Videos tab opens a vertical auto-playing feed directly (album filter top-right) with floating delete/like/share buttons and the same per-group batch confirmation; **only the current video holds a player instance** (neighbours show poster frames) and pre-buffering is capped, so even low-end devices never run out of memory. First launch opens an onboarding page that asks for **permissions first, gestures second**: page one requests photo access (plus "All files access" on Android native builds), then three hands-on pages where the swipe has to actually be performed to move on. After an OTA update lands, permissions are audited once and the page reappears if anything is missing.
+**Cleaning flows.** Both Photos and Videos let you choose an album, time range, and group size (2–20), then use the same **card-stack** interaction. Swipe left/right to browse, **up to mark for deletion**, and **down to move** to another album. Marks are only a pre-selection: actual deletion happens once per group in the confirmation sheet, so the **system dialog appears once per batch**. Skip keeps the group and exiting deletes nothing. Exactly one video player is alive at a time, with buffering capped at 6 seconds / 12 MB. First launch requests permissions, then teaches browsing, marking, and the bottom category chips with local demo data that never reads or changes the real library.
 
-**Time-scoped cleaning.** A time picker on the Photos home screen scopes cleaning to a **year or a specific month** ("2023" / "Jun 2023") — big libraries become bite-sized tasks.
+**Time-scoped cleaning.** Time pickers on both Photos and Videos scope cleaning to a **year or a specific month** ("2023" / "Jun 2023") — big libraries become bite-sized tasks.
 
 **Smart suggestions.** Six cards on the Profile tab: Largest Files (size badge on every photo in the flow), Burst Photos (timestamp + perceptual-hash double check, sharpest kept automatically), Old Screenshots (90+ days), **Exact Duplicates** (hash + resolution + file size triple match, one copy kept per group), **Duplicate Videos** (duration + resolution + size match, generated thumbnails), and **Low-Quality Photos** (blurry / under- / over-exposed / blank pocket shots). Suggestion cleanings run as **ephemeral sessions** — they never disturb the main album's paused progress or the home-screen preview.
 
 **Analysis engine.** ONE decode per photo yields a dHash difference hash, Laplacian sharpness and an exposure histogram; native downsampled decoding (Kotlin/Swift) produces the 64×64 grayscale directly, and metrics live in a global per-asset store persisted **incrementally** — interruptible, shared across albums, never re-analyzed. Similarity clustering only compares shots taken within a **2-minute window** (photoo's strategy); concurrency adapts to the CPU core count; the cancellable progress overlay shows a live time-remaining estimate. Caches carry an `assetCount` + `modificationTime` fingerprint with a re-analyze prompt on drift; iOS memory warnings pause the loop.
 
-**Sessions that survive restarts.** Entering a cleaning flow captures a "before" snapshot; exiting simply pauses — the shuffled order, current group, position and marks all persist, and the home cards keep showing that exact group for one-tap resume. Photo and video sessions are **stored independently** and never overwrite each other; **confirmed groups (kept or deleted) are removed from the order entirely**, so deletions in earlier groups can't shift later group boundaries; photos taken while paused surface as the very next group. Once every photo has been reviewed, the pool resets for a new round. Finishing computes the "after" snapshot for the storage chart and usage stats.
+**Sessions that survive restarts.** Exiting pauses the exact shuffled order, group, position, and marks. Photo and video sessions are **stored independently**. Confirmed groups, including kept items, never re-enter the queue: a completed category remains at 100%, and only genuinely new asset IDs appear on the next visit.
 
 **Info surfaces.** The floating glass info bar shows the capture date and a **reverse-geocoded address** (cached); tapping opens fully localized EXIF details (camera / lens / aperture / shutter / ISO / focal length). EXIF is merged **per field from three sources** — system API → native ExifInterface (Android) / ImageIO (iOS) → a JS parser fallback — so a field missing from one source is filled by another; the modal loads progressively, showing coordinates instantly and upgrading to an address when geocoding completes. All images render through `expo-image` native caching with next-photo prefetch.
 
-**Tools.** Photography Profile (hour-of-day distribution, busiest weekday/month, daily average) and a Compressor (pick the biggest files, batch re-encode at high/medium/low quality — images via expo-image-manipulator, videos via react-native-compressor — optionally deleting originals).
+**Tools.** My Favorites collects every hearted photo and video with grid/list views. Photography Profile shows capture trends, and the Compressor batch re-encodes large files with an optional delete-original step.
 
 **Recycle bin (Android).** Deletions are copied into an internal `trash/` folder for 30 days with select-all / restore / purge; items under 7 days left show in red. iOS uses the system "Recently Deleted".
 
-**Liquid Glass.** On iOS 26+ the tab bar and info bars are **native Liquid Glass** (`expo-glass-effect`); older iOS and Android fall back to an `expo-blur` frosted look via the shared `GlassSurface` component.
+**Platform UI.** On iOS 26+, the tab bar and info bars use **native Liquid Glass** (`expo-glass-effect`); older iOS versions use `expo-blur`. Android renders app-owned navigation, pickers, switches, dialogs, and bottom sheets, so the interface stays consistent across Xiaomi, vivo, and other OEM skins. Permission prompts, media-deletion confirmation, and share sheets remain system UI.
 
-**Settings.** Global group size, cleaning order (random / by date, default random), similarity toggle, recycle bin toggle (Android only), daily reminder at a random 8AM–8PM time, theme (system / light / dark, instant), language (**中文 by default**, English available), and **diagnostic log export** — a built-in ring-buffer logger flushes to disk continuously (crash context survives) and shares via the system sheet, which is how remote user issues get debugged.
+**Settings.** Cleaning order (random / by date), similarity detection, Android recycle bin, reminders, theme, language, and diagnostic log export. Photo and video group sizes are adjusted at their respective cleaning entries and saved independently.
 
 ## Project structure
 

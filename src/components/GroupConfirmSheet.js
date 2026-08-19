@@ -34,6 +34,7 @@ export default function GroupConfirmSheet({
   // list already, so a competing "keep all" would delete photos the user
   // just spared and skip an unseen group.
   busy = false,
+  busyLabel = null,
 }) {
   const { colors, t } = useSettings();
   const { width } = useWindowDimensions();
@@ -64,7 +65,18 @@ export default function GroupConfirmSheet({
             <Text style={[styles.title, { color: colors.text }]}>
               {t('confirm_delete_title', { count: assets.length })}
             </Text>
-            <Pressable onPress={busy ? undefined : onClose} hitSlop={10}>
+            <Pressable
+              disabled={busy}
+              onPress={onClose}
+              hitSlop={10}
+              accessibilityRole="button"
+              accessibilityLabel={t('close')}
+              accessibilityState={{ disabled: busy }}
+              style={({ pressed }) => [
+                styles.closeButton,
+                pressed && { backgroundColor: colors.chartTrack },
+              ]}
+            >
               <Ionicons name="close" size={22} color={colors.subtext} />
             </Pressable>
           </View>
@@ -80,8 +92,11 @@ export default function GroupConfirmSheet({
             style={{ maxHeight: 300 }}
             renderItem={({ item, index }) => (
               <Pressable
+                disabled={busy}
                 onPress={() => setViewer({ list: assets, index })} // tap = enlarge
                 style={{ width: cell, height: cell }}
+                accessibilityRole="button"
+                accessibilityLabel={t('details')}
               >
                 <Image
                   source={{ uri: thumbs[item.id] || item.uri }}
@@ -91,11 +106,15 @@ export default function GroupConfirmSheet({
                 />
                 {/* circle badge = spare this one */}
                 <Pressable
+                  disabled={busy}
                   hitSlop={8}
                   onPress={() => onUnmark(item.id)}
                   style={[styles.mark, { backgroundColor: colors.danger }]}
+                  accessibilityRole="button"
+                  accessibilityLabel={t('viewer_marked')}
+                  accessibilityState={{ selected: true, disabled: busy }}
                 >
-                  <Ionicons name="trash" size={13} color="#fff" />
+                  <Ionicons name="trash" size={15} color="#fff" />
                 </Pressable>
               </Pressable>
             )}
@@ -103,6 +122,8 @@ export default function GroupConfirmSheet({
           <View style={styles.buttons}>
             <Pressable
               disabled={busy}
+              accessibilityRole="button"
+              accessibilityState={{ disabled: busy }}
               style={[
                 styles.btn,
                 { backgroundColor: colors.chartTrack, opacity: busy ? 0.5 : 1 },
@@ -115,6 +136,10 @@ export default function GroupConfirmSheet({
             </Pressable>
             <Pressable
               disabled={busy || assets.length === 0}
+              accessibilityRole="button"
+              accessibilityState={{
+                disabled: busy || assets.length === 0,
+              }}
               style={[
                 styles.btn,
                 {
@@ -132,7 +157,7 @@ export default function GroupConfirmSheet({
                 ]}
               >
                 {busy
-                  ? t('deleting')
+                  ? busyLabel || t('deleting')
                   : `${t('delete_all_marked')} (${assets.length})`}
               </Text>
             </Pressable>
@@ -147,6 +172,7 @@ export default function GroupConfirmSheet({
         onClose={() => setViewer(null)}
         selected={markedMap}
         onToggleSelect={(id) => {
+          if (busy) return;
           if (markedMap[id]) onUnmark(id);
           else if (onRemark) onRemark(id);
         }}
@@ -176,14 +202,22 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 17, fontWeight: '700', flex: 1, marginRight: 8 },
   hint: { fontSize: 12, marginBottom: 12 },
+  closeButton: {
+    width: 44,
+    height: 44,
+    marginVertical: -10,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   thumb: { width: '100%', height: '100%', borderRadius: 10 },
   mark: {
     position: 'absolute',
     top: 5,
     right: 5,
-    width: 20,
-    height: 20,
-    borderRadius: 10,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
   },

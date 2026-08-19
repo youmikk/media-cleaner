@@ -104,6 +104,11 @@ export function hasScanLibrary() {
   return !!(native && native.scanLibrary);
 }
 
+/** True when iOS can return the library metadata without the expensive size walk. */
+export function hasScanLibraryMetadata() {
+  return !!(native && native.scanLibraryMetadata);
+}
+
 /**
  * Read the whole library in ONE native call.
  *
@@ -119,6 +124,15 @@ export function hasScanLibrary() {
 export async function scanLibrary(mediaType = 'photo', limit = 0) {
   if (!native || !native.scanLibrary) throw new Error('unavailable');
   return native.scanLibrary(mediaType, limit);
+}
+
+/**
+ * Fast metadata-only library scan. New iOS builds expose this so JavaScript
+ * can request sizes in bounded batches and let foreground work interleave.
+ */
+export async function scanLibraryMetadata(mediaType = 'all', limit = 0) {
+  if (!native || !native.scanLibraryMetadata) throw new Error('unavailable');
+  return native.scanLibraryMetadata(mediaType, limit);
 }
 
 /**

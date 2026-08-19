@@ -8,14 +8,15 @@ import {
   StyleSheet,
   ActivityIndicator,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import * as MediaLibrary from 'expo-media-library';
 import { useSettings } from '../context/SettingsContext';
+import IconButton from './IconButton';
 import { formatBytes, formatDate, getAssetSize } from '../utils/albumHelpers';
 import { reverseGeocode } from '../utils/geocode';
 import { parseExif } from '../utils/exifParser';
 import * as PhotoMove from '../../modules/photo-move';
 import { log, logError } from '../utils/logger';
+import { runMediaWork } from '../utils/mediaWorkScheduler';
 
 /**
  * Modal with full, LOCALIZED EXIF / metadata details for an asset.
@@ -46,7 +47,20 @@ export default function EXIFModal({ visible, asset, onClose }) {
         }
       };
       try {
-        const info = await MediaLibrary.getAssetInfoAsync(asset.id);
+        let systemInfo = null;
+        try {
+          systemInfo = await runMediaWork(
+            () => MediaLibrary.getAssetInfoAsync(asset.id),
+            'interactive'
+          );
+        } catch (e) {
+          // The asset may have been deleted or temporarily unavailable. The
+          // list asset still carries enough data for all basic rows.
+        }
+        const info = systemInfo || asset;
+        if (!systemInfo) {
+          log('exif.basic', `asset-info unavailable id=${asset.id}; fallback`);
+        }
         row(t('exif_file'), () => info.filename || '—');
         row(t('exif_created'), () => formatDate(info.creationTime, language));
         row(t('exif_modified'), () => formatDate(info.modificationTime, language));
@@ -158,7 +172,10 @@ export default function EXIFModal({ visible, asset, onClose }) {
             const fileUri = info.localUri || info.uri || asset.uri;
             if (PhotoMove.isAvailable()) {
               try {
-                const nativeExif = await PhotoMove.readExif(fileUri);
+                const nativeExif = await runMediaWork(
+                  () => PhotoMove.readExif(fileUri),
+                  'interactive'
+                );
                 if (nativeExif) {
                   fields = { ...extractCameraFields(nativeExif), ...fields };
                 }
@@ -168,7 +185,10 @@ export default function EXIFModal({ visible, asset, onClose }) {
             }
             if (!fields.camera) {
               try {
-                const parsed = await parseExif(fileUri);
+                const parsed = await runMediaWork(
+                  () => parseExif(fileUri),
+                  'interactive'
+                );
                 if (parsed) {
                   fields = { ...extractCameraFields(parsed), ...fields };
                 }
@@ -185,12 +205,10 @@ export default function EXIFModal({ visible, asset, onClose }) {
           if (fields.focal) out.push([t('exif_focal'), fields.focal]);
         } catch (e) {
           logError('exif.camera', e);
-          out.push(['Debug', `camera:ERR ${String(e && e.message ? e.message : e).slice(0, 60)}`]);
         }
       } catch (e) {
         // basic info failed — fall through with whatever we collected
         logError('exif.basic', e);
-        out.push(['Debug', `basic:ERR ${String(e && e.message ? e.message : e).slice(0, 60)}`]);
       }
       if (alive) setRows([...out]);
     })();
@@ -207,9 +225,14 @@ export default function EXIFModal({ visible, asset, onClose }) {
             <Text style={[styles.title, { color: colors.text }]}>
               {t('exif_title')}
             </Text>
-            <Pressable onPress={onClose} hitSlop={10}>
-              <Ionicons name="close" size={22} color={colors.subtext} />
-            </Pressable>
+            <IconButton
+              name="close"
+              label={t('close')}
+              onPress={onClose}
+              color={colors.subtext}
+              iconSize={22}
+              style={styles.closeButton}
+            />
           </View>
           {rows === null ? (
             <ActivityIndicator style={{ marginVertical: 24 }} color={colors.accent} />
@@ -256,6 +279,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 8,
   },
+  closeButton: { marginVertical: -10, marginRight: -10 },
   title: { fontSize: 17, fontWeight: '700' },
   row: {
     flexDirection: 'row',

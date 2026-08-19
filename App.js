@@ -4,7 +4,6 @@ import {
   Text,
   Pressable,
   StyleSheet,
-  Alert,
   Linking,
   Platform,
   InteractionManager,
@@ -37,6 +36,7 @@ import {
   APP_VERSION,
 } from './src/utils/updateChecker';
 import { installLogger } from './src/utils/logger';
+import AppDialogHost, { showAppAlert } from './src/components/AppDialog';
 
 // Capture crashes and console errors from the very first frame.
 installLogger(APP_VERSION);
@@ -81,6 +81,7 @@ function PermissionGate({ children }) {
       <Pressable
         style={[styles.gateBtn, { backgroundColor: colors.accent }]}
         onPress={request}
+        android_ripple={{ color: colors.accentSoft }}
       >
         <Text style={styles.gateBtnText}>{t('permission_retry')}</Text>
       </Pressable>
@@ -116,7 +117,7 @@ function AppInner() {
   }, []);
 
   // Everything that can pop a dialog waits until onboarding is out of the
-  // way — an Alert over the permission/gesture page would be unusable.
+  // way — a dialog over the permission/gesture page would be unusable.
   useEffect(() => {
     if (onboarding !== false) return undefined;
     let timer = null;
@@ -129,7 +130,7 @@ function AppInner() {
           const prompted = await AsyncStorage.getItem(ALLFILES_PROMPTED_KEY);
           if (prompted) return;
           await AsyncStorage.setItem(ALLFILES_PROMPTED_KEY, '1');
-          Alert.alert(t('native_move_title'), t('native_move_message'), [
+          showAppAlert(t('native_move_title'), t('native_move_message'), [
             { text: t('cancel'), style: 'cancel' },
             {
               text: t('native_move_enable'),
@@ -143,7 +144,7 @@ function AppInner() {
     }
     // Silent once-a-day new-APK check against GitHub Releases.
     autoCheckDaily((info) => {
-      Alert.alert(t('update_available', { version: info.version }), '', [
+      showAppAlert(t('update_available', { version: info.version }), '', [
         { text: t('cancel'), style: 'cancel' },
         { text: t('update_download'), onPress: () => Linking.openURL(info.url) },
       ]);
@@ -161,7 +162,7 @@ function AppInner() {
   }, [onboarding]);
 
   // The onboarding page already asked for "All files access", so mark it as
-  // prompted — the legacy Alert above must never double-ask.
+  // prompted — the upgrade prompt above must never double-ask.
   const finishOnboarding = () => {
     setOnboarding(false);
     AsyncStorage.multiSet([
@@ -208,7 +209,7 @@ function AppInner() {
     // Paused PHOTO sessions are normal now (exit = pause): the home cards
     // show the current group and resume silently — no launch prompt.
     if (session.type === 'photo') return;
-    Alert.alert(t('resume_title'), t('resume_message'), [
+    showAppAlert(t('resume_title'), t('resume_message'), [
       {
         text: t('discard'),
         style: 'destructive',
@@ -300,6 +301,7 @@ export default function App() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <SettingsProvider>
+          <AppDialogHost />
           <AppProvider>
             <AppInner />
           </AppProvider>

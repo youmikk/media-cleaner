@@ -11,6 +11,7 @@ import {
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
+import IconButton from './IconButton';
 import PhotoViewer from './PhotoViewer';
 import { getAssetsByIds } from '../utils/albumHelpers';
 
@@ -55,9 +56,14 @@ export default function SimilarModal({ visible, clusterIds, onClose, onDeleteSel
             <Text style={[styles.title, { color: colors.text }]}>
               {t('similar_title')}
             </Text>
-            <Pressable onPress={onClose} hitSlop={10}>
-              <Ionicons name="close" size={22} color={colors.subtext} />
-            </Pressable>
+            <IconButton
+              name="close"
+              label={t('close')}
+              onPress={onClose}
+              color={colors.subtext}
+              iconSize={22}
+              style={styles.closeButton}
+            />
           </View>
           <FlatList
             data={assets}
@@ -159,6 +165,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 12,
   },
+  closeButton: { marginVertical: -10, marginRight: -10 },
   title: { fontSize: 17, fontWeight: '700' },
   thumb: { width: '100%', height: '100%', borderRadius: 10 },
   check: {

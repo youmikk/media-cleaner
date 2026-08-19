@@ -18,6 +18,27 @@ const pending = new Map();
 let persistTimer = null;
 let persistChain = Promise.resolve();
 let cacheGeneration = 0;
+const MAX_VIDEO_THUMB_CONCURRENCY = 3;
+let activeVideoThumbs = 0;
+const videoThumbQueue = [];
+
+function scheduleVideoThumbnail(work) {
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      activeVideoThumbs += 1;
+      Promise.resolve()
+        .then(work)
+        .then(resolve, reject)
+        .finally(() => {
+          activeVideoThumbs -= 1;
+          const next = videoThumbQueue.shift();
+          if (next) next();
+        });
+    };
+    if (activeVideoThumbs < MAX_VIDEO_THUMB_CONCURRENCY) run();
+    else videoThumbQueue.push(run);
+  });
+}
 
 async function load() {
   if (mem) return mem;
@@ -92,11 +113,13 @@ export async function getVideoThumbnail(asset, opts = {}) {
   }
   if (pending.has(id)) return pending.get(id);
   const generation = cacheGeneration;
-  const task = VideoThumbnails.getThumbnailAsync(asset.localUri || asset.uri, {
-    time: 500,
-    quality: 0.5,
-    ...opts,
-  })
+  const task = scheduleVideoThumbnail(() =>
+    VideoThumbnails.getThumbnailAsync(asset.localUri || asset.uri, {
+      time: 500,
+      quality: 0.5,
+      ...opts,
+    })
+  )
     .then(({ uri }) => {
       if (generation === cacheGeneration) {
         store[id] = uri;

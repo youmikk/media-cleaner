@@ -16,6 +16,7 @@ import { useSettings } from '../context/SettingsContext';
 import { useFavorites } from '../context/AppContext';
 import { getAssetsByIds } from '../utils/albumHelpers';
 import { getVideoThumbnail } from '../utils/thumbCache';
+import IconButton from '../components/IconButton';
 
 const GAP = 6;
 const RESOLVE_CHUNK = 600;
@@ -156,20 +157,20 @@ export default function FavoritesScreen({ navigation }) {
       style={[styles.screen, { backgroundColor: colors.background }]}
     >
       <View style={styles.topBar}>
-        <Pressable onPress={() => navigation.goBack()} hitSlop={10}>
-          <Ionicons name="chevron-back" size={26} color={colors.text} />
-        </Pressable>
+        <IconButton
+          name="chevron-back"
+          label={t('back')}
+          onPress={() => navigation.goBack()}
+          color={colors.text}
+          iconSize={26}
+        />
         <Text style={[styles.title, { color: colors.text }]}>{t('my_favorites')}</Text>
-        <Pressable
+        <IconButton
+          name={isGrid ? 'list-outline' : 'grid-outline'}
+          label={t(isGrid ? 'recycle_view_list' : 'recycle_view_grid')}
           onPress={() => setSetting('favoriteView', isGrid ? 'list' : 'grid')}
-          hitSlop={10}
-        >
-          <Ionicons
-            name={isGrid ? 'list-outline' : 'grid-outline'}
-            size={24}
-            color={colors.accent}
-          />
-        </Pressable>
+          color={colors.accent}
+        />
       </View>
 
       {isGrid && visibleAssets.length > 0 && (

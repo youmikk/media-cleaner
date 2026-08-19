@@ -27,6 +27,10 @@ export async function startSession({
   assetIds = null,
   timeRange = null,
   order = null, // 'random' | 'date' — the queue was built for THIS mode
+  segmented = false,
+  windowIds = null,
+  cursorAfter = null,
+  cursorHasNext = false,
   before,
 }) {
   const session = {
@@ -38,6 +42,10 @@ export async function startSession({
     assetIds,
     timeRange,
     order,
+    segmented,
+    windowIds,
+    cursorAfter,
+    cursorHasNext,
     before,
     groupIndex: 0,
     photoIndex: 0,
@@ -49,8 +57,10 @@ export async function startSession({
   });
   // A fresh session invalidates the saved order of ITS OWN type only —
   // starting a video session must not touch a paused photo session's queue.
-  orderMemo.delete(type);
-  await AsyncStorage.removeItem(ORDER_KEY(type));
+  await withLock(ORDER_KEY(type), async () => {
+    orderMemo.delete(type);
+    await AsyncStorage.removeItem(ORDER_KEY(type));
+  });
   return session;
 }
 
@@ -71,11 +81,13 @@ let orderMemo = new Map(); // type -> string[]
 
 export async function saveOrder(assetIds, type = 'photo') {
   orderMemo.set(type, assetIds);
-  try {
-    await AsyncStorage.setItem(ORDER_KEY(type), JSON.stringify(assetIds));
-  } catch (e) {
-    // best effort
-  }
+  return withLock(ORDER_KEY(type), async () => {
+    try {
+      await AsyncStorage.setItem(ORDER_KEY(type), JSON.stringify(assetIds));
+    } catch (e) {
+      // best effort
+    }
+  });
 }
 
 export async function getOrder(type = 'photo') {
@@ -113,8 +125,10 @@ export async function saveProgress(patch, type = 'photo') {
 export async function discardSession(type = 'photo') {
   return withLock(SESSION_KEY(type), async () => {
     await AsyncStorage.removeItem(SESSION_KEY(type));
-    orderMemo.delete(type);
-    await AsyncStorage.removeItem(ORDER_KEY(type));
+    await withLock(ORDER_KEY(type), async () => {
+      orderMemo.delete(type);
+      await AsyncStorage.removeItem(ORDER_KEY(type));
+    });
   });
 }
 
@@ -124,8 +138,10 @@ export async function discardSessionIfId(id, type = 'photo') {
     const { ok, value } = await readJSON(SESSION_KEY(type));
     if (!ok || !value || value.id !== id) return false;
     await AsyncStorage.removeItem(SESSION_KEY(type));
-    orderMemo.delete(type);
-    await AsyncStorage.removeItem(ORDER_KEY(type));
+    await withLock(ORDER_KEY(type), async () => {
+      orderMemo.delete(type);
+      await AsyncStorage.removeItem(ORDER_KEY(type));
+    });
     return true;
   });
 }
@@ -169,21 +185,27 @@ export async function finishSession(session, measured = null) {
   let saved = { count: 0, bytes: 0 };
   try {
     const mediaType = session.type === 'video' ? 'video' : 'photo';
-    // Reuse the asset list the caller already has: recomputing it meant
-    // paging the entire album (up to 100 round-trips) while the screen was
-    // being torn down.
-    const after = await getAlbumSnapshot(
-      session.albumId,
-      mediaType,
-      session.afterAssets || null
-    );
-    saved =
-      measured && measured.bytes >= 0
-        ? { count: measured.count || 0, bytes: measured.bytes || 0 }
-        : {
-            count: Math.max(0, (session.before?.count || 0) - after.count),
-            bytes: Math.max(0, (session.before?.bytes || 0) - after.bytes),
-          };
+    let after;
+    if (measured && measured.bytes >= 0) {
+      saved = { count: measured.count || 0, bytes: measured.bytes || 0 };
+      // Deletion already returned exact count/bytes. Do not trigger another
+      // full album + library scan just to construct a history row.
+      after = {
+        count: Math.max(0, (session.before?.count || 0) - saved.count),
+        bytes: Math.max(0, (session.before?.bytes || 0) - saved.bytes),
+      };
+    } else {
+      // Compatibility fallback for sessions created by older builds.
+      after = await getAlbumSnapshot(
+        session.albumId,
+        mediaType,
+        session.afterAssets || null
+      );
+      saved = {
+        count: Math.max(0, (session.before?.count || 0) - after.count),
+        bytes: Math.max(0, (session.before?.bytes || 0) - after.bytes),
+      };
+    }
     await statsManager.recordSession({
       type: session.type,
       albumTitle: session.albumTitle,

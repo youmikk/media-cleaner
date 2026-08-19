@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { log } from './logger';
 
-export const APP_VERSION = '1.21.1';
+export const APP_VERSION = '1.22.0';
 const REPO = 'youmikk/media-cleaner';
 const RELEASES_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 const RELEASE_API_URLS = [

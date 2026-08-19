@@ -209,6 +209,65 @@ public class PhotoMoveModule: Module {
       ]
     }
 
+    // Metadata-only counterpart to scanLibrary. PHAssetResource enumeration
+    // is the expensive part of a full iOS scan (5-180 seconds in device
+    // logs). Returning identifiers and dimensions first lets JavaScript ask
+    // getSizes for bounded chunks, so foreground PhotoKit work can run
+    // between them. Older binaries simply do not expose this function and
+    // the guarded JS wrapper falls back to scanLibrary.
+    AsyncFunction("scanLibraryMetadata") { (mediaType: String, limit: Int) -> [String: Any] in
+      var assets: [PHAsset] = []
+      let options = PHFetchOptions()
+      options.includeHiddenAssets = false
+      options.sortDescriptors = [
+        NSSortDescriptor(key: "creationDate", ascending: false)
+      ]
+      for type in PhotoMoveModule.mediaTypes(for: mediaType) {
+        let result = PHAsset.fetchAssets(with: type, options: options)
+        assets.reserveCapacity(assets.count + result.count)
+        result.enumerateObjects { asset, _, _ in assets.append(asset) }
+      }
+      if PhotoMoveModule.mediaTypes(for: mediaType).count > 1 {
+        assets.sort {
+          ($0.creationDate?.timeIntervalSince1970 ?? 0)
+            > ($1.creationDate?.timeIntervalSince1970 ?? 0)
+        }
+      }
+      let total = assets.count
+      if limit > 0 && total > limit { assets = Array(assets[0..<limit]) }
+
+      let count = assets.count
+      var ids = [String](repeating: "", count: count)
+      var created = [Double](repeating: 0, count: count)
+      var modified = [Double](repeating: 0, count: count)
+      var widths = [Int](repeating: 0, count: count)
+      var heights = [Int](repeating: 0, count: count)
+      var durations = [Double](repeating: 0, count: count)
+      var kinds = [Int](repeating: 0, count: count)
+      for (i, asset) in assets.enumerated() {
+        ids[i] = asset.localIdentifier.components(separatedBy: "/").first
+          ?? asset.localIdentifier
+        created[i] = (asset.creationDate?.timeIntervalSince1970 ?? 0) * 1000
+        modified[i] = (asset.modificationDate?.timeIntervalSince1970 ?? 0) * 1000
+        widths[i] = asset.pixelWidth
+        heights[i] = asset.pixelHeight
+        durations[i] = asset.duration
+        kinds[i] = asset.mediaType == .video ? 1 : 0
+      }
+      return [
+        "ids": ids,
+        "creationTime": created,
+        "modificationTime": modified,
+        "width": widths,
+        "height": heights,
+        "size": [Double](),
+        "duration": durations,
+        "albumId": [String](),
+        "mediaType": kinds,
+        "total": total,
+      ]
+    }
+
     // ONE PhotoKit fetch for the whole library, carrying every field the app
     // needs — including the byte size, which expo-media-library does not
     // expose. That omission is the only reason a separate size query existed.

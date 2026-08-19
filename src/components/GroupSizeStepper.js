@@ -27,7 +27,24 @@ export default function GroupSizeStepper({ value, onChange }) {
         { backgroundColor: colors.card, borderColor: colors.border },
       ]}
     >
-      <Pressable hitSlop={8} onPress={() => onChange(clamp(value - 1))}>
+      <Pressable
+        hitSlop={6}
+        disabled={value <= MIN_GROUP}
+        accessibilityRole="button"
+        accessibilityLabel={t('decrease_group_size')}
+        accessibilityState={{ disabled: value <= MIN_GROUP }}
+        android_ripple={{
+          color: colors.accentSoft,
+          borderless: true,
+          radius: 20,
+        }}
+        onPress={() => onChange(clamp(value - 1))}
+        style={({ pressed }) => [
+          styles.stepButton,
+          pressed && { backgroundColor: colors.chartTrack },
+          value <= MIN_GROUP && styles.disabled,
+        ]}
+      >
         <Ionicons name="remove" size={20} color={colors.accent} />
       </Pressable>
       <View style={styles.center}>
@@ -36,7 +53,24 @@ export default function GroupSizeStepper({ value, onChange }) {
           {t('group_size')}
         </Text>
       </View>
-      <Pressable hitSlop={8} onPress={() => onChange(clamp(value + 1))}>
+      <Pressable
+        hitSlop={6}
+        disabled={value >= MAX_GROUP}
+        accessibilityRole="button"
+        accessibilityLabel={t('increase_group_size')}
+        accessibilityState={{ disabled: value >= MAX_GROUP }}
+        android_ripple={{
+          color: colors.accentSoft,
+          borderless: true,
+          radius: 20,
+        }}
+        onPress={() => onChange(clamp(value + 1))}
+        style={({ pressed }) => [
+          styles.stepButton,
+          pressed && { backgroundColor: colors.chartTrack },
+          value >= MAX_GROUP && styles.disabled,
+        ]}
+      >
         <Ionicons name="add" size={20} color={colors.accent} />
       </Pressable>
     </View>
@@ -48,4 +82,12 @@ const styles = StyleSheet.create({
   center: { alignItems: 'center', minWidth: 40 },
   value: { fontSize: 16, fontWeight: '800' },
   label: { fontSize: 9 },
+  stepButton: {
+    width: 28,
+    height: 36,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  disabled: { opacity: 0.35 },
 });

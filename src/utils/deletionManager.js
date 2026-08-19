@@ -2,8 +2,13 @@ import { Platform } from 'react-native';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as trashManager from './trashManager';
-import { getAssetSizes, pruneLibraryIndex } from './albumHelpers';
+import {
+  getAssetSizes,
+  pruneLibraryIndex,
+  adjustLibrarySizeAfterDeletion,
+} from './albumHelpers';
 import { log, logSync } from './logger';
+import { runMediaWork } from './mediaWorkScheduler';
 
 /**
  * Delete a WHOLE BATCH of assets with a SINGLE media-library call — one
@@ -89,7 +94,10 @@ export async function batchDelete(assets, { useRecycleBin = false } = {}) {
   await logSync('delete', `batch start count=${ids.length} recycle=${useRecycleBin}`);
   let ok;
   try {
-    ok = await MediaLibrary.deleteAssetsAsync(ids);
+    ok = await runMediaWork(
+      () => MediaLibrary.deleteAssetsAsync(ids),
+      'interactive'
+    );
   } catch (e) {
     if (trashEntries.length > 0) {
       await trashManager.removeManyFromTrash(trashEntries).catch(() => {});
@@ -109,6 +117,7 @@ export async function batchDelete(assets, { useRecycleBin = false } = {}) {
   // it: a full rescan costs ~5.5s of JS-thread time and would be paid after
   // EVERY confirmed group, stalling the analyser mid-session.
   pruneLibraryIndex(ids);
+  adjustLibrarySizeAfterDeletion(deletable, bytesById).catch(() => {});
   return { count: deletable.length, bytes, bytesById, deletedIds: ids, skipped };
 }
 

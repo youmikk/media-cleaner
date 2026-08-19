@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   View,
   Text,
@@ -23,7 +29,6 @@ import Animated, {
   interpolate,
 } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
-import * as MediaLibrary from 'expo-media-library';
 import { useSettings } from '../context/SettingsContext';
 import { ensureMediaPermission, getMediaPermission } from '../utils/permissions';
 import * as PhotoMove from '../../modules/photo-move';
@@ -31,21 +36,18 @@ import GlowingTrashBar from '../components/GlowingTrashBar';
 import PageIndicator from '../components/PageIndicator';
 import BottomInfoBar from '../components/BottomInfoBar';
 import AlbumChips from '../components/AlbumChips';
-import MoveSheet from '../components/MoveSheet';
 
-// Page 0 is the permission step; pages 1..4 are the drills, in the same order
-// the user will meet them in the cleaning flow. `sheet` and `chip` steps are
-// not swipes: they teach the two ways to CHOOSE a category, which is where
-// people got stuck — the swipe alone only opens the picker.
+// Page 0 is permission. The drills use only local demo state: the category
+// step teaches the real bottom-chip interaction without reading or changing
+// the user's albums, and the unreliable swipe-down drill stays removed.
 const GESTURE_STEPS = [
   { key: 'tutorial_step1', axis: 'x', dir: 0 },
   { key: 'tutorial_step2', axis: 'y', dir: -1 },
-  { key: 'tutorial_step3', axis: 'y', dir: 1, sheet: true },
-  { key: 'tutorial_step4', axis: null, dir: 0, chip: true },
+  { key: 'tutorial_step3', axis: null, dir: 0, category: true },
 ];
 const TOTAL_PAGES = GESTURE_STEPS.length + 1;
 const PASS_X = 60; // horizontal travel that counts as "browsed"
-const PASS_Y = 90; // vertical travel that counts as delete / move
+const PASS_Y = 90; // upward travel that counts as marked for deletion
 const CELEBRATE_MS = 480;
 
 const isGranted = (s) => s === 'granted' || s === 'limited';
@@ -56,13 +58,13 @@ const isGranted = (s) => s === 'granted' || s === 'limited';
  * Step 1 asks for photo-library access (and, on Android native builds, the
  * "All files access" that in-place categorizing needs) — the app cannot do
  * anything useful before that, so nothing else is shown until it is granted.
- * The rest are hands-on: the user must actually perform each swipe (and pick
- * a real category) to move on, so it is learned rather than read.
+ * The rest are hands-on: the user performs the two core review gestures and
+ * taps a demo category chip, so each interaction is learned without touching
+ * real media.
  *
  * The drill pages deliberately render the SAME chrome as CleaningScreen —
- * the glowing trash bar, the top bar, the page dots, the album chip row and
- * the floating info bar are the real components, not lookalikes. A tutorial
- * that teaches a screen the user never sees teaches nothing.
+ * the glowing trash bar, the top bar, the page dots and the floating info bar
+ * are the real components, not lookalikes.
  *
  * `mode="permissions"` reuses only the first page — used after an OTA update
  * lands to re-check access without repeating the drills.
@@ -81,12 +83,18 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
   const [busy, setBusy] = useState(false);
   const [files, setFiles] = useState(false);
   const [passed, setPassed] = useState(false);
-  const [showSheet, setShowSheet] = useState(false);
-  const [realAlbums, setRealAlbums] = useState([]);
 
   // Android-only, and only in builds that actually contain the module.
   const showFilesRow = Platform.OS === 'android' && PhotoMove.isAvailable();
   const step = page > 0 ? GESTURE_STEPS[page - 1] : null;
+  const categoryStep = !!step?.category;
+  const tutorialAlbums = useMemo(
+    () => [
+      { id: '__demo_a', title: t('tutorial_demo_album_a'), assetCount: 0 },
+      { id: '__demo_b', title: t('tutorial_demo_album_b'), assetCount: 0 },
+    ],
+    [t]
+  );
 
   const refreshPermissions = useCallback(async () => {
     const status = await getMediaPermission();
@@ -119,30 +127,11 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
     }
   };
 
-  // The user's OWN albums, so the chips and the picker look exactly like they
-  // will in daily use. Nothing is moved here — selecting only passes a step.
-  useEffect(() => {
-    if (permissionsOnly || !isGranted(media)) return;
-    MediaLibrary.getAlbumsAsync()
-      .then((all) => setRealAlbums(all.filter((a) => a.assetCount > 0)))
-      .catch(() => setRealAlbums([]));
-  }, [media, permissionsOnly]);
-
-  // A brand-new phone can legitimately have no albums, and an empty chip row
-  // (or an empty picker) leaves the step impossible to complete.
-  const albums = useMemo(() => {
-    if (realAlbums.length >= 2) return realAlbums.slice(0, 8);
-    const demo = [
-      { id: '__demo_a', title: t('tutorial_demo_album_a'), assetCount: 0 },
-      { id: '__demo_b', title: t('tutorial_demo_album_b'), assetCount: 0 },
-    ];
-    return [...realAlbums, ...demo].slice(0, 8);
-  }, [realAlbums, t]);
-
   // ---- Gesture drill ----------------------------------------------------
   const tx = useSharedValue(0);
   const ty = useSharedValue(0);
   const timerRef = useRef(null);
+  const completingRef = useRef(false);
   const demoAsset = useRef({ id: '__demo', creationTime: Date.now() }).current;
   // The advance callback must not read `page` from a stale closure — it is
   // fired from a timer and from gesture callbacks.
@@ -160,8 +149,8 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
       finish();
       return;
     }
+    completingRef.current = false;
     setPassed(false);
-    setShowSheet(false);
     tx.value = 0;
     ty.value = 0;
     setPage(current + 1);
@@ -169,6 +158,8 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
 
   /** Mark the current step done, celebrate, move on. */
   const completeStep = useCallback(() => {
+    if (completingRef.current) return;
+    completingRef.current = true;
     setPassed(true);
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
       () => {}
@@ -176,29 +167,11 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
     timerRef.current = setTimeout(advance, CELEBRATE_MS);
   }, [advance]);
 
-  /** The swipe itself landed. For the move drill that only OPENS the picker —
-   *  the step is not done until a category is actually chosen. */
-  const onSwipeLanded = useCallback(
-    (opensSheet) => {
-      if (opensSheet) setShowSheet(true);
-      else completeStep();
-    },
-    [completeStep]
-  );
-
-  /** Picker dismissed without choosing: bring the card back so they retry. */
-  const cancelSheet = useCallback(() => {
-    setShowSheet(false);
-    tx.value = withSpring(0, { damping: 16 });
-    ty.value = withSpring(0, { damping: 16 });
-  }, [tx, ty]);
-
   useEffect(() => () => clearTimeout(timerRef.current), []);
 
   const axis = step ? step.axis : null;
   const dir = step ? step.dir : 0;
-  const opensSheet = !!(step && step.sheet);
-  const swipeEnabled = !!axis && !passed && !showSheet;
+  const swipeEnabled = !!axis && !passed;
 
   const pan = Gesture.Pan()
     .enabled(swipeEnabled)
@@ -230,11 +203,11 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
       if (axis === 'x') {
         const to = e.translationX < 0 ? -width : width;
         tx.value = withTiming(to, { duration: 220 }, (finished) => {
-          if (finished) runOnJS(onSwipeLanded)(opensSheet);
+          if (finished) runOnJS(completeStep)();
         });
       } else {
         ty.value = withTiming(dir * height, { duration: 220 }, (finished) => {
-          if (finished) runOnJS(onSwipeLanded)(opensSheet);
+          if (finished) runOnJS(completeStep)();
         });
       }
     });
@@ -308,7 +281,12 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
                 ))}
           </View>
           {permissionsOnly ? (
-            <Pressable onPress={finish} hitSlop={12} style={styles.skip}>
+            <Pressable
+              onPress={finish}
+              android_ripple={{ color: colors.accentSoft }}
+              accessibilityRole="button"
+              style={styles.skip}
+            >
               <Text style={[styles.skipText, { color: colors.subtext }]}>
                 {t('skip')}
               </Text>
@@ -386,6 +364,9 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
         <Pressable
           disabled={!canContinue}
           onPress={() => (permissionsOnly ? finish() : setPage(1))}
+          android_ripple={{ color: colors.accentSoft }}
+          accessibilityRole="button"
+          accessibilityState={{ disabled: !canContinue }}
           style={[
             styles.cta,
             { backgroundColor: canContinue ? colors.accent : colors.chartTrack },
@@ -406,7 +387,7 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
     );
   }
 
-  // ---- Pages 1..4: the drill, wearing the cleaning screen's clothes ------
+  // ---- Pages 1..3: drills wearing the cleaning screen's clothes ----------
   return (
     <SafeAreaView
       edges={['top', 'left', 'right']}
@@ -429,7 +410,8 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
         </View>
         <Pressable
           onPress={finish}
-          hitSlop={10}
+          android_ripple={{ color: colors.accentSoft }}
+          accessibilityRole="button"
           style={[
             styles.exitBtn,
             {
@@ -462,13 +444,11 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
               <Animated.View style={hintStyle}>
                 <Ionicons
                   name={
-                    axis === 'x'
+                    categoryStep
+                      ? 'folder-open-outline'
+                      : axis === 'x'
                       ? 'swap-horizontal'
-                      : axis === 'y'
-                        ? dir < 0
-                          ? 'arrow-up'
-                          : 'arrow-down'
-                        : 'hand-left'
+                      : 'arrow-up'
                   }
                   size={28}
                   color="#fff"
@@ -478,30 +458,42 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
               <Text style={styles.coachSub}>
                 {passed
                   ? t('onboarding_nice')
-                  : t(axis ? 'onboarding_try' : 'onboarding_tap')}
+                  : t(categoryStep
+                    ? 'onboarding_tap_category'
+                    : 'onboarding_try')}
               </Text>
             </View>
           </View>
         </View>
       </GestureDetector>
 
-      <View style={styles.indicatorWrap}>
+      <View
+        style={[
+          styles.indicatorWrap,
+          categoryStep && styles.indicatorWrapWithChips,
+        ]}
+      >
         <PageIndicator total={GESTURE_STEPS.length} index={page - 1} />
       </View>
 
-      {/* The chip row is always on screen — that is what the real flow looks
-          like — but only accepts taps on the step that teaches it. */}
-      <View
-        style={[styles.chipsWrap, { bottom: Math.max(insets.bottom, 12) + 80 }]}
-        pointerEvents={step.chip && !passed ? 'box-none' : 'none'}
-      >
-        <AlbumChips
-          albums={albums}
-          currentAlbumId={null}
-          onSelect={() => completeStep()}
-          onCreate={() => completeStep()}
-        />
-      </View>
+      {categoryStep && (
+        <View
+          style={[
+            styles.chipsWrap,
+            { bottom: Math.max(insets.bottom, 12) + 80 },
+          ]}
+          pointerEvents={passed ? 'none' : 'auto'}
+        >
+          <AlbumChips
+            albums={tutorialAlbums}
+            currentAlbumId={null}
+            onSelect={completeStep}
+            onCreate={() => {}}
+            showCreate={false}
+            sortByUsageEnabled={false}
+          />
+        </View>
+      )}
 
       <BottomInfoBar
         asset={demoAsset}
@@ -512,15 +504,6 @@ export default function OnboardingScreen({ onDone, mode = 'full' }) {
         onUndo={() => {}}
       />
 
-      <MoveSheet
-        visible={showSheet}
-        albums={albums}
-        onClose={cancelSheet}
-        onSelect={() => {
-          setShowSheet(false);
-          completeStep();
-        }}
-      />
     </SafeAreaView>
   );
 }
@@ -594,6 +577,9 @@ function PermRow({
         <Pressable
           disabled={disabled}
           onPress={onPress}
+          android_ripple={{ color: colors.accentSoft }}
+          accessibilityRole="button"
+          accessibilityState={{ disabled }}
           style={[
             styles.rowBtn,
             { backgroundColor: colors.accent, opacity: disabled ? 0.5 : 1 },
@@ -613,11 +599,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    height: 34,
+    minHeight: 48,
   },
   dots: { flexDirection: 'row', gap: 5, alignItems: 'center' },
   dot: { height: 6, borderRadius: 3 },
-  skip: { minWidth: 52, alignItems: 'flex-end' },
+  skip: {
+    minWidth: 52,
+    minHeight: 48,
+    borderRadius: 8,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
   skipText: { fontSize: 15, fontWeight: '600' },
   body: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   hero: {
@@ -654,10 +647,23 @@ const styles = StyleSheet.create({
   rowTitle: { fontSize: 15, fontWeight: '700' },
   rowDesc: { fontSize: 12, lineHeight: 17, marginTop: 3 },
   rowAction: { width: 24, alignItems: 'center' },
-  rowBtn: { borderRadius: 12, paddingHorizontal: 14, paddingVertical: 8 },
+  rowBtn: {
+    minHeight: 48,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
   rowBtnText: { color: '#fff', fontSize: 13, fontWeight: '700' },
   warn: { fontSize: 13, lineHeight: 19, textAlign: 'center', marginTop: 16 },
-  cta: { borderRadius: 16, paddingVertical: 15, alignItems: 'center' },
+  cta: {
+    minHeight: 52,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
   ctaText: { fontSize: 16, fontWeight: '700' },
 
   // ---- drill pages: mirrors CleaningScreen's layout ----
@@ -670,9 +676,17 @@ const styles = StyleSheet.create({
   },
   topTitle: { fontSize: 18, fontWeight: '800', maxWidth: 260 },
   topSub: { fontSize: 12, marginTop: 2 },
-  exitBtn: { borderRadius: 18, paddingHorizontal: 14, paddingVertical: 7 },
+  exitBtn: {
+    minHeight: 48,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
   photoArea: { flex: 1, marginBottom: 8 },
-  indicatorWrap: { paddingVertical: 8, marginBottom: 158 },
+  indicatorWrap: { paddingVertical: 8, marginBottom: 84 },
+  indicatorWrapWithChips: { marginBottom: 158 },
   chipsWrap: { position: 'absolute', left: 0, right: 0 },
   card: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   photo: {
@@ -701,8 +715,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 20,
   },
-  // Dark scrim, same reasoning as the album chips: the coach mark floats over
-  // whatever the card happens to be, so theme colors can't guarantee contrast.
+  // The coach mark floats over arbitrary media, so theme colors alone cannot
+  // guarantee contrast.
   coachScrim: {
     alignItems: 'center',
     gap: 10,

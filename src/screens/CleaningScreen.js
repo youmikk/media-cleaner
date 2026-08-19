@@ -15,7 +15,6 @@ import {
   Platform,
   AppState,
   Share,
-  Alert,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
@@ -45,6 +44,8 @@ import PhotoViewer from '../components/PhotoViewer';
 import MoveSheet from '../components/MoveSheet';
 import AlbumChips from '../components/AlbumChips';
 import GroupConfirmSheet from '../components/GroupConfirmSheet';
+import IconButton from '../components/IconButton';
+import { showAppAlert } from '../components/AppDialog';
 import { incrementUsage } from '../utils/albumUsage';
 import { batchDelete } from '../utils/deletionManager';
 import * as sessionManager from '../utils/sessionManager';
@@ -57,9 +58,8 @@ import { reverseGeocode } from '../utils/geocode';
 import {
   getRawAlbums,
   getAssetsPage,
-  getAssets,
   getAssetsByIds,
-  getAlbumSnapshot,
+  getAlbumFingerprint,
   getCachedAssetList,
   saveCachedAssetList,
   moveAssetsToAlbum,
@@ -190,6 +190,7 @@ export default function CleaningScreen({ route, navigation }) {
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  const [categoryComplete, setCategoryComplete] = useState(false);
   const [groups, setGroups] = useState([]);
   const [gi, setGi] = useState(0);
   const [pi, setPi] = useState(0);
@@ -204,13 +205,15 @@ export default function CleaningScreen({ route, navigation }) {
   const [showZoom, setShowZoom] = useState(false);
   const [showMove, setShowMove] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [advancing, setAdvancing] = useState(false);
+  const advancingRef = useRef(false);
   const [completed, setCompleted] = useState(false);
   const [finalStats, setFinalStats] = useState({ count: 0, bytes: 0 });
   const [toast, setToast] = useState(null);
   const [realAlbums, setRealAlbums] = useState([]); // for the quick chips
   const [appActive, setAppActive] = useState(AppState.currentState === 'active');
   const [videoUriById, setVideoUriById] = useState({});
-  const videoFallbackTriedRef = useRef(new Set());
+  const videoFallbacksRef = useRef(new Map());
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
@@ -237,24 +240,34 @@ export default function CleaningScreen({ route, navigation }) {
   }, []);
 
   const handleVideoLoadError = useCallback(async (asset) => {
-    if (!asset || videoFallbackTriedRef.current.has(asset.id)) return;
-    videoFallbackTriedRef.current.add(asset.id);
+    if (!asset) return;
+    const applyNext = (entry) => {
+      const next = entry.candidates[entry.index];
+      entry.index += 1;
+      if (!next || !aliveRef.current) return false;
+      setVideoUriById((current) => ({ ...current, [asset.id]: next }));
+      return true;
+    };
+    const existing = videoFallbacksRef.current.get(asset.id);
+    if (existing) {
+      applyNext(existing);
+      return;
+    }
     try {
       const info = await MediaLibrary.getAssetInfoAsync(asset.id);
       const numericId = String(asset.id).split('/')[0];
-      const candidates = [
+      const candidates = [...new Set([
         info.localUri,
         info.uri,
         Platform.OS === 'android'
           ? `content://media/external/file/${numericId}`
           : null,
-      ].filter((uri) => uri && uri !== asset.uri);
-      if (candidates.length > 0 && aliveRef.current) {
-        // PhotoCard is keyed by the URI below, so this replaces the failed
-        // player by remounting it. Calling replace() on a live/releasing
-        // expo-video player can crash natively.
-        setVideoUriById((current) => ({ ...current, [asset.id]: candidates[0] }));
-      }
+      ].filter((uri) => uri && uri !== asset.uri))];
+      const entry = { candidates, index: 0 };
+      videoFallbacksRef.current.set(asset.id, entry);
+      // PhotoCard is keyed by URI, so every candidate remounts the player.
+      // Calling replace() on a live/releasing player can crash natively.
+      applyNext(entry);
     } catch (e) {
       // No alternate URI. Keep the poster instead of retrying forever.
     }
@@ -266,18 +279,25 @@ export default function CleaningScreen({ route, navigation }) {
   const markStackRef = useRef([]); // mark order, for undo
   const frozenAssetRef = useRef(null);
   const extraAssetsRef = useRef({}); // marked id -> asset outside active group
+  const membershipResolvedRef = useRef(new Set());
   const orderRef = useRef([]); // asset ids in cleaning order
+  // Sessions created by older builds persisted one full id order but no
+  // MediaStore cursor. Keep the unmaterialized tail as ids and resolve only
+  // a few groups at a time instead of rescanning the whole album on resume.
+  const legacyOrderRef = useRef(null);
   const orderModeRef = useRef(settings.order);
   const orderPromptRef = useRef(false);
   // Lazy segment loading: only ~3 groups ahead are fetched; more pages load
   // AFTER the user confirms a group.
   const allRef = useRef([]);
   const cursorRef = useRef({ after: undefined, hasNext: true });
+  const segmentedRef = useRef(false);
   const loadingMoreRef = useRef(false);
   const aliveRef = useRef(true);
   const rangeRef = useRef(null);
   const fetchedPagesRef = useRef(false); // did THIS session hit MediaStore?
   const listSavedRef = useRef(false);
+  const scopeHadAssetsRef = useRef(false);
   // Blocks the look-ahead loader until the initial load (fresh, cached OR
   // RESUME) has fully set up state. Without this, the mount-time effect
   // raced the resume path, reshuffled and OVERWROTE the saved order —
@@ -344,8 +364,43 @@ export default function CleaningScreen({ route, navigation }) {
         while (
           aliveRef.current &&
           cursorRef.current.hasNext &&
-          allRef.current.length < Math.min(minCount, 20000)
+          allRef.current.length < minCount
         ) {
+          if (legacyOrderRef.current !== null) {
+            const needed = Math.max(
+              groupSize * 3,
+              minCount - allRef.current.length
+            );
+            const ids = legacyOrderRef.current.splice(0, needed);
+            if (ids.length === 0) {
+              cursorRef.current = { after: undefined, hasNext: false };
+              break;
+            }
+            // eslint-disable-next-line no-await-in-loop
+            const resolved = await getAssetsByIds(ids);
+            if (!aliveRef.current) return;
+            const r = rangeRef.current;
+            const usable = resolved.filter(
+              (asset) =>
+                !reviewedSetRef.current.has(asset.id) &&
+                (!r ||
+                  (asset.creationTime &&
+                    asset.creationTime >= r.start &&
+                    asset.creationTime < r.end))
+            );
+            allRef.current = [...allRef.current, ...usable];
+            if (usable.length > 0) appended = true;
+            cursorRef.current = {
+              after: undefined,
+              hasNext: legacyOrderRef.current.length > 0,
+            };
+            orderRef.current = [
+              ...allRef.current.map((asset) => asset.id),
+              ...legacyOrderRef.current,
+            ];
+            setGroups(makeGroups(allRef.current, groupSize));
+            continue;
+          }
           // The range is pushed down to the media store, so a "clean March
           // 2023" session no longer has to page through everything newer
           // just to throw it away. The JS filter below stays as a guard for
@@ -359,16 +414,27 @@ export default function CleaningScreen({ route, navigation }) {
           if (!aliveRef.current) return;
           fetchedPagesRef.current = true;
           const r = rangeRef.current;
-          const scoped = page.assets
-            .filter(
+          const inScope = page.assets.filter(
               (a) =>
                 !r ||
                 (a.creationTime && a.creationTime >= r.start && a.creationTime < r.end)
-            )
+            );
+          if (inScope.length > 0) scopeHadAssetsRef.current = true;
+          const scoped = inScope
             // Already-reviewed photos never re-enter the pool.
             .filter((a) => !reviewedSetRef.current.has(a.id));
-          const pageAssets =
-            settings.order === 'random' ? shuffle(scoped) : scoped;
+          let pageAssets = scoped;
+          if (settings.order === 'random') {
+            // Expo's cursor may be the page-tail asset id. Keep that asset at
+            // the end of the randomised page so the next page is requested
+            // before this boundary can be deleted or moved.
+            const boundaryId = page.assets[page.assets.length - 1]?.id;
+            const boundary = scoped.find((asset) => asset.id === boundaryId);
+            pageAssets = shuffle(
+              scoped.filter((asset) => asset.id !== boundaryId)
+            );
+            if (boundary) pageAssets.push(boundary);
+          }
           // A NEW array each page, on purpose: `lookupAsset` below memoises
           // its id index on this array's identity, and the segmented loader
           // only pulls ~3 groups ahead, so the copy is one page's worth of
@@ -385,8 +451,27 @@ export default function CleaningScreen({ route, navigation }) {
         }
         // Preset lists (Largest Files / Low Quality) must never overwrite
         // the paused album session's saved order — the home cards follow it.
-        if (!assetIds && appended) {
-          sessionManager.saveOrder(orderRef.current, mediaType);
+        if (!assetIds && appended && sessionRef.current) {
+          const writes = [
+            sessionManager.saveOrder(orderRef.current, mediaType),
+          ];
+          if (segmentedRef.current) {
+            writes.push(
+              sessionManager.saveProgress(
+                {
+                  segmented: true,
+                  windowIds: allRef.current.map((asset) => asset.id),
+                  legacyOrder: legacyOrderRef.current !== null,
+                  cursorAfter: cursorRef.current.after || null,
+                  cursorHasNext: cursorRef.current.hasNext,
+                },
+                mediaType
+              )
+            );
+          }
+          // The next group may finish the session immediately. Make the new
+          // window + cursor durable before returning to that decision path.
+          await Promise.all(writes);
         }
         // Whole album loaded (unscoped) — persist it as the local index so
         // the NEXT session opens with zero MediaStore scanning.
@@ -435,6 +520,25 @@ export default function CleaningScreen({ route, navigation }) {
           a.creationTime >= range.start &&
           a.creationTime < range.end);
 
+      const restoreSavedMarks = async (liveAssets, savedIds) => {
+        const liveIds = new Set(liveAssets.map((asset) => asset.id));
+        const missingIds = (savedIds || []).filter((id) => !liveIds.has(id));
+        const extras = missingIds.length
+          ? await getAssetsByIds(missingIds)
+          : [];
+        if (!alive) return new Set();
+        for (const asset of extras) extraAssetsRef.current[asset.id] = asset;
+        const extraIds = new Set(extras.map((asset) => asset.id));
+        const usable = new Set(
+          (savedIds || []).filter(
+            (id) => liveIds.has(id) || extraIds.has(id)
+          )
+        );
+        setMarkedIds(usable);
+        markStackRef.current = [...usable];
+        return usable;
+      };
+
       let fullAlbumList = null; // reused for the "before" snapshot
 
       rangeRef.current = range;
@@ -450,100 +554,128 @@ export default function CleaningScreen({ route, navigation }) {
         orderRef.current = ordered.map((a) => a.id);
         setGroups(makeGroups(ordered, groupSize));
         initializedRef.current = true;
-        setLoading(false);
+      } else if (resuming && pending.segmented && !pending.legacyOrder) {
+        // Large libraries persist only the small unprocessed window plus the
+        // MediaStore cursor. Rebuilding a 20k+ full order on resume defeated
+        // segmentation and made the tail permanently unreachable.
+        const savedOrder = Array.isArray(pending.windowIds)
+          ? pending.windowIds
+          : (await sessionManager.getOrder(mediaType)) || [];
+        const reviewed = await reviewedStore.getReviewed(reviewScope);
+        if (!reviewed) throw new Error('Reviewed history unavailable');
+        reviewedSetRef.current = reviewed;
+        const restored = await getAssetsByIds(
+          savedOrder.filter((id) => !reviewed.has(id))
+        );
+        if (!alive) return;
+        segmentedRef.current = true;
+        // Let ensureLoaded persist any cursor movement while rebuilding an
+        // empty/short window. Otherwise a run of already-reviewed pages was
+        // scanned again after every process restart.
+        sessionRef.current = pending;
+        allRef.current = restored;
+        cursorRef.current = {
+          after: pending.cursorAfter || undefined,
+          hasNext: pending.cursorHasNext !== false,
+        };
+        orderRef.current = restored.map((asset) => asset.id);
+        setGroups(makeGroups(restored, groupSize));
+        const usableMarks = await restoreSavedMarks(
+          restored,
+          pending.markedIds || []
+        );
+        const visibleCount = restored
+          .slice(0, groupSize)
+          .filter((asset) => !usableMarks.has(asset.id)).length;
+        setPi(
+          Math.min(pending.photoIndex || 0, Math.max(0, visibleCount - 1))
+        );
+        initializedRef.current = true;
+        if (restored.length < groupSize * 3 && cursorRef.current.hasNext) {
+          await ensureLoaded(groupSize * 3);
+        }
       } else if (resuming) {
-        // Resume needs the full list to rebuild the EXACT saved order.
-        const all = [];
-        let after;
-        let hasNext = true;
-        while (hasNext && all.length < 20000) {
-          const page = await getAssetsPage(albumId, mediaType, after, range);
-          if (!alive) return;
-          // push, not `all = [...all, ...]`: the spread re-copied everything
-          // accumulated so far on every one of ~66 pages.
-          for (const a of page.assets) if (inRange(a)) all.push(a);
-          hasNext = page.hasNext;
-          after = page.endCursor;
-        }
-        if (!range) {
-          fullAlbumList = all;
-          saveCachedAssetList(albumId, mediaType, all); // refresh local index
-        }
-        // CONFIRMED groups (recorded in reviewedStore) are dropped from the
-        // order entirely — deletions in earlier groups then can't shift the
-        // remaining group boundaries. The group you left mid-way is always
-        // the FIRST group after resume, photo-for-photo identical.
+        // Pre-v1.22 sessions have a complete frozen id order but no cursor.
+        // Resolve only the first few groups and retain the id tail. A full
+        // PhotoKit/MediaStore rebuild took 5-11 seconds on the supplied logs.
         const savedOrder = (await sessionManager.getOrder(mediaType)) || [];
         const reviewed = await reviewedStore.getReviewed(reviewScope);
+        if (!reviewed) throw new Error('Reviewed history unavailable');
         reviewedSetRef.current = reviewed;
-        const byId = Object.fromEntries(all.map((a) => [a.id, a]));
-        const ordered = savedOrder
-          .filter((id) => !reviewed.has(id))
-          .map((id) => byId[id])
-          .filter(Boolean);
-        const inOrder = new Set(savedOrder);
-        const rest = all.filter(
-          (a) => !inOrder.has(a.id) && !reviewed.has(a.id)
-        );
-        // NEW photos taken since the session started: sorted per the
-        // user's order setting and inserted right AFTER the interrupted
-        // group — they show up as the very next group instead of hiding
-        // at the tail of a long paused session.
-        const restSorted =
-          settings.order === 'random'
-            ? shuffle(rest)
-            : [...rest].sort(
-                (a, b) => (b.creationTime || 0) - (a.creationTime || 0)
-              );
-        const finalList =
-          restSorted.length > 0 && ordered.length > groupSize
-            ? [
-                ...ordered.slice(0, groupSize),
-                ...restSorted,
-                ...ordered.slice(groupSize),
-              ]
-            : [...ordered, ...restSorted];
-        log(
-          'clean.resume',
-          `order=${savedOrder.length} reviewed=${reviewed.size} kept=${ordered.length} rest=${rest.length}`
-        );
-        allRef.current = finalList;
-        cursorRef.current = { after: undefined, hasNext: false };
-        orderRef.current = finalList.map((a) => a.id);
-        if (!alive) return;
-        setGroups(makeGroups(finalList, groupSize));
-        setGi(0); // the interrupted group is always first now
-        const savedMarks = new Set(pending.markedIds || []);
-        // Drop marks whose asset no longer resolves (deleted outside the
-        // app, or a similar-modal pick from outside the restored range).
-        // A mark that can't be resolved can never be cleared either, and one
-        // of them was enough to reopen an empty confirm sheet at every
-        // group end for the rest of the session.
-        const liveIds = new Set(finalList.map((a) => a.id));
-        const usableMarks = new Set(
-          [...savedMarks].filter((id) => liveIds.has(id))
+        const remaining = savedOrder.filter((id) => !reviewed.has(id));
+        segmentedRef.current = true;
+        sessionRef.current = pending;
+        if (savedOrder.length === 0) {
+          // Corrupt/missing legacy order: recover as a fresh segmented scan
+          // instead of treating a populated album as complete.
+          legacyOrderRef.current = null;
+          allRef.current = [];
+          cursorRef.current = { after: undefined, hasNext: true };
+          orderRef.current = [];
+          initializedRef.current = true;
+          await ensureLoaded(groupSize * 3);
+        } else {
+          const firstIds = remaining.slice(0, groupSize * 3);
+          const restored = await getAssetsByIds(firstIds);
+          if (!alive) return;
+          legacyOrderRef.current = remaining.slice(firstIds.length);
+          allRef.current = restored;
+          cursorRef.current = {
+            after: undefined,
+            hasNext: legacyOrderRef.current.length > 0,
+          };
+          orderRef.current = [
+            ...restored.map((asset) => asset.id),
+            ...legacyOrderRef.current,
+          ];
+          setGroups(makeGroups(restored, groupSize));
+          initializedRef.current = true;
+          if (restored.length > 0) scopeHadAssetsRef.current = true;
+          if (restored.length < groupSize * 3 && cursorRef.current.hasNext) {
+            await ensureLoaded(groupSize * 3);
+          }
+          await Promise.all([
+            sessionManager.saveOrder(orderRef.current, mediaType),
+            sessionManager.saveProgress(
+              {
+                segmented: true,
+                legacyOrder: true,
+                windowIds: allRef.current.map((asset) => asset.id),
+                cursorAfter: null,
+                cursorHasNext: cursorRef.current.hasNext,
+              },
+              mediaType
+            ),
+          ]);
+          log(
+            'clean.resume',
+            `legacy-window order=${savedOrder.length} reviewed=${reviewed.size} ` +
+              `loaded=${allRef.current.length} queued=${legacyOrderRef.current.length}`
+          );
+        }
+        // Resolve saved marks outside the active album/time window too;
+        // these are Similar-modal picks and must survive a process restart.
+        const usableMarks = await restoreSavedMarks(
+          allRef.current,
+          pending.markedIds || []
         );
         // Clamp to what will actually be VISIBLE: marked photos are filtered
         // out of the group, so a saved index measured against groupSize left
         // the user swiping right several times with nothing happening.
-        const firstGroup = finalList.slice(0, groupSize);
+        const firstGroup = allRef.current.slice(0, groupSize);
         const visibleCount = firstGroup.filter(
           (a) => !usableMarks.has(a.id)
         ).length;
         setPi(
           Math.min(pending.photoIndex || 0, Math.max(0, visibleCount - 1))
         );
-        setMarkedIds(usableMarks);
-        markStackRef.current = [...usableMarks];
-        // Re-save the restored order: guards against any earlier writer.
-        sessionManager.saveOrder(orderRef.current, mediaType);
-        initializedRef.current = true;
-        setLoading(false);
       } else {
         // Fresh session: reviewed photos are EXCLUDED from the pool — a
-        // group you confirmed (kept or deleted) never comes back until the
-        // whole album has been reviewed once (then the round resets).
-        reviewedSetRef.current = await reviewedStore.getReviewed(reviewScope);
+        // group you confirmed (kept or deleted) never comes back. Only asset
+        // ids that have never been handled enter a later session.
+        const reviewed = await reviewedStore.getReviewed(reviewScope);
+        if (!reviewed) throw new Error('Reviewed history unavailable');
+        reviewedSetRef.current = reviewed;
         if (!alive) return;
         // Try the persisted local index first (Fossify-style) —
         // fingerprint unchanged means the FULL list loads instantly with
@@ -552,12 +684,13 @@ export default function CleaningScreen({ route, navigation }) {
         if (!alive) return;
         if (cachedList) {
           const inR = cachedList.filter(inRange);
-          let pool = inR.filter((a) => !reviewedSetRef.current.has(a.id));
+          if (inR.length > 0) scopeHadAssetsRef.current = true;
+          const pool = inR.filter((a) => !reviewedSetRef.current.has(a.id));
           if (pool.length === 0 && inR.length > 0) {
-            // Round complete: every photo reviewed once — start over.
-            await reviewedStore.resetAlbumRound(mediaType, albumId, inR);
-            reviewedSetRef.current = await reviewedStore.getReviewed(reviewScope);
-            pool = inR;
+            // A completed category stays completed. Only assets with a new id
+            // may enter the queue on a later visit; silently resetting here
+            // made the user clean the same photos over and over.
+            setCategoryComplete(true);
           }
           const ordered = settings.order === 'random' ? shuffle(pool) : pool;
           allRef.current = ordered;
@@ -565,32 +698,46 @@ export default function CleaningScreen({ route, navigation }) {
           orderRef.current = ordered.map((a) => a.id);
           setGroups(makeGroups(ordered, groupSize));
           initializedRef.current = true;
-          setLoading(false);
           if (!range) fullAlbumList = cachedList;
         } else {
           // No/stale index: SEGMENTED loading — just ~3 groups ahead. The
           // rest loads as the user confirms groups; the finished list is
           // then saved as the new index.
+          segmentedRef.current = true;
           initializedRef.current = true; // segmented loading may start now
           await ensureLoaded(groupSize * 3);
           if (!alive) return;
           if (
             allRef.current.length === 0 &&
             !cursorRef.current.hasNext &&
-            reviewedSetRef.current.size > 0
+            (scopeHadAssetsRef.current || (!range && reviewedSetRef.current.size > 0))
           ) {
-            // Round complete (everything filtered as reviewed) — reset
-            // and reload from scratch.
-            const roundAssets = await getAssets(albumId, mediaType);
-            await reviewedStore.resetAlbumRound(mediaType, albumId, roundAssets);
-            reviewedSetRef.current = await reviewedStore.getReviewed(reviewScope);
-            cursorRef.current = { after: undefined, hasNext: true };
-            await ensureLoaded(groupSize * 3);
-            if (!alive) return;
+            setCategoryComplete(true);
           }
-          setLoading(false);
           if (!range && !cursorRef.current.hasNext) fullAlbumList = allRef.current;
         }
+      }
+
+      // No unreviewed ids means this category is genuinely complete (or
+      // empty). Do not persist a 0-item session: the home screen would offer
+      // that empty session forever even though there is nothing to resume.
+      if (
+        !assetIds &&
+        allRef.current.length === 0 &&
+        !cursorRef.current.hasNext
+      ) {
+        if (resuming && pending) {
+          await sessionManager.discardSessionIfId(pending.id, mediaType);
+        }
+        if (
+          scopeHadAssetsRef.current ||
+          (!range && reviewedSetRef.current.size > 0) ||
+          resuming
+        ) {
+          setCategoryComplete(true);
+        }
+        setLoading(false);
+        return;
       }
 
       // Session bookkeeping (snapshot reuses the already-loaded list when
@@ -602,8 +749,13 @@ export default function CleaningScreen({ route, navigation }) {
         // an in-memory session only. Persisting one used to overwrite the
         // paused album session + saved order, so the home cards suddenly
         // showed the preset's photos and resume lost the real group.
-        const before = await getAlbumSnapshot(albumId, mediaType, fullAlbumList);
-        if (!alive) return;
+        const before = {
+          count: allRef.current.length,
+          bytes: Object.values(sizesById || {}).reduce(
+            (sum, size) => sum + (Number(size) || 0),
+            0
+          ),
+        };
         sessionRef.current = {
           type: mediaType,
           albumId,
@@ -615,7 +767,15 @@ export default function CleaningScreen({ route, navigation }) {
           ephemeral: true,
         };
       } else {
-        const before = await getAlbumSnapshot(albumId, mediaType, fullAlbumList);
+        const before = {
+          count:
+            fullAlbumList?.length ||
+            (await getAlbumFingerprint(albumId, mediaType)).assetCount ||
+            allRef.current.length,
+          // Exact freed bytes come from batchDelete. Avoid a full library
+          // size scan before the session exists and the UI becomes active.
+          bytes: 0,
+        };
         if (!alive) return;
         const createdSession = await sessionManager.startSession({
           type: mediaType,
@@ -628,6 +788,10 @@ export default function CleaningScreen({ route, navigation }) {
           // from the home/settings tab can invalidate this session instead
           // of silently resuming the old order.
           order: settings.order,
+          segmented: segmentedRef.current,
+          windowIds: segmentedRef.current ? orderRef.current : null,
+          cursorAfter: cursorRef.current.after || null,
+          cursorHasNext: cursorRef.current.hasNext,
           before,
         });
         if (!alive) {
@@ -635,9 +799,14 @@ export default function CleaningScreen({ route, navigation }) {
           return;
         }
         sessionRef.current = createdSession;
-        sessionManager.saveOrder(orderRef.current, mediaType);
+        // Session metadata and its bounded order window must both be durable
+        // before the first swipe is enabled.
+        await sessionManager.saveOrder(orderRef.current, mediaType);
+        if (!alive) return;
       }
 
+      // The session is durable before the first swipe can happen.
+      setLoading(false);
       if (!isVideo && settings.similarDetection) {
         const cache = await analyzer.getCached(albumId, 'photo');
         if (alive && cache && cache.clusters) setClusters(cache.clusters);
@@ -1064,7 +1233,7 @@ export default function CleaningScreen({ route, navigation }) {
   // Categorizing on Android REQUIRES the in-place move permission — no
   // permission means the tap prompts for it instead of moving anything.
   const maybeOfferNativeMove = () => {
-    Alert.alert(t('native_move_title'), t('native_move_message'), [
+    showAppAlert(t('native_move_title'), t('native_move_message'), [
       { text: t('cancel'), style: 'cancel' },
       {
         text: t('native_move_enable'),
@@ -1106,6 +1275,16 @@ export default function CleaningScreen({ route, navigation }) {
       sessionManager.saveProgress({ markedIds: [...markStackRef.current] }, mediaType);
     }
     return newId;
+  };
+
+  const persistReviewedAssets = async (items) => {
+    const accepted = await reviewedStore.addReviewedAssets(
+      mediaType,
+      albumId,
+      items
+    );
+    if (!accepted) return false;
+    return reviewedStore.flushReviewed();
   };
 
   const moveCurrentTo = async (album) => {
@@ -1150,7 +1329,10 @@ export default function CleaningScreen({ route, navigation }) {
         overrideHistoryRef.current[id] = { fromAlbumId, toAlbumId: album.id };
       }
       // Categorizing counts as completing this item in the current album.
-      await reviewedStore.addReviewedAssets(mediaType, albumId, [current]);
+      if (!(await persistReviewedAssets([current]))) {
+        showAppAlert(t('save_progress_failed'));
+        return;
+      }
       incrementUsage(album.id);
       setAlbumOverrides((m) => {
         const next = { ...m };
@@ -1199,7 +1381,6 @@ export default function CleaningScreen({ route, navigation }) {
         setRealAlbums(list.filter((a) => a.assetCount > 0));
         const album = list.find((a) => a.title === name);
         if (album) incrementUsage(album.id);
-        await reviewedStore.addReviewedAssets(mediaType, albumId, [asset]);
         overrideHistoryRef.current[movedId] = {
           fromAlbumId,
           toAlbumId: album ? album.id : name,
@@ -1229,7 +1410,10 @@ export default function CleaningScreen({ route, navigation }) {
         const list = await getRawAlbums({ force: true });
         setRealAlbums(list.filter((a) => a.assetCount > 0));
       }
-      await reviewedStore.addReviewedAssets(mediaType, albumId, [current]);
+      if (!(await persistReviewedAssets([current]))) {
+        showAppAlert(t('save_progress_failed'));
+        return;
+      }
       showToast(t('moved_to', { album: name }));
       if (currentRef.current && currentRef.current.id === asset.id) callNext();
     } catch (e) {
@@ -1366,16 +1550,33 @@ export default function CleaningScreen({ route, navigation }) {
     setMarkedIds(new Set());
   };
 
-  const nextGroup = async () => {
+  const advanceGroupOnce = async () => {
     // Confirming a group (kept OR deleted) marks every photo in it as
     // REVIEWED — they won't re-enter the pool in later sessions.
     if (!assetIds && group.length > 0) {
       const ids = group.map((a) => a.id);
-      ids.forEach((id) => reviewedSetRef.current.add(id));
+      if (Platform.OS === 'ios' && PhotoMove.hasAlbumMembership()) {
+        const unresolved = ids.filter(
+          (id) => !membershipResolvedRef.current.has(id)
+        );
+        if (unresolved.length > 0) {
+          const membership = await PhotoMove.getAlbumMembership(unresolved);
+          reviewedStore.rememberMembershipMap(mediaType, membership);
+          unresolved.forEach((id) => membershipResolvedRef.current.add(id));
+        }
+      }
       // Advance only after the decision ledger has accepted this group. On
-      // the final group a fire-and-forget write raced flush/finish and the
-      // same items reappeared after an immediate process kill.
-      await reviewedStore.addReviewedAssets(mediaType, albumId, group);
+      // the final group a delayed write raced the persisted session checkpoint
+      // and the same items reappeared after an immediate process kill.
+      // Publish the durable decision before removing this group from the
+      // session window. If the OS kills the process after the checkpoint,
+      // every id absent from that window must already exist in this ledger.
+      const persisted = await persistReviewedAssets(group);
+      if (!persisted) {
+        showAppAlert(t('save_progress_failed'));
+        return;
+      }
+      ids.forEach((id) => reviewedSetRef.current.add(id));
     } else if (suggestionKey && group.length > 0) {
       // Suggestion sessions are ephemeral and album-scoped reviewing would be
       // wrong here (the ids span the whole library), so they get their own
@@ -1387,6 +1588,43 @@ export default function CleaningScreen({ route, navigation }) {
     setPi(0);
     // No shared-value reset here: the strip resyncs itself once React has
     // committed the new group (see the offset effect above).
+
+    if (segmentedRef.current && !assetIds) {
+      // Keep a bounded unprocessed window for arbitrarily large libraries.
+      // The global reviewed set is the durable record for removed groups;
+      // the session only needs this window and the next MediaStore cursor.
+      const handled = new Set(group.map((asset) => asset.id));
+      allRef.current = allRef.current.filter(
+        (asset) => !handled.has(asset.id)
+      );
+      orderRef.current = [
+        ...allRef.current.map((asset) => asset.id),
+        ...(legacyOrderRef.current || []),
+      ];
+      setGroups(makeGroups(allRef.current, groupSize));
+      setGi(0);
+      await Promise.all([
+        sessionManager.saveOrder(orderRef.current, mediaType),
+        sessionManager.saveProgress(
+          {
+            windowIds: allRef.current.map((asset) => asset.id),
+            legacyOrder: legacyOrderRef.current !== null,
+            groupIndex: 0,
+            photoIndex: 0,
+            markedIds: [...markStackRef.current],
+            cursorAfter: cursorRef.current.after || null,
+            cursorHasNext: cursorRef.current.hasNext,
+          },
+          mediaType
+        ),
+      ]);
+      if (cursorRef.current.hasNext) {
+        await ensureLoaded(groupSize * 3);
+      }
+      if (allRef.current.length > 0) return;
+      finishAll();
+      return;
+    }
 
     // Android has no OS memory-warning event — proactively drop the decoded
     // -bitmap cache every few groups so huge albums can't OOM the app.
@@ -1409,6 +1647,21 @@ export default function CleaningScreen({ route, navigation }) {
     finishAll();
   };
 
+  const nextGroup = async () => {
+    if (advancingRef.current) return;
+    advancingRef.current = true;
+    setAdvancing(true);
+    try {
+      await advanceGroupOnce();
+    } catch (e) {
+      log('clean.progress', `failed: ${(e && e.message) || e}`);
+      showAppAlert(t('save_progress_failed'));
+    } finally {
+      advancingRef.current = false;
+      setAdvancing(false);
+    }
+  };
+
   // Fresh closure every render: open the sheet if ANYTHING is marked —
   // group marks or similar-modal picks (markStackRef updates synchronously,
   // so a just-marked last photo is seen immediately). Nothing marked →
@@ -1419,7 +1672,7 @@ export default function CleaningScreen({ route, navigation }) {
   };
 
   const skipGroup = () => {
-    if (deleting) return; // a delete is mid-flight — see deleteMarkedNow
+    if (deleting || advancingRef.current) return;
     clearGroupMarks(); // keep all = spare everything in this group
     nextGroup();
   };
@@ -1447,6 +1700,7 @@ export default function CleaningScreen({ route, navigation }) {
       loading ||
       showConfirm ||
       deleting ||
+      advancing ||
       allRef.current.length === 0
     ) {
       return;
@@ -1455,7 +1709,7 @@ export default function CleaningScreen({ route, navigation }) {
     if (markedIds.size > 0) {
       if (orderPromptRef.current) return;
       orderPromptRef.current = true;
-      Alert.alert(
+      showAppAlert(
         t('discard_selection_title'),
         t('discard_selection_message'),
         [
@@ -1480,15 +1734,36 @@ export default function CleaningScreen({ route, navigation }) {
       return;
     }
 
-    const reordered =
+    // Expo's cursor points at the tail item of the most recently loaded page.
+    // Keep that item at the window tail until the next page is fetched; if an
+    // order change moved it into the active group and it was deleted first,
+    // some platform versions could no longer continue from the saved cursor.
+    const hasLiveBoundary =
+      segmentedRef.current &&
+      cursorRef.current.hasNext &&
+      legacyOrderRef.current === null;
+    const boundary = hasLiveBoundary
+      ? allRef.current[allRef.current.length - 1]
+      : null;
+    const reorderable = boundary
+      ? allRef.current.slice(0, -1)
+      : allRef.current;
+    const reorderedHead =
       settings.order === 'random'
-        ? shuffle(allRef.current)
-        : [...allRef.current].sort(
+        ? shuffle(reorderable)
+        : [...reorderable].sort(
             (a, b) => (b.creationTime || 0) - (a.creationTime || 0)
           );
+    const reordered = boundary ? [...reorderedHead, boundary] : reorderedHead;
     orderModeRef.current = settings.order;
     allRef.current = reordered;
-    orderRef.current = reordered.map((asset) => asset.id);
+    if (legacyOrderRef.current !== null && settings.order === 'random') {
+      legacyOrderRef.current = shuffle(legacyOrderRef.current);
+    }
+    orderRef.current = [
+      ...reordered.map((asset) => asset.id),
+      ...(legacyOrderRef.current || []),
+    ];
     setGroups(makeGroups(reordered, groupSize));
     setGi(0);
     setPi(0);
@@ -1496,13 +1771,25 @@ export default function CleaningScreen({ route, navigation }) {
       sessionManager.saveOrder(orderRef.current, mediaType);
       // Keep the stored mode in step, or the home screen would drop this
       // session as stale the next time it looks at it.
-      sessionManager.saveProgress({ order: settings.order }, mediaType);
+      sessionManager.saveProgress(
+        {
+          order: settings.order,
+          ...(segmentedRef.current
+            ? {
+                windowIds: reordered.map((asset) => asset.id),
+                legacyOrder: legacyOrderRef.current !== null,
+              }
+            : {}),
+        },
+        mediaType
+      );
     }
   }, [
     settings.order,
     loading,
     showConfirm,
     deleting,
+    advancing,
     markedIds,
     groupSize,
     assetIds,
@@ -1519,9 +1806,12 @@ export default function CleaningScreen({ route, navigation }) {
         try {
           if (Platform.OS === 'ios' && PhotoMove.hasAlbumMembership()) {
             const membership = await PhotoMove.getAlbumMembership(
-              targets.map((asset) => asset.id)
+              group.map((asset) => asset.id)
             );
             reviewedStore.rememberMembershipMap(mediaType, membership);
+            group.forEach((asset) =>
+              membershipResolvedRef.current.add(asset.id)
+            );
           }
           const { count, bytes, bytesById, deletedIds, skipped } = await batchDelete(
             targets,
@@ -1550,7 +1840,7 @@ export default function CleaningScreen({ route, navigation }) {
           gone.forEach((id) => deletedIdsRef.current.add(id));
           clearMarks(gone);
           if (skipped > 0) {
-            Alert.alert(
+            showAppAlert(
               t('delete_forever'),
               t('delete_partial', { count: skipped })
             );
@@ -1561,7 +1851,7 @@ export default function CleaningScreen({ route, navigation }) {
           }
         } catch (e) {
           if (e && e.message === 'trash-no-space') {
-            Alert.alert(t('delete_forever'), t('trash_no_space'));
+            showAppAlert(t('delete_forever'), t('trash_no_space'));
             return;
           }
           // user cancelled the system dialog — keep marks, stay in the sheet
@@ -1581,7 +1871,7 @@ export default function CleaningScreen({ route, navigation }) {
   // the next group, so one stray tap threw away the whole group's work.
   // Only the explicit "keep all" button does that now.
   const closeConfirmOnly = () => {
-    if (deleting) return;
+    if (deleting || advancing) return;
     setShowConfirm(false);
     if (pi >= visible.length) setPi(Math.max(0, visible.length - 1));
   };
@@ -1680,13 +1970,14 @@ export default function CleaningScreen({ route, navigation }) {
   if (loading) {
     return (
       <SafeAreaView edges={['top', 'left', 'right']} style={[styles.center, { backgroundColor: colors.background }]}>
-        <Pressable
+        <IconButton
+          name="chevron-back"
+          label={t('back')}
           onPress={() => navigation.goBack()}
-          hitSlop={10}
+          color={colors.text}
+          iconSize={26}
           style={styles.loadingBack}
-        >
-          <Ionicons name="chevron-back" size={26} color={colors.text} />
-        </Pressable>
+        />
         <ActivityIndicator size="large" color={colors.accent} />
       </SafeAreaView>
     );
@@ -1719,9 +2010,24 @@ export default function CleaningScreen({ route, navigation }) {
   if (groups.length === 0) {
     return (
       <SafeAreaView edges={['top', 'left', 'right']} style={[styles.center, { backgroundColor: colors.background }]}>
-        <Ionicons name="images-outline" size={48} color={colors.subtext} />
+        <Ionicons
+          name={categoryComplete ? 'checkmark-circle-outline' : 'images-outline'}
+          size={48}
+          color={categoryComplete ? colors.accent : colors.subtext}
+        />
+        {categoryComplete && (
+          <Text style={[styles.doneTitle, { color: colors.text }]}>
+            {t('completion_title')}
+          </Text>
+        )}
         <Text style={[styles.doneSub, { color: colors.subtext, marginTop: 12 }]}>
-          {t(isVideo ? 'no_videos' : 'no_photos')}
+          {t(
+            categoryComplete
+              ? 'category_cleaned_for_now'
+              : isVideo
+                ? 'no_videos'
+                : 'no_photos'
+          )}
         </Text>
         <Pressable
           style={[styles.doneBtn, { backgroundColor: colors.accent }]}
@@ -1759,20 +2065,19 @@ export default function CleaningScreen({ route, navigation }) {
             })}
           </Text>
         </View>
-        <Pressable
+        <IconButton
+          name="close"
+          label={t('close')}
           onPress={exit}
-          hitSlop={10}
+          color={colors.text}
+          iconSize={22}
+          backgroundColor={colors.chartTrack}
+          pressedColor={colors.accentSoft}
           style={[
             styles.exitBtn,
-            {
-              backgroundColor: colors.chartTrack,
-              borderWidth: StyleSheet.hairlineWidth,
-              borderColor: colors.border,
-            },
+            { borderColor: colors.border },
           ]}
-        >
-          <Ionicons name="close" size={22} color={colors.text} />
-        </Pressable>
+        />
       </View>
 
       {/* Filmstrip: current photo ± 1 neighbour, laid out side by side and
@@ -1892,6 +2197,27 @@ export default function CleaningScreen({ route, navigation }) {
         </View>
       )}
 
+      {advancing && !showConfirm && (
+        <Pressable
+          style={styles.savingBlocker}
+          onPress={() => {}}
+          accessibilityRole="progressbar"
+          accessibilityLabel={t('saving_progress')}
+        >
+          <View
+            style={[
+              styles.savingProgress,
+              { backgroundColor: colors.card, borderColor: colors.border },
+            ]}
+          >
+            <ActivityIndicator size="small" color={colors.accent} />
+            <Text style={{ color: colors.text, fontSize: 13, fontWeight: '600' }}>
+              {t('saving_progress')}
+            </Text>
+          </View>
+        </Pressable>
+      )}
+
       <BottomInfoBar
         asset={displayAsset}
         address={address}
@@ -1952,7 +2278,8 @@ export default function CleaningScreen({ route, navigation }) {
         onClose={closeConfirmOnly}
         onKeepAll={skipGroup}
         onDelete={deleteMarkedNow}
-        busy={deleting}
+        busy={deleting || advancing}
+        busyLabel={advancing && !deleting ? t('saving_progress') : null}
       />
     </SafeAreaView>
   );
@@ -1970,7 +2297,10 @@ const styles = StyleSheet.create({
   },
   topTitle: { fontSize: 18, fontWeight: '800', maxWidth: 260 },
   topSub: { fontSize: 12, marginTop: 2 },
-  exitBtn: { borderRadius: 18, padding: 8 },
+  exitBtn: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 22,
+  },
   photoArea: { flex: 1, marginBottom: 8 },
   allMarked: {
     ...StyleSheet.absoluteFillObject,
@@ -2001,6 +2331,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 10,
     backgroundColor: 'rgba(0,0,0,0.75)', // readable over any content
+  },
+  savingProgress: {
+    minHeight: 44,
+    paddingHorizontal: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  savingBlocker: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 20,
+    alignItems: 'center',
+    paddingTop: 72,
   },
   doneTitle: { fontSize: 24, fontWeight: '800', marginTop: 16 },
   doneSub: { fontSize: 14, marginTop: 6, textAlign: 'center' },

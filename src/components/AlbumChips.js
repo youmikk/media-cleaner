@@ -30,6 +30,8 @@ function AlbumChips({
   onCreate,
   onCurrentPress = null, // tap the ✓ chip to UNDO this session's move
   dark = false,
+  showCreate = true,
+  sortByUsageEnabled = true,
 }) {
   const { colors, t } = useSettings();
   const [usage, setUsage] = useState({});
@@ -37,20 +39,20 @@ function AlbumChips({
   const [name, setName] = useState('');
 
   useEffect(() => {
+    if (!sortByUsageEnabled) return;
     getUsage().then(setUsage);
-  }, [currentAlbumId, albums.length]);
+  }, [currentAlbumId, albums.length, sortByUsageEnabled]);
 
   const currentAlbum = useMemo(
     () => albums.find((a) => a.id === currentAlbumId) || null,
     [albums, currentAlbumId]
   );
   const others = useMemo(
-    () =>
-      sortByUsage(
-        albums.filter((a) => a.id !== currentAlbumId),
-        usage
-      ),
-    [albums, currentAlbumId, usage]
+    () => {
+      const filtered = albums.filter((a) => a.id !== currentAlbumId);
+      return sortByUsageEnabled ? sortByUsage(filtered, usage) : filtered;
+    },
+    [albums, currentAlbumId, sortByUsageEnabled, usage]
   );
 
   // Scrim chips: the row floats OVER photos/videos, so theme colors can't
@@ -64,6 +66,10 @@ function AlbumChips({
       <Pressable
         style={[styles.chip, { backgroundColor: chipBg }]}
         onPress={() => onSelect(item)}
+        hitSlop={{ top: 8, bottom: 8 }}
+        android_ripple={{ color: 'rgba(255,255,255,0.18)' }}
+        accessibilityRole="button"
+        accessibilityLabel={item.title}
       >
         <Text style={[styles.chipText, { color: chipFg }]} numberOfLines={1}>
           {item.title}
@@ -86,18 +92,26 @@ function AlbumChips({
         maxToRenderPerBatch={8}
         windowSize={3}
         removeClippedSubviews
-        ListHeaderComponent={
+        ListHeaderComponent={showCreate || currentAlbum ? (
           <View style={styles.header}>
             {/* 1) fixed: create new album */}
-            <Pressable
-              style={[styles.chip, { backgroundColor: chipBg }]}
-              onPress={() => {
-                setName('');
-                setCreating(true);
-              }}
-            >
-              <Ionicons name="add" size={16} color={chipFg} />
-            </Pressable>
+            {showCreate && (
+              <Pressable
+                style={[styles.chip, { backgroundColor: chipBg }]}
+                hitSlop={{ top: 8, bottom: 8 }}
+                android_ripple={{
+                  color: 'rgba(255,255,255,0.18)',
+                }}
+                accessibilityRole="button"
+                accessibilityLabel={t('new_album')}
+                onPress={() => {
+                  setName('');
+                  setCreating(true);
+                }}
+              >
+                <Ionicons name="add" size={16} color={chipFg} />
+              </Pressable>
+            )}
 
             {/* 2) current item's album (follows the item) — solid accent so
                 the ✓ chip stands out from the scrim chips on any background.
@@ -107,6 +121,13 @@ function AlbumChips({
               <Pressable
                 disabled={!onCurrentPress}
                 onPress={onCurrentPress || undefined}
+                hitSlop={{ top: 8, bottom: 8 }}
+                android_ripple={{
+                  color: 'rgba(255,255,255,0.18)',
+                }}
+                accessibilityRole="button"
+                accessibilityLabel={currentAlbum.title}
+                accessibilityState={{ disabled: !onCurrentPress }}
                 style={[styles.chip, { backgroundColor: colors.accent }]}
               >
                 <Ionicons
@@ -123,7 +144,7 @@ function AlbumChips({
               </Pressable>
             )}
           </View>
-        }
+        ) : null}
       />
 
       {/* Create-album dialog */}
@@ -214,6 +235,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 9,
     maxWidth: 160,
+    overflow: 'hidden',
   },
   chipText: { fontSize: 13, fontWeight: '600' },
   backdrop: {

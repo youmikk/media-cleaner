@@ -1,4 +1,4 @@
-import { StyleSheet } from 'react-native';
+import { Platform, StyleSheet } from 'react-native';
 
 /**
  * ONE geometry for every control in the album-select controls row: the album
@@ -10,7 +10,7 @@ import { StyleSheet } from 'react-native';
  * what keeps them identical, and keeps the card stack below at the same y on
  * the photos and videos tabs.
  */
-export const PICKER_HEIGHT = 44;
+export const PICKER_HEIGHT = Platform.OS === 'android' ? 48 : 44;
 
 export const pickerStyles = StyleSheet.create({
   button: {

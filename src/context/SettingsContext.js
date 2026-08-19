@@ -76,7 +76,14 @@ export function SettingsProvider({ children }) {
   const isDark =
     settings.theme === 'dark' ||
     (settings.theme === 'system' && systemScheme === 'dark');
-  const colors = isDark ? palettes.dark : palettes.light;
+  const colors =
+    Platform.OS === 'android'
+      ? isDark
+        ? palettes.androidDark
+        : palettes.androidLight
+      : isDark
+        ? palettes.dark
+        : palettes.light;
 
   const t = useCallback(
     (key, params) => translate(language, key, params),

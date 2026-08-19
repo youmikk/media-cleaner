@@ -4,12 +4,11 @@ import {
   Text,
   Pressable,
   ScrollView,
-  Switch,
   StyleSheet,
   Linking,
-  Alert,
   Share,
   Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
@@ -20,6 +19,9 @@ import SuggestionCard from '../components/SuggestionCard';
 import StorageChart from '../components/StorageChart';
 import OptionPicker from '../components/OptionPicker';
 import DeletionModePicker from '../components/DeletionModePicker';
+import SettingsRow from '../components/SettingsRow';
+import AppSwitch from '../components/AppSwitch';
+import { showAppAlert } from '../components/AppDialog';
 import { LANGUAGES } from '../i18n';
 import {
   getAssets,
@@ -78,6 +80,173 @@ const VERSION = `v${APP_VERSION}`;
 const NINETY_DAYS = 90 * 24 * 60 * 60 * 1000;
 const SIZE_SCAN_CAP = 300;
 const UPDATE_CHECK_TIMEOUT_MS = 15000;
+
+// Smart-suggestion discovery belongs to the library, not to a particular
+// ProfileScreen mount. Keep it alive while the user visits another tab so a
+// costly scan is saved once and the next visit can join the same work.
+const smartSuggestionListeners = new Set();
+let activeSmartSuggestionJob = null;
+let smartSuggestionProgress = null;
+let lastSmartSuggestionResult = null;
+
+function smartSuggestionFingerprintKey(fingerprint) {
+  return JSON.stringify(fingerprint || {});
+}
+
+function publishSmartSuggestionProgress(next) {
+  smartSuggestionProgress = next;
+  for (const listener of smartSuggestionListeners) listener(next);
+}
+
+function subscribeSmartSuggestionProgress(listener) {
+  smartSuggestionListeners.add(listener);
+  return () => smartSuggestionListeners.delete(listener);
+}
+
+function scanSmartSuggestions(fingerprint) {
+  const fingerprintKey = smartSuggestionFingerprintKey(fingerprint);
+  if (lastSmartSuggestionResult?.fingerprintKey === fingerprintKey) {
+    return Promise.resolve(lastSmartSuggestionResult.data);
+  }
+  if (activeSmartSuggestionJob?.fingerprintKey === fingerprintKey) {
+    return activeSmartSuggestionJob.promise;
+  }
+  if (activeSmartSuggestionJob) {
+    // Only one metadata/size scan at a time. If the library changes during a
+    // scan, finish saving the old fingerprint before starting the new one so
+    // an older result can never overwrite the newer cache entry.
+    return activeSmartSuggestionJob.promise
+      .catch(() => null)
+      .then(() => scanSmartSuggestions(fingerprint));
+  }
+
+  let task;
+  task = (async () => {
+    publishSmartSuggestionProgress({ fingerprintKey, done: 0, total: 6 });
+
+    // 1) Largest files only needs a recent sample. Fetching the complete
+    // photo and video libraries in parallel here was the main source of the
+    // 5-180 second PhotoKit stalls in the iOS log.
+    const recentPhotos = await getAssets(
+      ALL_ALBUM_ID,
+      'photo',
+      SIZE_SCAN_CAP,
+      'background'
+    );
+    const recentVideos = await getAssets(
+      ALL_ALBUM_ID,
+      'video',
+      SIZE_SCAN_CAP,
+      'background'
+    );
+    publishSmartSuggestionProgress({ fingerprintKey, done: 1, total: 6 });
+    const pool = [
+      ...recentPhotos,
+      ...recentVideos,
+    ];
+    const sizeMap = await getAssetSizes(pool, { priority: 'background' });
+    publishSmartSuggestionProgress({ fingerprintKey, done: 2, total: 6 });
+    const sized = pool.map((asset) => ({
+      id: asset.id,
+      uri: asset.uri,
+      size: sizeMap[asset.id] || 0,
+      mediaType: asset.mediaType,
+    }));
+    const largest = sized.sort((a, b) => b.size - a.size).slice(0, 10);
+
+    // 2) Burst groups need the complete photo timeline, but the scan is
+    // serialized behind foreground media work.
+    const photos =
+      recentPhotos.length < SIZE_SCAN_CAP
+        ? recentPhotos
+        : await getAssets(ALL_ALBUM_ID, 'photo', undefined, 'background');
+    const bursts = groupBursts(photos).slice(0, 30);
+    const burstThumb =
+      bursts.length > 0
+        ? photos.find((photo) => photo.id === bursts[0].ids[0])?.uri
+        : null;
+    publishSmartSuggestionProgress({ fingerprintKey, done: 3, total: 6 });
+
+    // 3) Old screenshots (90+ days untouched).
+    let screenshots = [];
+    const shotsAlbum = await findAlbumByTitle('Screenshots');
+    if (shotsAlbum) {
+      const shots = await getAssets(
+        shotsAlbum.id,
+        'photo',
+        undefined,
+        'background'
+      );
+      const cutoff = Date.now() - NINETY_DAYS;
+      screenshots = shots
+        .filter(
+          (shot) =>
+            (shot.modificationTime || shot.creationTime || 0) < cutoff
+        )
+        .map((shot) => ({ id: shot.id, uri: shot.uri }));
+    }
+    publishSmartSuggestionProgress({ fingerprintKey, done: 4, total: 6 });
+
+    // 4) Duplicate videos: same duration (within 0.5 s), resolution and size.
+    const videos =
+      recentVideos.length < SIZE_SCAN_CAP
+        ? recentVideos
+        : await getAssets(ALL_ALBUM_ID, 'video', undefined, 'background');
+    const videoDupes = [];
+    const videoBuckets = new Map();
+    for (const video of videos) {
+      const key = `${Math.round((video.duration || 0) * 2)}_${video.width}x${video.height}`;
+      if (!videoBuckets.has(key)) videoBuckets.set(key, []);
+      videoBuckets.get(key).push(video);
+    }
+    const dupeCandidates = [];
+    for (const members of videoBuckets.values()) {
+      if (members.length >= 2) dupeCandidates.push(...members);
+    }
+    const dupeSizes = await getAssetSizes(dupeCandidates, {
+      priority: 'background',
+    });
+    for (const members of videoBuckets.values()) {
+      if (members.length < 2) continue;
+      const bySize = new Map();
+      for (const video of members) {
+        const size = dupeSizes[video.id] || 0;
+        if (!bySize.has(size)) bySize.set(size, []);
+        bySize.get(size).push(video.id);
+      }
+      for (const [size, ids] of bySize.entries()) {
+        if (size > 0 && ids.length >= 2) videoDupes.push({ ids });
+      }
+    }
+    publishSmartSuggestionProgress({ fingerprintKey, done: 5, total: 6 });
+
+    const data = {
+      largest,
+      bursts: bursts.map((burst) => ({ ...burst, thumb: burstThumb })),
+      screenshots: screenshots.slice(0, suggestionCache.MAX_SCREENSHOTS),
+      videoDupes: videoDupes.slice(
+        0,
+        suggestionCache.MAX_VIDEO_DUPE_GROUPS
+      ),
+    };
+    publishSmartSuggestionProgress({ fingerprintKey, done: 6, total: 6 });
+    // Save before resolving. A screen that has already blurred no longer
+    // controls whether this expensive result reaches persistent storage.
+    await suggestionCache.saveSuggestions(data, fingerprint);
+    lastSmartSuggestionResult = { fingerprintKey, data };
+    return data;
+  })().finally(() => {
+    if (activeSmartSuggestionJob?.promise === task) {
+      activeSmartSuggestionJob = null;
+    }
+    if (smartSuggestionProgress?.fingerprintKey === fingerprintKey) {
+      publishSmartSuggestionProgress(null);
+    }
+  });
+
+  activeSmartSuggestionJob = { fingerprintKey, promise: task };
+  return task;
+}
 
 function withDeadline(promise, deadline) {
   const remaining = Math.max(1, deadline - Date.now());
@@ -247,109 +416,47 @@ export default function ProfileScreen({ navigation }) {
   useFocusEffect(
     useCallback(() => {
       let alive = true;
-      (async () => {
-      try {
-        // Paint first; the daily rescan below is HEAVY (full metadata
-        // fetch + hundreds of file stats).
-        await new Promise((r) => setTimeout(r, 600));
+      let fingerprint = null;
+      let fingerprintKey = null;
+      const unsubscribe = subscribeSmartSuggestionProgress((next) => {
         if (!alive) return;
-        const fingerprint = await suggestionCache.getLibraryFingerprint();
-        if (!alive) return;
-        const cached = await suggestionCache.getSuggestions(fingerprint);
-        if (cached) {
-          setSuggestions(cached);
-          return;
-        }
-        setSuggestionProgress({ done: 0, total: 4 });
-
-        // 1) Largest files: photos + videos, sizes sampled on recent assets.
-        const [photos, videos] = await Promise.all([
-          getAssets(ALL_ALBUM_ID, 'photo'),
-          getAssets(ALL_ALBUM_ID, 'video'),
-        ]);
-        if (!alive) return;
-        setSuggestionProgress({ done: 1, total: 4 });
-        const pool = [...photos.slice(0, SIZE_SCAN_CAP), ...videos.slice(0, SIZE_SCAN_CAP)];
-        // ONE batched size query (native module) when available — replaces
-        // hundreds of per-file stat calls.
-        const sizeMap = await getAssetSizes(pool);
-        if (!alive) return;
-        setSuggestionProgress({ done: 2, total: 4 });
-        const sized = pool.map((a) => ({
-          id: a.id,
-          uri: a.uri,
-          size: sizeMap[a.id] || 0,
-          mediaType: a.mediaType,
-        }));
-        const largest = sized.sort((x, y) => y.size - x.size).slice(0, 10);
-
-        // 2) Burst groups (timestamp clustering — cheap, no pixel work here).
-        const bursts = groupBursts(photos).slice(0, 30);
-        const burstThumb =
-          bursts.length > 0
-            ? photos.find((p) => p.id === bursts[0].ids[0])?.uri
-            : null;
-
-        // 3) Old screenshots (Screenshots album, 90+ days untouched).
-        let screenshots = [];
-        const shotsAlbum = await findAlbumByTitle('Screenshots');
-        if (shotsAlbum) {
-          const shots = await getAssets(shotsAlbum.id, 'photo');
-          const cutoff = new Date().getTime() - NINETY_DAYS;
-          screenshots = shots
-            .filter(
-              (s) => (s.modificationTime || s.creationTime || 0) < cutoff
-            )
-            .map((s) => ({ id: s.id, uri: s.uri }));
-        }
-        if (!alive) return;
-        setSuggestionProgress({ done: 3, total: 4 });
-
-        // 4) Duplicate videos: same duration (±0.5s), resolution and size.
-        const videoDupes = [];
-        const vBuckets = new Map();
-        for (const v of videos) {
-          const key = `${Math.round((v.duration || 0) * 2)}_${v.width}x${v.height}`;
-          if (!vBuckets.has(key)) vBuckets.set(key, []);
-          vBuckets.get(key).push(v);
-        }
-        const dupeCandidates = [];
-        for (const members of vBuckets.values()) {
-          if (members.length >= 2) dupeCandidates.push(...members);
-        }
-        const dupeSizes = await getAssetSizes(dupeCandidates);
-        if (!alive) return;
-        for (const members of vBuckets.values()) {
-          if (members.length < 2) continue;
-          const bySize = new Map();
-          for (const v of members) {
-            const size = dupeSizes[v.id] || 0;
-            if (!bySize.has(size)) bySize.set(size, []);
-            bySize.get(size).push(v.id);
+        if (next && next.fingerprintKey !== fingerprintKey) return;
+        setSuggestionProgress(
+          next ? { done: next.done, total: next.total } : null
+        );
+      });
+      const timer = setTimeout(() => {
+        (async () => {
+          try {
+            // Paint first; an uncached rescan performs full metadata fetches
+            // plus hundreds of native size lookups.
+            fingerprint = await suggestionCache.getLibraryFingerprint();
+            fingerprintKey = smartSuggestionFingerprintKey(fingerprint);
+            if (!alive) return;
+            const cached = await suggestionCache.getSuggestions(fingerprint);
+            if (cached) {
+              setSuggestions(cached);
+              setSuggestionProgress(null);
+              return;
+            }
+            const active = smartSuggestionProgress;
+            if (active?.fingerprintKey === fingerprintKey) {
+              setSuggestionProgress({ done: active.done, total: active.total });
+            }
+            const data = await scanSmartSuggestions(fingerprint);
+            if (!alive) return;
+            setSuggestions(data);
+          } catch (e) {
+            // Permissions or I/O issue: keep the previous suggestions.
+          } finally {
+            if (alive) setSuggestionProgress(null);
           }
-          for (const [size, ids] of bySize.entries()) {
-            if (size > 0 && ids.length >= 2) videoDupes.push({ ids });
-          }
-        }
-
-        const data = {
-          largest,
-          bursts: bursts.map((b) => ({ ...b, thumb: burstThumb })),
-          screenshots,
-          videoDupes,
-        };
-        if (!alive) return;
-        setSuggestions(data);
-        setSuggestionProgress({ done: 4, total: 4 });
-        await suggestionCache.saveSuggestions(data, fingerprint);
-      } catch (e) {
-        // permissions or IO issue — suggestions stay empty
-      } finally {
-        if (alive) setSuggestionProgress(null);
-      }
-      })();
+        })();
+      }, 600);
       return () => {
         alive = false;
+        clearTimeout(timer);
+        unsubscribe();
       };
     }, [])
   );
@@ -379,17 +486,17 @@ export default function ProfileScreen({ navigation }) {
         } catch (e) {
           // changelog unavailable — generic message
         }
-        Alert.alert(t('check_update'), body, [
+        showAppAlert(t('check_update'), body, [
           { text: t('cancel'), style: 'cancel' },
           {
             text: t('update_restart'),
-            // Delay past the Alert dismissal — reloadAsync races the
+            // Delay past the dialog dismissal — reloadAsync races the
             // closing dialog on Android and silently fails otherwise.
             onPress: () =>
               setTimeout(async () => {
                 const ok = await reloadWithUpdate();
                 if (!ok) {
-                  Alert.alert(t('check_update'), t('update_restart_manual'));
+                  showAppAlert(t('check_update'), t('update_restart_manual'));
                 }
               }, 400),
           },
@@ -412,14 +519,14 @@ export default function ProfileScreen({ navigation }) {
           text: t('update_download'),
           onPress: () => Linking.openURL(info.url),
         });
-        Alert.alert(t('update_available', { version: info.version }), '', buttons);
+        showAppAlert(t('update_available', { version: info.version }), '', buttons);
       } else {
         diagLog('update', `manual check: current ${APP_VERSION} is latest`);
-        Alert.alert(t('check_update'), t('update_latest'));
+        showAppAlert(t('check_update'), t('update_latest'));
       }
     } catch (e) {
       diagLog('update', `manual check failed: ${(e && e.message) || e}`);
-      Alert.alert(t('check_update'), t('update_check_failed'));
+      showAppAlert(t('check_update'), t('update_check_failed'));
     } finally {
       setCheckingUpdate(false);
     }
@@ -441,10 +548,10 @@ export default function ProfileScreen({ navigation }) {
     }
     setClearingCache(false);
     if (info.entries === 0) {
-      Alert.alert(t('clear_cache'), t('clear_cache_none'));
+      showAppAlert(t('clear_cache'), t('clear_cache_none'));
       return;
     }
-    Alert.alert(
+    showAppAlert(
       t('clear_cache'),
       t('clear_cache_message', { size: formatBytes(info.bytes) }),
       [
@@ -456,7 +563,7 @@ export default function ProfileScreen({ navigation }) {
             setClearingCache(true);
             const freed = await cacheManager.clearCaches();
             setClearingCache(false);
-            Alert.alert(
+            showAppAlert(
               t('clear_cache'),
               t('clear_cache_done', { size: formatBytes(freed.bytes) })
             );
@@ -488,7 +595,7 @@ export default function ProfileScreen({ navigation }) {
   const scheduleReminder = async (hour) => {
     const ok = await enableDailyReminder(t, hour, 0);
     if (!ok) {
-      Alert.alert(t('setting_reminder'), t('permission_denied'));
+      showAppAlert(t('setting_reminder'), t('permission_denied'));
       return false;
     }
     return true;
@@ -510,7 +617,7 @@ export default function ProfileScreen({ navigation }) {
 
   const onDeleteModeChange = (value) => {
     if (value === settings.recycleBin) return;
-    Alert.alert(
+    showAppAlert(
       t('delete_mode_warning_title'),
       t(value ? 'delete_mode_warning_recycle' : 'delete_mode_warning_direct'),
       [
@@ -554,15 +661,20 @@ export default function ProfileScreen({ navigation }) {
     </View>
   );
 
-  const ToggleRow = ({ label, value, onChange }) => (
-    <View style={[styles.row, { borderColor: colors.border }]}>
-      <Text style={[styles.rowLabel, { color: colors.text }]}>{label}</Text>
-      <Switch
-        value={value}
-        onValueChange={onChange}
-        trackColor={{ true: colors.accent }}
-      />
-    </View>
+  const ToggleRow = ({ label, value, onChange, divider = true }) => (
+    <SettingsRow
+      title={label}
+      divider={divider}
+      accessory={null}
+      compact
+      trailing={
+        <AppSwitch
+          value={value}
+          onValueChange={onChange}
+          label={label}
+        />
+      }
+    />
   );
 
   const statCards = [
@@ -747,94 +859,61 @@ export default function ProfileScreen({ navigation }) {
 
         {/* Tools: photography profile & compressor */}
         <Section title={t('tools_title')}>
-          <Pressable
-            style={[styles.binRow, { backgroundColor: colors.card, marginBottom: 10 }]}
-            onPress={() => navigation.navigate('Favorites')}
-          >
-            <Ionicons name="heart-outline" size={22} color={colors.heart} />
-            <Text style={[styles.rowLabel, { color: colors.text, flex: 1 }]}>
-              {t('my_favorites')}
-            </Text>
-            <Text style={{ color: colors.subtext, fontSize: 13 }}>
-              {Object.keys(favorites || {}).length}
-            </Text>
-            <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
-          </Pressable>
-          <Pressable
-            style={[styles.binRow, { backgroundColor: colors.card, marginBottom: 10 }]}
-            onPress={() => navigation.navigate('Insights')}
-          >
-            <Ionicons name="analytics-outline" size={22} color={colors.accent} />
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.rowLabel, { color: colors.text }]}>
-                {t('insights_title')}
-              </Text>
-              <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
-                {t('insights_desc')}
-              </Text>
-            </View>
-            <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
-          </Pressable>
-          <Pressable
-            style={[styles.binRow, { backgroundColor: colors.card, marginBottom: 10 }]}
-            onPress={() => navigation.navigate('Compress')}
-          >
-            <Ionicons name="archive-outline" size={22} color={colors.accent} />
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.rowLabel, { color: colors.text }]}>
-                {t('compress_title')}
-              </Text>
-              <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
-                {t('compress_desc')}
-              </Text>
-            </View>
-            <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
-          </Pressable>
-          <Pressable
-            style={[styles.binRow, { backgroundColor: colors.card, marginBottom: 10 }]}
-            onPress={onCheckUpdate}
-          >
-            <Ionicons name="refresh-circle-outline" size={22} color={colors.accent} />
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.rowLabel, { color: colors.text }]}>
-                {checkingUpdate ? t('update_checking') : t('check_update')}
-              </Text>
-              <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
-                {VERSION}
-              </Text>
-            </View>
-            <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
-          </Pressable>
-          <Pressable
-            style={[styles.binRow, { backgroundColor: colors.card, marginBottom: 10 }]}
-            onPress={onExportLog}
-          >
-            <Ionicons name="document-text-outline" size={22} color={colors.accent} />
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.rowLabel, { color: colors.text }]}>
-                {t('export_log')}
-              </Text>
-              <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
-                {t('export_log_desc')}
-              </Text>
-            </View>
-            <Ionicons name="share-outline" size={18} color={colors.subtext} />
-          </Pressable>
-          <Pressable
-            style={[styles.binRow, { backgroundColor: colors.card }]}
-            onPress={onClearCache}
-          >
-            <Ionicons name="trash-bin-outline" size={22} color={colors.accent} />
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.rowLabel, { color: colors.text }]}>
-                {clearingCache ? t('clear_cache_working') : t('clear_cache')}
-              </Text>
-              <Text style={{ color: colors.subtext, fontSize: 12, marginTop: 2 }}>
-                {t('clear_cache_desc')}
-              </Text>
-            </View>
-            <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
-          </Pressable>
+          <View style={[styles.listCard, { backgroundColor: colors.card }]}>
+            <SettingsRow
+              icon="heart-outline"
+              iconColor={colors.heart}
+              title={t('my_favorites')}
+              value={String(Object.keys(favorites || {}).length)}
+              onPress={() => navigation.navigate('Favorites')}
+            />
+            <SettingsRow
+              icon="analytics-outline"
+              title={t('insights_title')}
+              subtitle={t('insights_desc')}
+              onPress={() => navigation.navigate('Insights')}
+            />
+            <SettingsRow
+              icon="archive-outline"
+              title={t('compress_title')}
+              subtitle={t('compress_desc')}
+              onPress={() => navigation.navigate('Compress')}
+            />
+            <SettingsRow
+              icon="refresh-outline"
+              title={checkingUpdate ? t('update_checking') : t('check_update')}
+              value={VERSION}
+              onPress={onCheckUpdate}
+              disabled={checkingUpdate}
+              accessory={checkingUpdate ? null : 'chevron'}
+              trailing={
+                checkingUpdate ? (
+                  <ActivityIndicator size="small" color={colors.accent} />
+                ) : null
+              }
+            />
+            <SettingsRow
+              icon="document-text-outline"
+              title={t('export_log')}
+              subtitle={t('export_log_desc')}
+              onPress={onExportLog}
+              accessory="share"
+            />
+            <SettingsRow
+              icon="trash-bin-outline"
+              title={clearingCache ? t('clear_cache_working') : t('clear_cache')}
+              subtitle={t('clear_cache_desc')}
+              onPress={onClearCache}
+              disabled={clearingCache}
+              divider={false}
+              accessory={clearingCache ? null : 'chevron'}
+              trailing={
+                clearingCache ? (
+                  <ActivityIndicator size="small" color={colors.accent} />
+                ) : null
+              }
+            />
+          </View>
         </Section>
 
         {/* Storage comparison */}
@@ -851,7 +930,14 @@ export default function ProfileScreen({ navigation }) {
             {statCards.map((card) => (
               <Pressable
                 key={card.key}
-                style={[styles.statCard, { backgroundColor: colors.card }]}
+                accessibilityRole="button"
+                accessibilityState={{ expanded: expandedStat === card.key }}
+                style={({ pressed }) => [
+                  styles.statCard,
+                  {
+                    backgroundColor: pressed ? colors.chartTrack : colors.card,
+                  },
+                ]}
                 onPress={() =>
                   setExpandedStat(expandedStat === card.key ? null : card.key)
                 }
@@ -884,19 +970,15 @@ export default function ProfileScreen({ navigation }) {
         {/* Recycle bin (Android with setting on, or whenever items exist) */}
         {((isAndroid && settings.recycleBin) || trash.length > 0) && (
           <Section title={t('recycle_bin')}>
-            <Pressable
-              style={[styles.binRow, { backgroundColor: colors.card }]}
-              onPress={() => navigation.navigate('RecycleBin')}
-            >
-              <Ionicons name="trash-bin-outline" size={22} color={colors.accent} />
-              <Text style={[styles.rowLabel, { color: colors.text, flex: 1 }]}>
-                {t('recycle_bin')}
-              </Text>
-              <Text style={{ color: colors.subtext, fontSize: 13 }}>
-                {trash.length}
-              </Text>
-              <Ionicons name="chevron-forward" size={18} color={colors.subtext} />
-            </Pressable>
+            <View style={[styles.listCard, { backgroundColor: colors.card }]}>
+              <SettingsRow
+                icon="trash-bin-outline"
+                title={t('recycle_bin')}
+                value={String(trash.length)}
+                divider={false}
+                onPress={() => navigation.navigate('RecycleBin')}
+              />
+            </View>
           </Section>
         )}
 
@@ -916,6 +998,7 @@ export default function ProfileScreen({ navigation }) {
               label={t('setting_similar')}
               value={settings.similarDetection}
               onChange={(v) => setSetting('similarDetection', v)}
+              divider={false}
             />
           </SubGroup>
 
@@ -930,6 +1013,7 @@ export default function ProfileScreen({ navigation }) {
                 label={t('setting_live_muted')}
                 value={settings.liveMuted !== false}
                 onChange={(v) => setSetting('liveMuted', v)}
+                divider={false}
               />
             </SubGroup>
           )}
@@ -948,6 +1032,7 @@ export default function ProfileScreen({ navigation }) {
               label={t('setting_reminder')}
               value={settings.dailyReminder}
               onChange={onToggleReminder}
+              divider={settings.dailyReminder}
             />
             {settings.dailyReminder && (
               <OptionPicker
@@ -958,6 +1043,7 @@ export default function ProfileScreen({ navigation }) {
                   value: hour,
                   label: `${String(hour).padStart(2, '0')}:00`,
                 }))}
+                divider={false}
               />
             )}
           </SubGroup>
@@ -981,6 +1067,7 @@ export default function ProfileScreen({ navigation }) {
                 { value: 'system', label: t('follow_system') },
                 ...LANGUAGES.map((l) => ({ value: l.code, label: l.label })),
               ]}
+              divider={false}
             />
           </SubGroup>
         </Section>
@@ -1043,22 +1130,8 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingVertical: 4,
   },
-  binRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    borderRadius: 16,
-    padding: 16,
-  },
-  settingsCard: { borderRadius: 16, paddingHorizontal: 14 },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 13,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    gap: 10,
-  },
+  listCard: { borderRadius: 12, overflow: 'hidden' },
+  settingsCard: { borderRadius: 12, paddingHorizontal: 14 },
   rowLabel: { fontSize: 14, fontWeight: '600', flexShrink: 1 },
   segmented: { flexDirection: 'row', borderRadius: 10, padding: 3 },
   segment: {

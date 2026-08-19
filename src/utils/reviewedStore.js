@@ -1,14 +1,18 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppState } from 'react-native';
-import { readJSON, withLock } from './safeStore';
+import { withLock } from './safeStore';
 
 /**
  * Persistent per-album "already reviewed" record. A photo counts as
  * reviewed once its GROUP was confirmed (deleted or kept) — it then never
  * re-enters the random cleaning pool, session after session, until every
- * photo of the album has been reviewed once (the round auto-resets).
+ * photo of the album has been reviewed. The category stays complete until
+ * genuinely new asset ids appear.
  */
 const KEY = (albumId) => `@mediacleaner/reviewed_${albumId}`;
+const SHARD_PREFIX = '@mediacleaner/reviewed_shard_v2_';
+const SHARD_KEY = (albumId, generation, index) =>
+  `${SHARD_PREFIX}${encodeURIComponent(albumId)}_${generation}_${index}`;
 
 /**
  * One reviewed set per media type, shared by every album. An asset can belong
@@ -24,6 +28,9 @@ export function albumScopeFor(mediaType, albumId) {
   return `album:${mediaType === 'video' ? 'video' : 'photo'}:${albumId}`;
 }
 
+// Per-value entry cap. Larger histories are split into multiple values so
+// Android never receives an oversized AsyncStorage payload, while the full
+// reviewed ledger remains available for libraries well beyond 20k assets.
 const CAP = 20000;
 // Coalescing window for writes. `addReviewed` fires once per confirmed group
 // — every ~5 photos — and the stored list grows to CAP (~400 KB of JSON), so
@@ -45,30 +52,157 @@ const memo = new Map();
 // turn one transient error into permanent loss of the album's history.
 const unreadable = new Set();
 const dirty = new Set();
+// Deletions from a reviewed set invalidate append-only shard reuse.
+const rewriteRequired = new Set();
+const inFlightFlushes = new Map();
+const mutationPins = new Map();
 let flushTimer = null;
 const LEGACY_MIGRATED_KEY = '@mediacleaner/reviewed_global_migrated_v1';
 let migrationPromise = null;
-const activeRoundScopes = new Map();
 const membershipByType = new Map([
   ['photo', new Map()],
   ['video', new Map()],
 ]);
 const MAX_MEMBERSHIP_ASSETS = 30000;
 
-function roundScopeFor(mediaType, albumId, range) {
-  const type = mediaType === 'video' ? 'video' : 'photo';
-  const rangeKey = range
-    ? `${Number(range.start) || 0}-${Number(range.end) || 0}`
-    : 'all-time';
-  return `round:${type}:${albumId || 'all'}:${rangeKey}`;
+function pinMutation(scope) {
+  mutationPins.set(scope, (mutationPins.get(scope) || 0) + 1);
 }
 
-/** Select the independent review round consumed by the cleaning screen. */
-export function activateRound(mediaType, albumId, range = null) {
-  const type = mediaType === 'video' ? 'video' : 'photo';
-  const scope = roundScopeFor(type, albumId, range);
-  activeRoundScopes.set(type, scope);
-  return scope;
+function unpinMutation(scope) {
+  const next = (mutationPins.get(scope) || 0) - 1;
+  if (next > 0) mutationPins.set(scope, next);
+  else mutationPins.delete(scope);
+}
+
+async function decodeStoredValue(albumId, raw) {
+  if (raw === null || raw === undefined) return { ok: true, list: [] };
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch (e) {
+    return { ok: false, list: [] };
+  }
+  if (Array.isArray(value)) return { ok: true, list: value };
+  if (!value || value.version !== 2 || !Array.isArray(value.shards)) {
+    return { ok: false, list: [] };
+  }
+  const list = [];
+  try {
+    for (let i = 0; i < value.shards.length; i += PRIME_CHUNK) {
+      // eslint-disable-next-line no-await-in-loop
+      const pairs = await AsyncStorage.multiGet(
+        value.shards.slice(i, i + PRIME_CHUNK)
+      );
+      const byKey = new Map(pairs);
+      for (const key of value.shards.slice(i, i + PRIME_CHUNK)) {
+        const shardRaw = byKey.get(key);
+        if (!shardRaw) return { ok: false, list: [] };
+        const shard = JSON.parse(shardRaw);
+        if (!Array.isArray(shard)) return { ok: false, list: [] };
+        list.push(...shard);
+      }
+    }
+    if (Number.isFinite(value.count) && list.length !== value.count) {
+      return { ok: false, list: [] };
+    }
+    return { ok: true, list };
+  } catch (e) {
+    return { ok: false, list: [] };
+  }
+}
+
+function storedCount(raw) {
+  try {
+    const value = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(value)) return value.length;
+    if (value?.version === 2 && Number.isFinite(value.count)) {
+      return value.count;
+    }
+  } catch (e) {
+    // Corrupt counts are omitted instead of being reported as zero.
+  }
+  return null;
+}
+
+async function writeStoredList(albumId, list, { forceRewrite = false } = {}) {
+  const oldRaw = await AsyncStorage.getItem(KEY(albumId)).catch(() => null);
+  let oldShards = [];
+  let oldCount = 0;
+  try {
+    const oldValue = oldRaw ? JSON.parse(oldRaw) : null;
+    if (oldValue?.version === 2 && Array.isArray(oldValue.shards)) {
+      oldShards = oldValue.shards;
+      oldCount = Number(oldValue.count) || 0;
+    }
+  } catch (e) {
+    // A complete new value below can replace a corrupt old manifest.
+  }
+
+  if (list.length <= CAP) {
+    await AsyncStorage.setItem(KEY(albumId), JSON.stringify(list));
+    if (oldShards.length > 0) AsyncStorage.multiRemove(oldShards).catch(() => {});
+    return;
+  }
+
+  // Reviewed sets normally only grow. Reuse immutable full shards and write
+  // only the old partial tail plus new ids. This turns a 100k-photo update
+  // from five large JSON writes into one small suffix write.
+  let retainedShards = [];
+  let writeFrom = 0;
+  if (
+    !forceRewrite &&
+    oldShards.length > 0 &&
+    oldCount > 0 &&
+    list.length >= oldCount
+  ) {
+    if (list.length === oldCount) return;
+    const reusableFullShards = Math.floor(oldCount / CAP);
+    retainedShards = oldShards.slice(0, reusableFullShards);
+    writeFrom = reusableFullShards * CAP;
+  }
+
+  const generation = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const chunks = [];
+  for (let i = writeFrom; i < list.length; i += CAP) {
+    chunks.push(list.slice(i, i + CAP));
+  }
+  const newShardKeys = chunks.map((_, index) =>
+    SHARD_KEY(albumId, generation, index)
+  );
+  const shardKeys = [...retainedShards, ...newShardKeys];
+  try {
+    // Write every shard before publishing the manifest. A process kill can
+    // leave unreachable new shards, but never a manifest with missing data.
+    for (let i = 0; i < chunks.length; i += PRIME_CHUNK) {
+      // eslint-disable-next-line no-await-in-loop
+      await AsyncStorage.multiSet(
+        chunks.slice(i, i + PRIME_CHUNK).map((chunk, offset) => [
+          newShardKeys[i + offset],
+          JSON.stringify(chunk),
+        ])
+      );
+    }
+    await AsyncStorage.setItem(
+      KEY(albumId),
+      JSON.stringify({ version: 2, count: list.length, shards: shardKeys })
+    );
+    const stale = oldShards.filter((key) => !shardKeys.includes(key));
+    if (stale.length > 0) AsyncStorage.multiRemove(stale).catch(() => {});
+  } catch (e) {
+    // Retained shards still belong to the previous live manifest.
+    AsyncStorage.multiRemove(newShardKeys).catch(() => {});
+    throw e;
+  }
+}
+
+/**
+ * Compatibility hook for callers entering a category/time view. Decisions
+ * are intentionally global per media type: an asset handled in QQ must not
+ * reappear in All Photos, Camera, or a time-scoped view.
+ */
+export function activateRound(mediaType) {
+  return scopeFor(mediaType);
 }
 
 /**
@@ -126,7 +260,8 @@ async function migrateLegacyPhotoHistory() {
           !suffix.startsWith('global:') &&
           !suffix.startsWith('album:') &&
           !suffix.startsWith('round:') &&
-          !suffix.startsWith('v:')
+          !suffix.startsWith('v:') &&
+          !suffix.startsWith('shard_v2_')
         );
       });
       const merged = new Set();
@@ -142,10 +277,12 @@ async function migrateLegacyPhotoHistory() {
           }
         }
       }
-      const ids = [...merged].slice(-CAP);
+      const ids = [...merged];
       // The marker is written only after the destination succeeds. A failed
       // destination write must be retried on the next launch.
-      await AsyncStorage.setItem(KEY(scopeFor('photo')), JSON.stringify(ids));
+      await withLock(KEY(scopeFor('photo')), () =>
+        writeStoredList(scopeFor('photo'), ids)
+      );
       await AsyncStorage.setItem(LEGACY_MIGRATED_KEY, '1');
       return ids;
     } catch (e) {
@@ -161,13 +298,20 @@ async function migrateLegacyPhotoHistory() {
 async function load(albumId) {
   const cached = memo.get(albumId);
   if (cached) return cached;
-  const { ok, value } = await readJSON(KEY(albumId));
+  let raw;
+  try {
+    raw = await AsyncStorage.getItem(KEY(albumId));
+  } catch (e) {
+    unreadable.add(albumId);
+    return null;
+  }
+  const { ok, list: storedList } = await decodeStoredValue(albumId, raw);
   if (!ok) {
     unreadable.add(albumId); // NOT memoized — a later call retries the read
     return null;
   }
   unreadable.delete(albumId);
-  let list = Array.isArray(value) ? value : [];
+  let list = storedList;
   if (albumId === scopeFor('photo') && list.length === 0) {
     list = await migrateLegacyPhotoHistory();
   }
@@ -177,33 +321,58 @@ async function load(albumId) {
 }
 
 async function flushAlbum(albumId) {
-  if (!dirty.has(albumId)) return;
+  if (!dirty.has(albumId)) return inFlightFlushes.get(albumId) || true;
   dirty.delete(albumId);
   const set = memo.get(albumId);
-  if (!set || unreadable.has(albumId)) return;
-  return withLock(KEY(albumId), async () => {
-    let list = [...set];
-    if (list.length > CAP) {
-      // Sets keep insertion order, so this drops the OLDEST entries.
-      list = list.slice(list.length - CAP);
-      memo.set(albumId, new Set(list)); // keep memory in step with disk
-    }
+  if (!set || unreadable.has(albumId)) return false;
+  const task = withLock(KEY(albumId), async () => {
     try {
-      await AsyncStorage.setItem(KEY(albumId), JSON.stringify(list));
+      await writeStoredList(albumId, [...set], {
+        forceRewrite: rewriteRequired.has(albumId),
+      });
+      // A mutation during the async write marks the album dirty again. Keep
+      // the rewrite flag in that case so a concurrent removal is not lost.
+      if (!dirty.has(albumId)) rewriteRequired.delete(albumId);
+      return true;
     } catch (e) {
       dirty.add(albumId); // retry on the next flush rather than lose it
+      return false;
     }
   });
+  inFlightFlushes.set(albumId, task);
+  task.finally(() => {
+    if (inFlightFlushes.get(albumId) === task) {
+      inFlightFlushes.delete(albumId);
+    }
+  });
+  return task;
 }
 
-/** Write every pending album now. Call before the app can be torn down. */
+/**
+ * Write every pending album now. Returns false if any value could not be made
+ * durable; the dirty flag stays set so a user action or background event can
+ * retry without losing the in-memory decision.
+ */
 export async function flushReviewed() {
   if (flushTimer) {
     clearTimeout(flushTimer);
     flushTimer = null;
   }
-  const pending = [...dirty];
-  await Promise.all(pending.map((id) => flushAlbum(id).catch(() => {})));
+  // Drain mutations that arrived while an earlier write was in flight. A
+  // confirmed cleaning group publishes its session checkpoint only after
+  // this returns true, so "not in the window" always means "on disk".
+  while (dirty.size > 0 || inFlightFlushes.size > 0) {
+    const pending = new Set([...dirty, ...inFlightFlushes.keys()]);
+    // Serial writes keep only one large `[...set]` snapshot alive. A single
+    // group can touch global/all/current plus several iOS collections; doing
+    // those 100k-id copies in parallel caused a sharp memory peak.
+    for (const id of pending) {
+      // eslint-disable-next-line no-await-in-loop
+      const ok = await flushAlbum(id).catch(() => false);
+      if (!ok) return false;
+    }
+  }
+  return true;
 }
 
 function scheduleFlush() {
@@ -224,16 +393,26 @@ try {
 }
 
 export async function getReviewed(albumId) {
-  const active =
-    albumId === scopeFor('video')
-      ? activeRoundScopes.get('video')
-      : albumId === scopeFor('photo')
-        ? activeRoundScopes.get('photo')
-        : null;
-  const set = await load(active || albumId);
+  const set = await load(albumId);
+  if (!set) return null;
   // A FRESH Set per call: CleaningScreen adds to the set it gets back, and
   // handing out the memo itself would let that mutation rewrite history.
-  return new Set(set || []);
+  return new Set(set);
+}
+
+/** Drop a clean, non-global memo entry after a one-off progress query. */
+export function releaseReviewed(albumId) {
+  if (
+    !albumId ||
+    albumId.startsWith('global:') ||
+    dirty.has(albumId) ||
+    inFlightFlushes.has(albumId) ||
+    mutationPins.has(albumId) ||
+    unreadable.has(albumId)
+  ) {
+    return;
+  }
+  memo.delete(albumId);
 }
 
 /**
@@ -258,10 +437,8 @@ export async function addReviewed(albumId, ids) {
  */
 export async function addReviewedAssets(mediaType, currentAlbumId, assets) {
   const list = (assets || []).filter((a) => a && a.id);
-  if (list.length === 0) return;
+  if (list.length === 0) return true;
   const type = mediaType === 'video' ? 'video' : 'photo';
-  const active = activeRoundScopes.get(type);
-  await addReviewed(scopeFor(mediaType), list.map((a) => a.id));
   const byAlbum = new Map();
   const add = (albumId, id) => {
     if (!albumId) return;
@@ -277,11 +454,37 @@ export async function addReviewedAssets(mediaType, currentAlbumId, assets) {
       for (const albumId of memberships) add(albumId, asset.id);
     }
   }
-  const writes = [...byAlbum].map(([albumId, ids]) =>
-      addReviewed(albumScopeFor(mediaType, albumId), ids)
-    );
-  if (active) writes.push(addReviewed(active, list.map((a) => a.id)));
-  await Promise.all(writes);
+  const targets = [
+    ...[...byAlbum].map(([albumId, ids]) => [
+      albumScopeFor(mediaType, albumId),
+      ids,
+    ]),
+    // Global is the authority that removes ids from future cleaning pools.
+    // Write it last so an earlier album-scope failure cannot publish a
+    // half-complete decision that skips the group after restart.
+    [scopeFor(mediaType), list.map((asset) => asset.id)],
+  ];
+  const loaded = [];
+  // Validate every destination before mutating any of them. Otherwise a
+  // transient read failure in one album scope could leave the global set
+  // dirty, report failure, and later commit only half of the decision.
+  targets.forEach(([scope]) => pinMutation(scope));
+  try {
+    for (const [scope, ids] of targets) {
+      // eslint-disable-next-line no-await-in-loop
+      const set = await load(scope);
+      if (!set) return false;
+      loaded.push([scope, ids, set]);
+    }
+    for (const [scope, ids, set] of loaded) {
+      ids.forEach((id) => set.add(id));
+      dirty.add(scope);
+    }
+    scheduleFlush();
+    return true;
+  } finally {
+    targets.forEach(([scope]) => unpinMutation(scope));
+  }
 }
 
 /** Remove only one album's ids when that album starts a new review round. */
@@ -289,6 +492,7 @@ export async function removeReviewed(albumId, ids) {
   const set = await load(albumId);
   if (!set) return null;
   ids.forEach((item) => set.delete(typeof item === 'string' ? item : item?.id));
+  rewriteRequired.add(albumId);
   dirty.add(albumId);
   scheduleFlush();
   return new Set(set);
@@ -299,8 +503,20 @@ export async function clearReviewed(albumId) {
     memo.set(albumId, new Set()); // authoritative: this album is now empty
     unreadable.delete(albumId);
     dirty.delete(albumId);
+    rewriteRequired.delete(albumId);
     try {
+      const raw = await AsyncStorage.getItem(KEY(albumId));
+      let shards = [];
+      try {
+        const value = raw ? JSON.parse(raw) : null;
+        if (value?.version === 2 && Array.isArray(value.shards)) {
+          shards = value.shards;
+        }
+      } catch (e) {
+        // Removing the manifest still clears an unreadable reviewed set.
+      }
       await AsyncStorage.removeItem(KEY(albumId));
+      if (shards.length > 0) AsyncStorage.multiRemove(shards).catch(() => {});
     } catch (e) {
       // best effort
     }
@@ -345,8 +561,9 @@ export async function primeReviewed(albumIds) {
           continue;
         }
         try {
-          const value = JSON.parse(raw);
-          let list = Array.isArray(value) ? value : [];
+          const decoded = await decodeStoredValue(albumId, raw);
+          if (!decoded.ok) throw new Error('Unreadable reviewed shards');
+          let list = decoded.list;
           if (albumId === scopeFor('photo') && list.length === 0) {
             list = await migrateLegacyPhotoHistory();
           }
@@ -361,6 +578,56 @@ export async function primeReviewed(albumIds) {
       // don't show this time; nothing is written on top of an unknown state.
     }
   }
+}
+
+/**
+ * Read progress counts for a picker without retaining every album's Set.
+ * A device may expose 150+ collections, each with thousands of overlapping
+ * ids; memoizing all of them turns a tiny progress UI into tens of MB.
+ * Dirty/current scopes still come from the authoritative memo.
+ */
+export async function getProgressCounts(albumIds) {
+  const counts = {};
+  const missing = [];
+  const seen = new Set();
+  for (const id of albumIds || []) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const cached = memo.get(id);
+    if (cached) counts[id] = cached.size;
+    else missing.push(id);
+  }
+  for (let i = 0; i < missing.length; i += PRIME_CHUNK) {
+    const part = missing.slice(i, i + PRIME_CHUNK);
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const pairs = await AsyncStorage.multiGet(part.map(KEY));
+      const byKey = new Map(pairs);
+      for (const id of part) {
+        const raw = byKey.get(KEY(id));
+        if (!raw) {
+          if (id === scopeFor('photo')) {
+            // Preserve the one-time migration from pre-global album keys.
+            // eslint-disable-next-line no-await-in-loop
+            const migrated = await load(id);
+            counts[id] = migrated ? migrated.size : 0;
+            continue;
+          }
+          counts[id] = 0;
+          continue;
+        }
+        try {
+          const count = storedCount(raw);
+          if (count !== null) counts[id] = count;
+        } catch (e) {
+          // Corrupt/unknown values are omitted rather than reported as zero.
+        }
+      }
+    } catch (e) {
+      // This chunk simply has no progress rings for the current visit.
+    }
+  }
+  return counts;
 }
 
 /** Progress from the memo only — no IO. Pair with primeReviewed(). */
@@ -407,38 +674,6 @@ export function getAlbumProgressSync(mediaType, albumId, assets) {
     total,
     percent: total > 0 ? Math.min(100, Math.round((done.size / total) * 100)) : 0,
   };
-}
-
-/** Start a new round for one album while keeping every overlapping view synced. */
-export async function resetAlbumRound(mediaType, albumId, currentAssets) {
-  const type = mediaType === 'video' ? 'video' : 'photo';
-  const active = activeRoundScopes.get(type);
-  if (active) {
-    await clearReviewed(active);
-    return;
-  }
-  const globalScope = scopeFor(mediaType);
-  if (albumId === 'all') {
-    await clearReviewed(globalScope);
-    try {
-      const prefix = `@mediacleaner/reviewed_album:${mediaType}:`;
-      const keys = (await AsyncStorage.getAllKeys()).filter((key) => key.startsWith(prefix));
-      if (keys.length > 0) await AsyncStorage.multiRemove(keys);
-      for (const key of [...memo.keys()]) {
-        if (key.startsWith(`album:${mediaType}:`)) memo.delete(key);
-      }
-    } catch (e) {
-      // best effort; global history is already reset
-    }
-    return;
-  }
-  const albumScope = albumScopeFor(mediaType, albumId);
-  const historical = await getReviewed(albumScope);
-  await removeReviewed(globalScope, [
-    ...(currentAssets || []).map((a) => a?.id || a),
-    ...historical,
-  ]);
-  await clearReviewed(albumScope);
 }
 
 export async function getProgressForIds(albumId, assetIds) {

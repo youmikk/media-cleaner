@@ -1,5 +1,12 @@
 import React, { useEffect, useRef } from 'react';
-import { View, Pressable, Text, StyleSheet, PanResponder } from 'react-native';
+import {
+  Platform,
+  View,
+  Pressable,
+  Text,
+  StyleSheet,
+  PanResponder,
+} from 'react-native';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -118,6 +125,74 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
     ProfileTab: t('tab_profile'),
   };
 
+  const pressRoute = (route, focused) => {
+    const event = navigation.emit({
+      type: 'tabPress',
+      target: route.key,
+      canPreventDefault: true,
+    });
+    if (!focused && !event.defaultPrevented) navigation.navigate(route.name);
+  };
+
+  if (Platform.OS === 'android') {
+    return (
+      <View
+        pointerEvents="box-none"
+        style={[styles.androidWrap, { bottom: Math.max(insets.bottom, 8) }]}
+      >
+        <View
+          style={[
+            styles.androidBar,
+            {
+              backgroundColor: colors.elevated,
+              borderColor: colors.border,
+            },
+          ]}
+        >
+          {state.routes.map((route, index) => {
+            const focused = state.index === index;
+            const [outline, filled] = ICONS[route.name] || ICONS.PhotosTab;
+            return (
+              <Pressable
+                key={route.key}
+                onPress={() => pressRoute(route, focused)}
+                android_ripple={{ color: colors.accentSoft }}
+                style={styles.androidTab}
+                accessibilityRole="tab"
+                accessibilityLabel={labels[route.name]}
+                accessibilityState={{ selected: focused }}
+              >
+                <View
+                  style={[
+                    styles.androidIndicator,
+                    focused && { backgroundColor: colors.accentSoft },
+                  ]}
+                >
+                  <Ionicons
+                    name={focused ? filled : outline}
+                    size={24}
+                    color={focused ? colors.accent : colors.subtext}
+                  />
+                </View>
+                <Text
+                  style={[
+                    styles.androidLabel,
+                    {
+                      color: focused ? colors.accent : colors.subtext,
+                      fontWeight: focused ? '700' : '500',
+                    },
+                  ]}
+                >
+                  {labels[route.name]}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View
       pointerEvents="box-none"
@@ -143,18 +218,13 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
             return (
               <Pressable
                 key={route.key}
-                onPress={() => {
-                  const event = navigation.emit({
-                    type: 'tabPress',
-                    target: route.key,
-                    canPreventDefault: true,
-                  });
-                  if (!focused && !event.defaultPrevented) {
-                    navigation.navigate(route.name);
-                  }
-                }}
-                style={styles.tab}
-                accessibilityRole="button"
+                onPress={() => pressRoute(route, focused)}
+                style={({ pressed }) => [
+                  styles.tab,
+                  pressed && styles.tabPressed,
+                ]}
+                accessibilityRole="tab"
+                accessibilityLabel={labels[route.name]}
                 accessibilityState={focused ? { selected: true } : {}}
               >
                 <Ionicons
@@ -180,6 +250,35 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
 }
 
 const styles = StyleSheet.create({
+  androidWrap: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+  },
+  androidBar: {
+    minHeight: 72,
+    borderRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+    elevation: 6,
+    flexDirection: 'row',
+  },
+  androidTab: {
+    minWidth: 0,
+    minHeight: 72,
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  androidIndicator: {
+    width: 56,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  androidLabel: { fontSize: 11, marginTop: 2 },
   wrap: {
     position: 'absolute',
     left: 0,
@@ -210,6 +309,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: 4,
   },
+  tabPressed: { opacity: 0.62 },
   label: {
     fontSize: 11,
     marginTop: 2,

@@ -2,8 +2,10 @@ import * as MediaLibrary from 'expo-media-library';
 // SDK 54: use the stable legacy file-system API (getInfoAsync etc.).
 import * as FileSystem from 'expo-file-system/legacy';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { utf8ByteLength, MAX_VALUE_BYTES } from './safeStore';
+import { Platform } from 'react-native';
+import { utf8ByteLength, MAX_VALUE_BYTES, withLock } from './safeStore';
 import { log } from './logger';
+import { runMediaWork } from './mediaWorkScheduler';
 
 export const ALL_ALBUM_ID = 'all';
 const PAGE_SIZE = 200;
@@ -14,9 +16,16 @@ const FINGERPRINT_TTL_MS = 5000;
 const SLOW_PAGE_MS = 150;
 const albumsMemoryCache = new Map();
 const fingerprintMemoryCache = new Map();
+const fingerprintPromises = new Map();
+let fingerprintGeneration = 0;
+let rawAlbumsPromise = null;
 const ALBUMS_CACHE_PREFIX = '@mediacleaner/albums_v1_';
 const PREVIEW_CACHE_PREFIX = '@mediacleaner/preview_v1_';
 const assetInfoMemoryCache = new Map();
+// AssetInfo objects can include large EXIF/location payloads. Keep enough to
+// make revisiting suggestion groups instant without retaining an unbounded
+// copy of every asset inspected during the process lifetime.
+const ASSET_INFO_CACHE_LIMIT = 2000;
 const assetFetchPromises = new Map();
 const SNAPSHOT_SAMPLE = 60; // size sampling cap when there is no native query
 const SNAPSHOT_CONCURRENCY = 6;
@@ -27,13 +36,35 @@ const EXACT_SIZE_CAP = 4000;
 // Ids per native size query. The native side re-chunks internally; this only
 // bounds how much crosses the bridge at once.
 const SIZE_QUERY_CHUNK = 4000;
+const IOS_SIZE_QUERY_CHUNK = 256;
 const LIBRARY_SIZE_KEY = '@mediacleaner/library_size';
+const LIBRARY_SIZE_GRACE_MS = 15 * 60 * 1000;
 // A slim asset serialises to ~300 B, so this is the point past which the
 // list cannot fit under the per-value storage ceiling.
 const MAX_CACHED_LIST = 4800;
 // getAssetsByIds cap. Exposed so callers can tell the user when a selection
 // was trimmed instead of silently cleaning a subset.
 export const MAX_ASSETS_BY_IDS = 600;
+
+function getCachedAssetInfo(id) {
+  const value = assetInfoMemoryCache.get(id);
+  if (!value) return null;
+  // Map iteration order is insertion order: reinserting makes this the most
+  // recently used entry without maintaining a second linked structure.
+  assetInfoMemoryCache.delete(id);
+  assetInfoMemoryCache.set(id, value);
+  return value;
+}
+
+function cacheAssetInfo(id, value) {
+  if (!value) return;
+  assetInfoMemoryCache.delete(id);
+  assetInfoMemoryCache.set(id, value);
+  while (assetInfoMemoryCache.size > ASSET_INFO_CACHE_LIMIT) {
+    const oldest = assetInfoMemoryCache.keys().next().value;
+    assetInfoMemoryCache.delete(oldest);
+  }
+}
 
 /**
  * The raw device album list, memoised for ALBUMS_TTL_MS.
@@ -49,11 +80,23 @@ export async function getRawAlbums({ force = false } = {}) {
   if (!force && cached && Date.now() - cached.at < ALBUMS_TTL_MS) {
     return cached.value;
   }
-  const startedAt = Date.now();
-  const albums = await MediaLibrary.getAlbumsAsync({ includeSmartAlbums: true });
-  log('perf', `getAlbumsAsync raw ${Date.now() - startedAt}ms count=${albums.length}`);
-  albumsMemoryCache.set('raw', { at: Date.now(), value: albums });
-  return albums;
+  if (!force && rawAlbumsPromise) return rawAlbumsPromise;
+  const promise = (async () => {
+    const startedAt = Date.now();
+    const albums = await runMediaWork(
+      () => MediaLibrary.getAlbumsAsync({ includeSmartAlbums: true }),
+      'interactive'
+    );
+    log('perf', `getAlbumsAsync raw ${Date.now() - startedAt}ms count=${albums.length}`);
+    albumsMemoryCache.set('raw', { at: Date.now(), value: albums });
+    return albums;
+  })();
+  rawAlbumsPromise = promise;
+  try {
+    return await promise;
+  } finally {
+    if (rawAlbumsPromise === promise) rawAlbumsPromise = null;
+  }
 }
 
 /**
@@ -88,9 +131,19 @@ export async function getAlbums(mediaType, allLabel) {
     const raw = await AsyncStorage.getItem(`${ALBUMS_CACHE_PREFIX}${cacheKey}`);
     const stored = raw ? JSON.parse(raw) : null;
     if (Array.isArray(stored) && stored.length > 0) {
-      const result = stored.map((a) =>
-        a.id === ALL_ALBUM_ID ? { ...a, title: allLabel } : a
-      );
+      // Older caches may contain collections that have since become empty or
+      // inaccessible. Do not briefly expose them and enqueue pointless work
+      // while the background refresh catches up.
+      const result = stored
+        .filter(
+          (a) =>
+            a.id === ALL_ALBUM_ID ||
+            a.assetCount === undefined ||
+            Number(a.assetCount) > 0
+        )
+        .map((a) =>
+          a.id === ALL_ALBUM_ID ? { ...a, title: allLabel } : a
+        );
       albumsMemoryCache.set(cacheKey, { at: Date.now(), value: result });
       refreshAlbums(mediaType, allLabel).catch(() => {});
       log('perf', `getAlbumsAsync ${mediaType} persisted-cache count=${result.length}`);
@@ -111,21 +164,25 @@ async function refreshAlbums(mediaType, allLabel) {
     // Query exact typed totals in small batches. Running all 150+ album
     // cursors together overwhelms MediaStore/PhotoKit on real devices.
     for (let i = 0; i < albums.length; i += 4) {
-      const typed = await Promise.all(
-        albums.slice(i, i + 4).map(async (album) => {
-          try {
-            const page = await MediaLibrary.getAssetsAsync({
-              album: album.id,
-              mediaType,
-              first: 1,
-            });
-            return page.totalCount > 0
-              ? { id: album.id, title: album.title, assetCount: page.totalCount }
-              : null;
-          } catch (e) {
-            return null;
-          }
-        })
+      const typed = await runMediaWork(
+        () =>
+          Promise.all(
+            albums.slice(i, i + 4).map(async (album) => {
+              try {
+                const page = await MediaLibrary.getAssetsAsync({
+                  album: album.id,
+                  mediaType,
+                  first: 1,
+                });
+                return page.totalCount > 0
+                  ? { id: album.id, title: album.title, assetCount: page.totalCount }
+                  : null;
+              } catch (e) {
+                return null;
+              }
+            })
+          ),
+        'interactive'
       );
       for (const album of typed) if (album) result.push(album);
     }
@@ -154,7 +211,13 @@ async function refreshAlbums(mediaType, allLabel) {
  * whole library just to keep one month of it is why time-scoped screens
  * took many seconds to show anything on a large library.
  */
-export async function getAssetsPage(albumId, mediaType, after, range = null) {
+export async function getAssetsPage(
+  albumId,
+  mediaType,
+  after,
+  range = null,
+  priority = 'interactive'
+) {
   const startedAt = Date.now();
   const options = {
     first: PAGE_SIZE,
@@ -168,7 +231,10 @@ export async function getAssetsPage(albumId, mediaType, after, range = null) {
   // own `< end` filter still runs, so an off-by-one here can't leak.
   if (range && range.end) options.createdBefore = range.end;
   try {
-    const page = await MediaLibrary.getAssetsAsync(options);
+    const page = await runMediaWork(
+      () => MediaLibrary.getAssetsAsync(options),
+      priority
+    );
     // Only the FIRST page (which is what "how fast did the screen open?"
     // actually measures) and pages that were slow enough to matter. Logging
     // every page meant a 13k-photo library wrote 66 lines per home refresh,
@@ -236,7 +302,10 @@ export async function getRangeThumbs(albumId, mediaType, range, count = 3) {
     if (albumId && albumId !== ALL_ALBUM_ID) options.album = albumId;
     if (range && range.start) options.createdAfter = range.start;
     if (range && range.end) options.createdBefore = range.end;
-    const page = await MediaLibrary.getAssetsAsync(options);
+    const page = await runMediaWork(
+      () => MediaLibrary.getAssetsAsync(options),
+      'interactive'
+    );
     return page.assets.map((a) => ({ id: a.id, uri: a.uri }));
   } catch (e) {
     return [];
@@ -250,7 +319,12 @@ export async function getRangeThumbs(albumId, mediaType, range, count = 3) {
  * analyzer wants 3000) were otherwise walking the entire library — 79 native
  * round trips on a 15k-photo device — and throwing most of it away.
  */
-export async function getAssets(albumId, mediaType, limit = MAX_ASSETS) {
+export async function getAssets(
+  albumId,
+  mediaType,
+  limit = MAX_ASSETS,
+  priority = 'interactive'
+) {
   const cap = Math.min(limit, MAX_ASSETS);
   const key = `${mediaType}/${albumId || ALL_ALBUM_ID}/${cap}`;
   let promise = assetFetchPromises.get(key);
@@ -268,7 +342,10 @@ export async function getAssets(albumId, mediaType, limit = MAX_ASSETS) {
         if (after) options.after = after;
         if (albumId && albumId !== ALL_ALBUM_ID) options.album = albumId;
         // eslint-disable-next-line no-await-in-loop
-        const page = await MediaLibrary.getAssetsAsync(options);
+        const page = await runMediaWork(
+          () => MediaLibrary.getAssetsAsync(options),
+          priority
+        );
         assets.push(...page.assets);
         hasNext = page.hasNextPage && page.assets.length > 0;
         after = page.endCursor;
@@ -293,7 +370,7 @@ export async function getAssetsByIds(ids) {
   const out = [];
   const missing = [];
   for (const id of capped) {
-    const cached = assetInfoMemoryCache.get(id);
+    const cached = getCachedAssetInfo(id);
     if (cached) out.push(cached);
     else missing.push(id);
   }
@@ -301,23 +378,27 @@ export async function getAssetsByIds(ids) {
   for (let i = 0; i < missing.length; i += CONC) {
     const batch = missing.slice(i, i + CONC);
     // eslint-disable-next-line no-await-in-loop
-    const infos = await Promise.all(
-      batch.map(async (id) => {
-        try {
-          const info = await MediaLibrary.getAssetInfoAsync(id);
-          if (info) assetInfoMemoryCache.set(id, info);
-          return info;
-        } catch (e) {
-          return null; // asset may have been deleted meanwhile
-        }
-      })
+    const infos = await runMediaWork(
+      () =>
+        Promise.all(
+          batch.map(async (id) => {
+            try {
+              const info = await MediaLibrary.getAssetInfoAsync(id);
+              if (info) cacheAssetInfo(id, info);
+              return info;
+            } catch (e) {
+              return null; // asset may have been deleted meanwhile
+            }
+          })
+        ),
+      'interactive'
     );
     for (const info of infos) if (info) out.push(info);
   }
   const byId = new Map(out.map((a) => [a.id, a]));
   out.length = 0;
   for (const id of capped) {
-    const asset = byId.get(id) || assetInfoMemoryCache.get(id);
+    const asset = byId.get(id) || getCachedAssetInfo(id);
     if (asset) out.push(asset);
   }
   // Non-enumerable so existing `.map`/`.length` callers are unaffected, but
@@ -337,7 +418,7 @@ export async function getAssetsByIds(ids) {
 /**
  * Best-effort file size for an asset, in bytes.
  */
-export async function getAssetSize(asset) {
+async function getAssetSizeRaw(asset) {
   const id = asset && asset.id ? asset.id : asset;
   // System index first (native module): under Android scoped storage,
   // stat-ing another app's media file often reports 0/not-found, and on iOS
@@ -369,6 +450,10 @@ export async function getAssetSize(asset) {
   }
 }
 
+export async function getAssetSize(asset, { priority = 'interactive' } = {}) {
+  return runMediaWork(() => getAssetSizeRaw(asset), priority);
+}
+
 /**
  * Whole-library index from ONE native scan: ids, timestamps, dimensions and
  * — the part expo-media-library cannot give us — the byte size of every
@@ -377,7 +462,8 @@ export async function getAssetSize(asset) {
  */
 let scanCache = null; // {at, mediaType, index}
 let scanPromise = null;
-const SCAN_TTL_MS = 60000;
+let scanGeneration = 0;
+const SCAN_TTL_MS = 15 * 60 * 1000;
 
 function buildIndex(raw) {
   const ids = raw.ids || [];
@@ -410,7 +496,10 @@ function peekLibraryIndex(mediaType = 'all') {
  * module can't do it — Expo Go and binaries built before scanLibrary existed
  * keep working through the per-query paths.
  */
-export async function getLibraryIndex(mediaType = 'all', { force = false } = {}) {
+export async function getLibraryIndex(
+  mediaType = 'all',
+  { force = false, priority = 'background' } = {}
+) {
   if (!force) {
     const warm = peekLibraryIndex(mediaType);
     if (warm) return warm;
@@ -423,9 +512,42 @@ export async function getLibraryIndex(mediaType = 'all', { force = false } = {})
   }
   const promise = (async () => {
   try {
+    const generation = scanGeneration;
     const started = new Date().getTime();
-    const raw = await PhotoMove.scanLibrary(mediaType, 0);
+    let raw;
+    if (Platform.OS === 'ios' && PhotoMove.hasScanLibraryMetadata()) {
+      raw = await runMediaWork(
+        () => PhotoMove.scanLibraryMetadata(mediaType, 0),
+        priority
+      );
+      const ids = raw.ids || [];
+      const measured = new Array(ids.length).fill(0);
+      // PHAssetResource enumeration is split into short chunks. The total
+      // work is similar, but a foreground page/fingerprint query can run
+      // between chunks instead of waiting behind a 5-180 second native call.
+      for (let i = 0; i < ids.length; i += IOS_SIZE_QUERY_CHUNK) {
+        const part = ids.slice(i, i + IOS_SIZE_QUERY_CHUNK);
+        // eslint-disable-next-line no-await-in-loop
+        const sizes = await runMediaWork(
+          () => PhotoMove.getSizes(part),
+          priority
+        );
+        for (let j = 0; j < part.length; j++) {
+          measured[i + j] = Number(sizes[part[j]]) || 0;
+        }
+      }
+      raw = { ...raw, size: measured };
+    } else {
+      raw = await runMediaWork(
+        () => PhotoMove.scanLibrary(mediaType, 0),
+        priority
+      );
+    }
     const index = buildIndex(raw);
+    if (generation !== scanGeneration) {
+      log('size', `scan ${mediaType} discarded after library change`);
+      return null;
+    }
     scanCache = { at: new Date().getTime(), mediaType, index };
     log(
       'size',
@@ -448,6 +570,8 @@ export async function getLibraryIndex(mediaType = 'all', { force = false } = {})
 
 /** Drop the cached scan — call after deleting or moving assets. */
 export function invalidateLibraryIndex() {
+  scanGeneration += 1;
+  fingerprintGeneration += 1;
   scanCache = null;
   scanPromise = null;
   fingerprintMemoryCache.clear();
@@ -469,6 +593,8 @@ export function invalidateLibraryIndex() {
  * The album/fingerprint caches ARE still cleared — counts really did change.
  */
 export function pruneLibraryIndex(deletedIds = []) {
+  scanGeneration += 1;
+  fingerprintGeneration += 1;
   fingerprintMemoryCache.clear();
   albumsMemoryCache.clear();
   scanPromise = null;
@@ -505,12 +631,49 @@ export function pruneLibraryIndex(deletedIds = []) {
   };
 }
 
+/** Keep the persisted storage chart exact after deletions without rescanning. */
+export async function adjustLibrarySizeAfterDeletion(assets, sizesById = {}) {
+  const list = (assets || []).filter((asset) => asset && asset.id);
+  if (list.length === 0) return;
+  await withLock(LIBRARY_SIZE_KEY, async () => {
+    try {
+      const raw = await AsyncStorage.getItem(LIBRARY_SIZE_KEY);
+      const cached = raw ? JSON.parse(raw) : null;
+      if (!cached?.value) return;
+      const next = { ...cached.value };
+      let unknownSize = false;
+      for (const asset of list) {
+        const bytes = Number(sizesById[asset.id]) || 0;
+        if (!(bytes > 0)) unknownSize = true;
+        if (asset.mediaType === 'video') {
+          next.videoCount = Math.max(0, (next.videoCount || 0) - 1);
+          next.videoBytes = Math.max(0, (next.videoBytes || 0) - bytes);
+        } else {
+          next.photoCount = Math.max(0, (next.photoCount || 0) - 1);
+          next.photoBytes = Math.max(0, (next.photoBytes || 0) - bytes);
+        }
+      }
+      next.bytes = Math.max(
+        0,
+        (next.photoBytes || 0) + (next.videoBytes || 0)
+      );
+      if (unknownSize) next.exact = false;
+      await AsyncStorage.setItem(
+        LIBRARY_SIZE_KEY,
+        JSON.stringify({ fingerprint: null, value: next, updatedAt: Date.now() })
+      );
+    } catch (e) {
+      // Best effort: a failed adjustment only causes a later refresh.
+    }
+  });
+}
+
 /**
  * Ask the native module for {id: bytes} over an arbitrarily long id list.
  * Returns null when the module can't answer at all, so callers can tell
  * "unavailable" apart from "answered, some ids unknown".
  */
-async function nativeSizes(ids) {
+async function nativeSizes(ids, priority = 'interactive') {
   if (ids.length === 0) return null;
   // A warm library scan already holds every size, so the fastest query is
   // no query. Only *warm* — scanning on demand to answer a five-id question
@@ -532,7 +695,10 @@ async function nativeSizes(ids) {
     for (let i = 0; i < ids.length; i += SIZE_QUERY_CHUNK) {
       const part = ids.slice(i, i + SIZE_QUERY_CHUNK);
       // eslint-disable-next-line no-await-in-loop
-      const sizes = await PhotoMove.getSizes(part);
+      const sizes = await runMediaWork(
+        () => PhotoMove.getSizes(part),
+        priority
+      );
       Object.assign(out, sizes);
     }
   } catch (e) {
@@ -547,9 +713,15 @@ async function nativeSizes(ids) {
  * (MediaStore on Android, PhotoKit on iOS) when available, per-file stats
  * otherwise. Returns {assetId: bytes}.
  */
-export async function getAssetSizes(assets) {
+export async function getAssetSizes(
+  assets,
+  { priority = 'interactive' } = {}
+) {
   const out = {};
-  const sizes = await nativeSizes(assets.map((a) => String(a.id)));
+  const sizes = await nativeSizes(
+    assets.map((a) => String(a.id)),
+    priority
+  );
   if (sizes) {
     let missing = 0;
     for (const a of assets) {
@@ -567,7 +739,10 @@ export async function getAssetSizes(assets) {
   for (let i = 0; i < pending.length; i += SNAPSHOT_CONCURRENCY) {
     const batch = pending.slice(i, i + SNAPSHOT_CONCURRENCY);
     // eslint-disable-next-line no-await-in-loop
-    const stats = await Promise.all(batch.map((a) => getAssetSize(a)));
+    const stats = await runMediaWork(
+      () => Promise.all(batch.map((a) => getAssetSizeRaw(a))),
+      priority
+    );
     batch.forEach((a, k) => {
       out[a.id] = stats[k];
     });
@@ -603,7 +778,9 @@ function spread(list, n) {
  * spread subset, and without that to per-file stats.
  */
 export async function getAlbumSnapshot(albumId, mediaType, precomputedAssets) {
-  const assets = precomputedAssets || (await getAssets(albumId, mediaType));
+  const assets =
+    precomputedAssets ||
+    (await getAssets(albumId, mediaType, MAX_ASSETS, 'background'));
   if (assets.length === 0) return { count: 0, bytes: 0 };
 
   const index = await getLibraryIndex('all');
@@ -631,7 +808,10 @@ export async function getAlbumSnapshot(albumId, mediaType, precomputedAssets) {
 
   const capped = assets.slice(0, MAX_ASSETS);
   const target = spread(capped, EXACT_SIZE_CAP);
-  const sizes = await nativeSizes(target.map((a) => String(a.id)));
+  const sizes = await nativeSizes(
+    target.map((a) => String(a.id)),
+    'background'
+  );
   if (sizes) {
     let bytes = 0;
     let measured = 0;
@@ -656,7 +836,10 @@ export async function getAlbumSnapshot(albumId, mediaType, precomputedAssets) {
   for (let i = 0; i < sample.length; i += SNAPSHOT_CONCURRENCY) {
     const batch = sample.slice(i, i + SNAPSHOT_CONCURRENCY);
     // eslint-disable-next-line no-await-in-loop
-    const stats = await Promise.all(batch.map((a) => getAssetSize(a)));
+    const stats = await runMediaWork(
+      () => Promise.all(batch.map((a) => getAssetSizeRaw(a))),
+      'background'
+    );
     for (const s of stats) sampleBytes += s;
   }
   log(
@@ -689,11 +872,31 @@ export async function getLibrarySize({
   force = false,
   allowSlowFallback = false,
 } = {}) {
+  let storedSize = null;
+  if (!force) {
+    try {
+      const raw = await AsyncStorage.getItem(LIBRARY_SIZE_KEY);
+      storedSize = raw ? JSON.parse(raw) : null;
+      // During this grace period in-app deletions update the cached totals
+      // exactly. Returning before even querying fingerprints keeps Profile
+      // from touching PhotoKit on every focus.
+      if (
+        storedSize?.value &&
+        storedSize.updatedAt &&
+        Date.now() - storedSize.updatedAt < LIBRARY_SIZE_GRACE_MS
+      ) {
+        return storedSize.value;
+      }
+    } catch (e) {
+      storedSize = null;
+    }
+  }
+
   let fingerprint = null;
   try {
     const [p, v] = await Promise.all([
-      getAlbumFingerprint(ALL_ALBUM_ID, 'photo'),
-      getAlbumFingerprint(ALL_ALBUM_ID, 'video'),
+      getAlbumFingerprint(ALL_ALBUM_ID, 'photo', 'background'),
+      getAlbumFingerprint(ALL_ALBUM_ID, 'video', 'background'),
     ]);
     fingerprint = [
       p.assetCount,
@@ -705,16 +908,29 @@ export async function getLibrarySize({
     fingerprint = null; // freshness unknown — recompute rather than lie
   }
 
-  if (!force && fingerprint) {
-    try {
-      const raw = await AsyncStorage.getItem(LIBRARY_SIZE_KEY);
-      const cached = raw ? JSON.parse(raw) : null;
-      if (cached && cached.fingerprint === fingerprint && cached.value) {
-        return cached.value;
-      }
-    } catch (e) {
-      // unreadable cache — just recompute
+  if (
+    !force &&
+    storedSize?.value &&
+    fingerprint &&
+    storedSize.fingerprint === fingerprint
+  ) {
+    if (!storedSize.updatedAt) {
+      withLock(LIBRARY_SIZE_KEY, async () => {
+        const currentRaw = await AsyncStorage.getItem(LIBRARY_SIZE_KEY);
+        const current = currentRaw ? JSON.parse(currentRaw) : null;
+        if (
+          current?.value &&
+          !current.updatedAt &&
+          current.fingerprint === fingerprint
+        ) {
+          await AsyncStorage.setItem(
+            LIBRARY_SIZE_KEY,
+            JSON.stringify({ ...current, updatedAt: Date.now() })
+          );
+        }
+      }).catch(() => {});
     }
+    return storedSize.value;
   }
 
   let value = null;
@@ -753,7 +969,10 @@ export async function getLibrarySize({
   const PhotoMove = require('../../modules/photo-move');
   if (!value && PhotoMove.hasLibrarySize()) {
     try {
-      const r = await PhotoMove.librarySize();
+      const r = await runMediaWork(
+        () => PhotoMove.librarySize(),
+        'background'
+      );
       const photoBytes = r.photoBytes || 0;
       const videoBytes = r.videoBytes || 0;
       if (photoBytes + videoBytes > 0) {
@@ -791,9 +1010,13 @@ export async function getLibrarySize({
 
   if (value && fingerprint) {
     try {
-      await AsyncStorage.setItem(
+      await withLock(
         LIBRARY_SIZE_KEY,
-        JSON.stringify({ fingerprint, value })
+        () =>
+          AsyncStorage.setItem(
+            LIBRARY_SIZE_KEY,
+            JSON.stringify({ fingerprint, value, updatedAt: Date.now() })
+          )
       );
     } catch (e) {
       // best effort — a missing cache only costs one recompute
@@ -806,7 +1029,11 @@ export async function getLibrarySize({
  * Quick staleness fingerprint of an album: count, modification-time edges
  * and a small newest-id signature. Two tiny queries, no full scan.
  */
-export async function getAlbumFingerprint(albumId, mediaType) {
+export async function getAlbumFingerprint(
+  albumId,
+  mediaType,
+  priority = 'interactive'
+) {
   const cacheKey = `${mediaType}/${albumId || ALL_ALBUM_ID}`;
   const cached = fingerprintMemoryCache.get(cacheKey);
   if (cached && Date.now() - cached.at < FINGERPRINT_TTL_MS) {
@@ -814,13 +1041,22 @@ export async function getAlbumFingerprint(albumId, mediaType) {
     log('perf', `getAlbumFingerprint ${cacheKey} cache-hit age=${Date.now() - cached.at}ms count=${cached.value.assetCount || 0}`);
     return cached.value;
   }
-  const startedAt = Date.now();
-  const options = {
-    first: 3,
-    mediaType,
-    sortBy: [[MediaLibrary.SortBy.modificationTime, false]],
-  };
-  if (albumId && albumId !== ALL_ALBUM_ID) options.album = albumId;
+  const existing = fingerprintPromises.get(cacheKey);
+  if (
+    existing &&
+    (priority === 'background' || existing.priority === 'interactive')
+  ) {
+    return existing.promise;
+  }
+  const promise = (async () => {
+    const generation = fingerprintGeneration;
+    const startedAt = Date.now();
+    const options = {
+      first: 3,
+      mediaType,
+      sortBy: [[MediaLibrary.SortBy.modificationTime, false]],
+    };
+    if (albumId && albumId !== ALL_ALBUM_ID) options.album = albumId;
   try {
     // Count + newest timestamp misses an equal-count membership swap. Keep a
     // small signature from both edges so moving one asset out and another in
@@ -830,10 +1066,14 @@ export async function getAlbumFingerprint(albumId, mediaType) {
       first: 1,
       sortBy: [[MediaLibrary.SortBy.modificationTime, true]],
     };
-    const [page, oldestPage] = await Promise.all([
-      MediaLibrary.getAssetsAsync(options),
-      MediaLibrary.getAssetsAsync(oldestOptions),
-    ]);
+    const [page, oldestPage] = await runMediaWork(
+      () =>
+        Promise.all([
+          MediaLibrary.getAssetsAsync(options),
+          MediaLibrary.getAssetsAsync(oldestOptions),
+        ]),
+      priority
+    );
     const newest = page.assets[0];
     const oldest = oldestPage.assets[0];
     const result = {
@@ -850,7 +1090,9 @@ export async function getAlbumFingerprint(albumId, mediaType) {
       `getAlbumFingerprint ${cacheKey} ` +
         `${Date.now() - startedAt}ms count=${result.assetCount || 0}`
     );
-    fingerprintMemoryCache.set(cacheKey, { at: Date.now(), value: result });
+    if (generation === fingerprintGeneration) {
+      fingerprintMemoryCache.set(cacheKey, { at: Date.now(), value: result });
+    }
     return result;
   } catch (e) {
     log(
@@ -859,6 +1101,15 @@ export async function getAlbumFingerprint(albumId, mediaType) {
         `${Date.now() - startedAt}ms`
     );
     throw e;
+  }
+  })();
+  fingerprintPromises.set(cacheKey, { promise, priority });
+  try {
+    return await promise;
+  } finally {
+    if (fingerprintPromises.get(cacheKey)?.promise === promise) {
+      fingerprintPromises.delete(cacheKey);
+    }
   }
 }
 
@@ -874,14 +1125,20 @@ export async function moveAssetsToAlbum(assets, album, copy = false) {
   const ids = assets.map((a) => (typeof a === 'string' ? a : a.id));
   // copy=true: file is DUPLICATED into the album — the original keeps every
   // bit of its metadata untouched (used by Android categorize-then-delete).
-  await MediaLibrary.addAssetsToAlbumAsync(ids, album.id, copy);
+  await runMediaWork(
+    () => MediaLibrary.addAssetsToAlbumAsync(ids, album.id, copy),
+    'interactive'
+  );
   invalidateLibraryIndex();
 }
 
 /** Undo an add: take the assets back OUT of the album (iOS collections). */
 export async function removeAssetsFromAlbum(assets, album) {
   const ids = assets.map((a) => (typeof a === 'string' ? a : a.id));
-  await MediaLibrary.removeAssetsFromAlbumAsync(ids, album.id);
+  await runMediaWork(
+    () => MediaLibrary.removeAssetsFromAlbumAsync(ids, album.id),
+    'interactive'
+  );
   invalidateLibraryIndex();
 }
 
@@ -949,7 +1206,11 @@ function slimAsset(a) {
 }
 
 /** Cached full asset list, or null when missing/stale. */
-export async function getCachedAssetList(albumId, mediaType) {
+export async function getCachedAssetList(
+  albumId,
+  mediaType,
+  priority = 'interactive'
+) {
   try {
     const raw = await AsyncStorage.getItem(
       `${LIST_PREFIX}${mediaType}_${albumId}`
@@ -958,7 +1219,7 @@ export async function getCachedAssetList(albumId, mediaType) {
     const { fingerprint, assets } = JSON.parse(raw);
     if (!fingerprint || !Array.isArray(assets) || assets.length === 0)
       return null;
-    const fp = await getAlbumFingerprint(albumId, mediaType);
+    const fp = await getAlbumFingerprint(albumId, mediaType, priority);
     if (
       fingerprint.assetCount !== fp.assetCount ||
       fingerprint.latestModificationTime !== fp.latestModificationTime ||

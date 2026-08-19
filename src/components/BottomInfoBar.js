@@ -8,7 +8,7 @@ import { formatDate } from '../utils/albumHelpers';
 
 /**
  * Floating info bar shown on cleaning screens (replaces the tab bar).
- * Liquid Glass on iOS 26, blur fallback elsewhere.
+ * Liquid Glass on iOS 26, blur on older iOS, solid app surface on Android.
  * Left: favorite · Center: date (+optional subtitle, opens EXIF) · Right: undo.
  *
  * `floating` mode (video feed): NO bar at all — just the date/address text
@@ -40,7 +40,13 @@ export default function BottomInfoBar({
         ]}
         pointerEvents="box-none"
       >
-        <Pressable onPress={onPressDate} hitSlop={8} style={styles.floatingCenter}>
+        <Pressable
+          onPress={onPressDate}
+          hitSlop={8}
+          style={styles.floatingCenter}
+          accessibilityRole="button"
+          accessibilityLabel={t('details')}
+        >
           <View style={styles.dateRow}>
             <Text style={[styles.date, styles.floatingText]} numberOfLines={1}>
               {asset ? formatDate(asset.creationTime, language) : '—'}
@@ -92,9 +98,14 @@ export default function BottomInfoBar({
             ) : (
               <Pressable
                 onPress={onToggleFavorite}
-                hitSlop={10}
-                style={styles.side}
+                hitSlop={4}
+                style={({ pressed }) => [
+                  styles.side,
+                  pressed && { backgroundColor: colors.chartTrack },
+                ]}
+                accessibilityRole="button"
                 accessibilityLabel={t('favorite')}
+                accessibilityState={{ selected: isFavorite }}
               >
                 <Ionicons
                   name={isFavorite ? 'heart' : 'heart-outline'}
@@ -106,8 +117,12 @@ export default function BottomInfoBar({
             {!!onShare && (
               <Pressable
                 onPress={onShare}
-                hitSlop={10}
-                style={styles.side}
+                hitSlop={4}
+                style={({ pressed }) => [
+                  styles.side,
+                  pressed && { backgroundColor: colors.chartTrack },
+                ]}
+                accessibilityRole="button"
                 accessibilityLabel={t('share')}
               >
                 <Ionicons
@@ -119,7 +134,13 @@ export default function BottomInfoBar({
             )}
           </View>
 
-          <Pressable onPress={onPressDate} style={styles.center} hitSlop={6}>
+          <Pressable
+            onPress={onPressDate}
+            style={styles.center}
+            hitSlop={6}
+            accessibilityRole="button"
+            accessibilityLabel={t('details')}
+          >
             <View style={styles.centerText}>
               <View style={styles.dateRow}>
                 <Text style={[styles.date, { color: colors.text }]} numberOfLines={1}>
@@ -149,9 +170,15 @@ export default function BottomInfoBar({
           <Pressable
             onPress={onUndo}
             disabled={undoCount === 0}
-            hitSlop={10}
-            style={[styles.side, { opacity: undoCount === 0 ? 0.35 : 1 }]}
+            hitSlop={4}
+            style={({ pressed }) => [
+              styles.side,
+              { opacity: undoCount === 0 ? 0.35 : 1 },
+              pressed && { backgroundColor: colors.chartTrack },
+            ]}
+            accessibilityRole="button"
             accessibilityLabel={t('undo')}
+            accessibilityState={{ disabled: undoCount === 0 }}
           >
             <Ionicons name="arrow-undo" size={22} color={colors.accent} />
             {undoCount > 0 && (
@@ -182,7 +209,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 12,
   },
-  side: { width: 44, alignItems: 'center', justifyContent: 'center' },
+  side: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   sideGroup: { flexDirection: 'row', alignItems: 'center' },
   center: {
     flex: 1,

@@ -2,7 +2,7 @@
   "expo": {
     "name": "MediaCleaner",
     "slug": "media-cleaner",
-    "version": "1.21.1",
+    "version": "1.22.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "icon": "./assets/icon.png",
