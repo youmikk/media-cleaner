@@ -5,12 +5,17 @@ import { subscribeLowPower } from '../utils/batteryUtils';
 const GlassEffectsContext = createContext({ effectsEnabled: false, reduceMotion: true });
 
 // One subscription for the whole application, not one battery/a11y listener
-// per card. Start conservatively while the system preferences are loading.
+// per card. The first frame remains visible while system preferences load.
 export function GlassEffectsProvider({ children }) {
-  const [lowPower, setLowPower] = useState(true);
+  // Start with effects on. The async system preference reads below may turn
+  // them off, but a missing API in Expo Go/older binaries must not leave the
+  // entire app permanently opaque.
+  const [lowPower, setLowPower] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(true);
-  const [reduceTransparency, setReduceTransparency] = useState(Platform.OS === 'ios');
-  const [active, setActive] = useState(AppState.currentState === 'active');
+  const [reduceTransparency, setReduceTransparency] = useState(false);
+  // AppState.currentState can be null during bridge startup even though the
+  // app is already visible. Treat that startup window as active.
+  const [active, setActive] = useState(AppState.currentState == null || AppState.currentState === 'active');
   const [memoryLimited, setMemoryLimited] = useState(false);
 
   useEffect(() => {
@@ -29,22 +34,20 @@ export function GlassEffectsProvider({ children }) {
     };
     const readPreferences = () => {
       const read = ++preferenceRead;
-      Promise.all([
-        Promise.resolve().then(() => AccessibilityInfo.isReduceMotionEnabled()),
-        Platform.OS === 'ios'
+      Promise.allSettled([
+        typeof AccessibilityInfo.isReduceMotionEnabled === 'function'
+          ? Promise.resolve().then(() => AccessibilityInfo.isReduceMotionEnabled())
+          : Promise.resolve(false),
+        Platform.OS === 'ios' && typeof AccessibilityInfo.isReduceTransparencyEnabled === 'function'
           ? Promise.resolve().then(() => AccessibilityInfo.isReduceTransparencyEnabled())
           : Promise.resolve(false),
       ]).then(([motion, transparency]) => {
         if (live && read === preferenceRead) {
-          setReduceMotion(!!motion);
-          setReduceTransparency(!!transparency);
-        }
-      }).catch(() => {
-        // Include synchronous throws/missing methods from older binaries, and
-        // stop effects if the preferences can no longer be read on foreground.
-        if (live && read === preferenceRead) {
-          setReduceMotion(true);
-          setReduceTransparency(Platform.OS === 'ios');
+          // Read independently: a failed motion query must not overwrite a
+          // successfully read Reduce Transparency preference (or vice versa).
+          // Failed reads keep the last known value until the next refresh.
+          if (motion.status === 'fulfilled') setReduceMotion(!!motion.value);
+          if (transparency.status === 'fulfilled') setReduceTransparency(!!transparency.value);
         }
       });
     };

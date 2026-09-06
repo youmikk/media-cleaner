@@ -2,6 +2,11 @@ node_modules/
 .expo/
 dist/
 web-build/
+# Local Expo exports, native prebuild output and Gradle caches.
+/.codex-export-*/
+/.gradle*/
+/android/
+/ios/
 *.orig.*
 *.jks
 *.p8

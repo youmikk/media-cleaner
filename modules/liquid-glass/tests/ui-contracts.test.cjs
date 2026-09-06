@@ -103,7 +103,7 @@ function fixture(file, options = {}) {
     config, states, effects, animations, exports,
     render(props = {}) {
       stateIndex = 0; refIndex = 0; effects.length = 0;
-      return exports.default(props);
+      return exports[options.exportName || 'default'](props);
     },
   };
 }
@@ -148,6 +148,57 @@ test('missing native views and unavailable iOS APIs use a safe surface', () => {
     'expo-glass-effect': { GlassView: 'GlassView', isLiquidGlassAvailable: () => true },
   } });
   assert.equal(findAll(ios.render(), 'BlurView').length, 1);
+});
+
+test('Android blur fallback respects the saved setting and motion policy', () => {
+  const f = fixture('src/components/GlassSurface.js', { imports: {
+    '../../modules/liquid-glass': { NativeGlassView: null, androidLiquidGlassAvailable: false },
+  } });
+  const props = { androidSource: 'PhotosTab' };
+  const tree = f.render(props);
+  assert.equal(one(tree, 'BlurView').props.experimentalBlurMethod, 'dimezisBlurView');
+  assert.equal(tree.props.children[0], false);
+  f.config.settings.androidLiquidGlass = false;
+  assert.equal(findAll(f.render(props), 'BlurView').length, 0);
+  f.config.settings.androidLiquidGlass = true;
+  f.config.policy.reduceMotion = true;
+  assert.equal(findAll(f.render(props), 'BlurView').length, 0);
+  assert.equal(findAll(f.render(), 'BlurView').length, 0);
+});
+
+function effectPolicyFixture(accessibility) {
+  return fixture('src/context/GlassEffectsContext.js', {
+    exportName: 'GlassEffectsProvider',
+    imports: {
+      'react-native': {
+        Platform: { OS: 'ios' },
+        AccessibilityInfo: { addEventListener: () => ({ remove() {} }), ...accessibility },
+        AppState: { currentState: null, addEventListener: () => ({ remove() {} }) },
+      },
+      '../utils/batteryUtils': {
+        subscribeLowPower(callback) { callback(false); return () => {}; },
+      },
+    },
+  });
+}
+
+test('missing transparency API and initial null AppState do not disable glass', async () => {
+  const f = effectPolicyFixture({ isReduceMotionEnabled: async () => false });
+  f.render();
+  f.effects.forEach(effect => effect());
+  await new Promise(setImmediate);
+  assert.equal(f.render().props.value.effectsEnabled, true);
+});
+
+test('failed motion query preserves a known Reduce Transparency preference', async () => {
+  const f = effectPolicyFixture({
+    isReduceMotionEnabled: async () => { throw new Error('Unavailable'); },
+    isReduceTransparencyEnabled: async () => true,
+  });
+  f.render();
+  f.effects.forEach(effect => effect());
+  await new Promise(setImmediate);
+  assert.equal(f.render().props.value.effectsEnabled, false);
 });
 
 test('optional Android adapter guards unsupported runtimes and incomplete binaries', () => {

@@ -30,7 +30,8 @@ try {
  *   highlights, adaptive tint — the system material).
  * - Older iOS: expo-blur frosted-glass simulation with a translucent overlay.
  * - Android 13+: AndroidLiquidGlassView AGSL for an explicit sibling source.
- * - Other runtimes, power saving and reduced transparency: solid app surface.
+ * - Missing Android renderer: bounded expo-blur fallback on explicit sources.
+ * - Power saving and reduced transparency: solid app surface.
  *
  * The root and content never change type when an effect changes. Losing a
  * material must not remount controls, reset scroll or recreate a video player.
@@ -54,9 +55,11 @@ export default function GlassSurface({
   const androidFallback = processColor(colors.elevated) ?? 0;
   const layerStyle = [StyleSheet.absoluteFill, { borderRadius: radius }];
   const showEffect = effectsEnabled && effectEnabled;
+  const nativeAndroidGlass =
+    Platform.OS === 'android' && androidSource && androidLiquidGlassAvailable && NativeGlassView;
   let material = null;
 
-  if (Platform.OS === 'android' && androidSource && androidLiquidGlassAvailable && NativeGlassView) {
+  if (nativeAndroidGlass) {
     material = (
       <NativeGlassView
         key="android-glass"
@@ -70,6 +73,22 @@ export default function GlassSurface({
         fallbackColor={androidFallback}
         onStatus={reportAndroidGlassStatus}
       />
+    );
+  } else if (showEffect && !reduceMotion && settings.androidLiquidGlass !== false &&
+    Platform.OS === 'android' && androidSource) {
+    // Expo Go and older installed binaries do not contain the app-owned AGSL
+    // module. expo-blur is still available there, so keep the navigation
+    // surface visibly translucent until a native build is installed.
+    material = (
+      <BlurView
+        pointerEvents="none"
+        intensity={Math.min(70, intensity)}
+        tint={colors.glassTint}
+        experimentalBlurMethod="dimezisBlurView"
+        style={layerStyle}
+      >
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: surfaceTint }]} />
+      </BlurView>
     );
   } else if (showEffect && Platform.OS === 'ios' && GlassView && liquidGlassAvailable) {
     material = (
@@ -96,8 +115,8 @@ export default function GlassSurface({
 
   return (
     <View onLayout={onLayout} style={[style, styles.clip]}>
-      {/* An opaque underlay on iOS would block native backdrop sampling. */}
-      {(!material || Platform.OS !== 'ios') && (
+      {/* Keep the fallback behind the controls only when no material mounted. */}
+      {!material && (
         <View key="fallback" pointerEvents="none" style={[layerStyle, { backgroundColor: colors.elevated }]} />
       )}
       {material}

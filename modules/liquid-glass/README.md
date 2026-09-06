@@ -25,9 +25,11 @@ Support and fallback behavior:
   without replacing the navigation controls. Unsupported builds show a disabled
   switch without overwriting that preference. There is no corresponding iOS
   switch; native material support and system accessibility settings apply there.
-- Android below API 33, Expo Go, older binaries without this module, software
-  rendering, low-power mode, reduced motion, memory warnings, or
-  a failed shader: the existing app-owned solid surface remains visible.
+- Android below API 33, Expo Go, and older binaries without this module use
+  an `expo-blur` fallback for bounded surfaces with explicit sources, with no
+  AGSL refraction. Both Android materials respect the glass preference,
+  low-power mode, reduced motion and memory warnings. Disabled effects and
+  native rendering failures keep the existing solid surface visible.
 - A new dev/EAS build is required after changing this native module; JavaScript
   updates alone cannot add it to an installed binary.
 
@@ -127,7 +129,8 @@ Before release, use a new installed build on real devices:
    A live power event must win over a late startup query, and callbacks from
    a removed power subscription must not change the current effect policy.
 4. Test Android 12 or older, Expo Go, and an older binary without the module:
-   the solid bar must still navigate. Check 320/375pt widths, large text and
+   the blur fallback must still navigate and become solid when effects are
+   disabled. Check 320/375pt widths, large text and
    resized windows for content clearance and tap targets.
 5. On iOS 26, check light/dark overrides, Reduce Transparency, Reduce Motion
    and VoiceOver. Check blur fallback on older iOS. Native tint composition
