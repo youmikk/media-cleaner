@@ -9,8 +9,9 @@ import {
   Share,
   Platform,
   ActivityIndicator,
+  useWindowDimensions,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
@@ -18,6 +19,7 @@ import { useFavorites, useStats, useTrash } from '../context/AppContext';
 import SuggestionCard from '../components/SuggestionCard';
 import StorageChart from '../components/StorageChart';
 import OptionPicker from '../components/OptionPicker';
+import ReminderTimeRangePicker from '../components/ReminderTimeRangePicker';
 import DeletionModePicker from '../components/DeletionModePicker';
 import SettingsRow from '../components/SettingsRow';
 import AppSwitch from '../components/AppSwitch';
@@ -44,15 +46,14 @@ import {
 } from '../utils/notificationScheduler';
 import {
   APP_VERSION,
-  checkOTA,
-  reloadWithUpdate,
   checkGitHubRelease,
   canMirror,
   mirrorUrl,
-  fetchLatestChangelog,
 } from '../utils/updateChecker';
 
 import { getLogFileUri, log as diagLog } from '../utils/logger';
+import { getTabBarLayout } from '../utils/tabBarLayout';
+import { androidLiquidGlassAvailable } from '../../modules/liquid-glass';
 
 // expo-sharing (system share sheet for FILES) — guarded for Expo Go.
 let Sharing = null;
@@ -61,17 +62,6 @@ try {
   Sharing = require('expo-sharing');
 } catch (e) {
   Sharing = null;
-}
-
-// useUpdates reports a DOWNLOADED-but-not-applied update (the launch-time
-// auto-check downloads silently; only a restart applies it). Guarded so
-// Expo Go keeps working.
-let useUpdatesHook = null;
-try {
-  // eslint-disable-next-line global-require
-  useUpdatesHook = require('expo-updates').useUpdates;
-} catch (e) {
-  useUpdatesHook = null;
 }
 
 const GITHUB_URL = 'https://github.com/youmikk/media-cleaner';
@@ -259,12 +249,54 @@ function withDeadline(promise, deadline) {
   ]).finally(() => clearTimeout(timer));
 }
 
+// These must stay at module scope. Defining component functions inside
+// ProfileScreen gives React a new component type on every analysis-progress
+// render, unmounting the horizontal suggestions scroller and resetting it to
+// the first card.
+function ProfileSection({ title, children, textColor }) {
+  return (
+    <View style={styles.section}>
+      <Text style={[styles.sectionTitle, { color: textColor }]}>{title}</Text>
+      {children}
+    </View>
+  );
+}
+
+function SettingsSubGroup({ title, children, colors }) {
+  return (
+    <View style={styles.subGroup}>
+      <Text style={[styles.subGroupTitle, { color: colors.subtext }]}>
+        {title}
+      </Text>
+      <View style={[styles.settingsCard, { backgroundColor: colors.card }]}>
+        {children}
+      </View>
+    </View>
+  );
+}
+
+function ToggleRow({ label, value, onChange, divider = true, subtitle, disabled = false }) {
+  return (
+    <SettingsRow
+      title={label}
+      subtitle={subtitle}
+      divider={divider}
+      accessory={null}
+      compact
+      trailing={
+        <AppSwitch value={value} onValueChange={onChange} label={label} disabled={disabled} />
+      }
+    />
+  );
+}
+
 /**
  * Profile: smart suggestions, storage chart, usage stats, recycle bin,
  * settings and footer.
  */
 export default function ProfileScreen({ navigation }) {
   const { colors, t, settings, setSetting, isAndroid } = useSettings();
+  const tabBarLayout = getTabBarLayout(useWindowDimensions(), useSafeAreaInsets());
   const { stats } = useStats();
   const { favorites } = useFavorites();
   const { trash, refreshTrash } = useTrash();
@@ -358,7 +390,8 @@ export default function ProfileScreen({ navigation }) {
   const [lowQuality, setLowQuality] = useState({ ids: [], thumb: null });
   const [photoDupes, setPhotoDupes] = useState({ groups: [], thumb: null });
   const loadAnalysisCache = useCallback(async (isAlive = () => true) => {
-    const cache = await analyzer.getCached(ALL_ALBUM_ID, 'photo');
+    const checked = await analyzer.checkCache(ALL_ALBUM_ID, 'photo');
+    const cache = checked.cache;
     if (!isAlive()) return;
     if (!cache) {
       setLowQuality({ ids: [], thumb: null });
@@ -367,6 +400,9 @@ export default function ProfileScreen({ navigation }) {
         analyzer.analyzeAlbum(ALL_ALBUM_ID, { mediaType: 'photo' });
       }
       return;
+    }
+    if (checked.stale && settings.similarDetection && !analysisState?.running) {
+      analyzer.analyzeAlbum(ALL_ALBUM_ID, { mediaType: 'photo' });
     }
     const processed = await suggestionStore.getReviewed('lowQuality');
     if (!isAlive()) return;
@@ -411,6 +447,10 @@ export default function ProfileScreen({ navigation }) {
       loadAnalysisCache().catch(() => {});
     }
   }, [analysisState?.running, loadAnalysisCache]);
+
+  useEffect(() => {
+    if (analysisState?.cacheRevision) loadAnalysisCache().catch(() => {});
+  }, [analysisState?.cacheRevision, loadAnalysisCache]);
 
   // ---- Smart suggestions (cached by the actual library fingerprint) ----
   useFocusEffect(
@@ -461,48 +501,13 @@ export default function ProfileScreen({ navigation }) {
     }, [])
   );
 
-  // ---- Update check: OTA first (silent hot update), then GitHub APK ----
-  const updatesState = useUpdatesHook ? useUpdatesHook() : {};
+  // ---- Package update check via GitHub Releases ----
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const onCheckUpdate = async () => {
     if (checkingUpdate) return;
     setCheckingUpdate(true);
     const deadline = Date.now() + UPDATE_CHECK_TIMEOUT_MS;
     try {
-      let ota = await withDeadline(checkOTA(), deadline);
-      // Launch auto-check already downloaded it? Then the server says
-      // "nothing newer" but a restart IS pending — treat as ready.
-      if (ota !== 'applied' && updatesState.isUpdatePending) ota = 'applied';
-      if (ota === 'applied') {
-        // Show the changelog (from the repo) above the restart choice.
-        let body = t('update_ota_ready');
-        try {
-          const log = await withDeadline(fetchLatestChangelog(), deadline);
-          if (log && Array.isArray(log.notes) && log.notes.length > 0) {
-            body = `${log.notes.map((n) => `• ${n}`).join('\n')}\n\n${t(
-              'update_ota_ready'
-            )}`;
-          }
-        } catch (e) {
-          // changelog unavailable — generic message
-        }
-        showAppAlert(t('check_update'), body, [
-          { text: t('cancel'), style: 'cancel' },
-          {
-            text: t('update_restart'),
-            // Delay past the dialog dismissal — reloadAsync races the
-            // closing dialog on Android and silently fails otherwise.
-            onPress: () =>
-              setTimeout(async () => {
-                const ok = await reloadWithUpdate();
-                if (!ok) {
-                  showAppAlert(t('check_update'), t('update_restart_manual'));
-                }
-              }, 400),
-          },
-        ]);
-        return;
-      }
       const info = await withDeadline(checkGitHubRelease(), deadline);
       if (info.hasUpdate) {
         // GitHub downloads crawl (or stall outright) on mainland networks,
@@ -592,8 +597,14 @@ export default function ProfileScreen({ navigation }) {
   };
 
   // ---- Settings handlers ----
-  const scheduleReminder = async (hour) => {
-    const ok = await enableDailyReminder(t, hour, 0);
+  const reminderStart = Number.isFinite(settings.reminderStartMinute)
+    ? settings.reminderStartMinute
+    : (settings.reminderHour || 19) * 60;
+  const reminderEnd = Number.isFinite(settings.reminderEndMinute)
+    ? settings.reminderEndMinute
+    : (reminderStart + 120) % 1440;
+  const scheduleReminder = async (start = reminderStart, end = reminderEnd) => {
+    const ok = await enableDailyReminder(t, start, end);
     if (!ok) {
       showAppAlert(t('setting_reminder'), t('permission_denied'));
       return false;
@@ -603,16 +614,20 @@ export default function ProfileScreen({ navigation }) {
 
   const onToggleReminder = async (value) => {
     if (value) {
-      if (!(await scheduleReminder(settings.reminderHour || 19))) return;
+      if (!(await scheduleReminder())) return;
     } else {
       await disableDailyReminder();
     }
     setSetting('dailyReminder', value);
   };
 
-  const onReminderHourChange = async (value) => {
-    setSetting('reminderHour', value);
-    if (settings.dailyReminder) await scheduleReminder(value);
+  const onReminderRangeChange = async (key, value) => {
+    const nextStart = key === 'reminderStartMinute' ? value : reminderStart;
+    let nextEnd = key === 'reminderEndMinute' ? value : reminderEnd;
+    if (nextEnd === nextStart) nextEnd = (nextStart + 30) % 1440;
+    setSetting('reminderStartMinute', nextStart);
+    setSetting('reminderEndMinute', nextEnd);
+    if (settings.dailyReminder) await scheduleReminder(nextStart, nextEnd);
   };
 
   const onDeleteModeChange = (value) => {
@@ -639,43 +654,6 @@ export default function ProfileScreen({ navigation }) {
       suggestionKey,
     });
   };
-
-  const Section = ({ title, children }) => (
-    <View style={styles.section}>
-      <Text style={[styles.sectionTitle, { color: colors.text }]}>{title}</Text>
-      {children}
-    </View>
-  );
-
-  // Settings used to be one 11-row card mixing group sizes, playback, delete
-  // mode, reminders and appearance — impossible to scan. SubGroup breaks it
-  // into captioned cards so related switches sit together.
-  const SubGroup = ({ title, children }) => (
-    <View style={styles.subGroup}>
-      <Text style={[styles.subGroupTitle, { color: colors.subtext }]}>
-        {title}
-      </Text>
-      <View style={[styles.settingsCard, { backgroundColor: colors.card }]}>
-        {children}
-      </View>
-    </View>
-  );
-
-  const ToggleRow = ({ label, value, onChange, divider = true }) => (
-    <SettingsRow
-      title={label}
-      divider={divider}
-      accessory={null}
-      compact
-      trailing={
-        <AppSwitch
-          value={value}
-          onValueChange={onChange}
-          label={label}
-        />
-      }
-    />
-  );
 
   const statCards = [
     {
@@ -838,7 +816,7 @@ export default function ProfileScreen({ navigation }) {
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
       <ScrollView
-        contentContainerStyle={{ paddingBottom: 120 }}
+        contentContainerStyle={{ paddingBottom: tabBarLayout.clearance }}
         showsVerticalScrollIndicator={false}
         nestedScrollEnabled
       >
@@ -847,7 +825,7 @@ export default function ProfileScreen({ navigation }) {
         </Text>
 
         {/* Smart suggestions */}
-        <Section title={t('suggestions_title')}>
+        <ProfileSection title={t('suggestions_title')} textColor={colors.text}>
           <ScrollView
             horizontal
             nestedScrollEnabled
@@ -855,10 +833,10 @@ export default function ProfileScreen({ navigation }) {
           >
             {suggestionCards.map(({ key, node }) => React.cloneElement(node, { key }))}
           </ScrollView>
-        </Section>
+        </ProfileSection>
 
         {/* Tools: photography profile & compressor */}
-        <Section title={t('tools_title')}>
+        <ProfileSection title={t('tools_title')} textColor={colors.text}>
           <View style={[styles.listCard, { backgroundColor: colors.card }]}>
             <SettingsRow
               icon="heart-outline"
@@ -914,18 +892,18 @@ export default function ProfileScreen({ navigation }) {
               }
             />
           </View>
-        </Section>
+        </ProfileSection>
 
         {/* Storage comparison */}
-        <Section title={t('storage_title')}>
+        <ProfileSection title={t('storage_title')} textColor={colors.text}>
           <StorageChart
             savedBytes={stats.spaceSavedBytes}
             originalBytes={measuredOriginal || stats.originalSizeBytes}
           />
-        </Section>
+        </ProfileSection>
 
         {/* Usage statistics */}
-        <Section title={t('stats_title')}>
+        <ProfileSection title={t('stats_title')} textColor={colors.text}>
           <View style={styles.statRow}>
             {statCards.map((card) => (
               <Pressable
@@ -965,11 +943,11 @@ export default function ProfileScreen({ navigation }) {
                 ))}
             </View>
           )}
-        </Section>
+        </ProfileSection>
 
         {/* Recycle bin (Android with setting on, or whenever items exist) */}
         {((isAndroid && settings.recycleBin) || trash.length > 0) && (
-          <Section title={t('recycle_bin')}>
+          <ProfileSection title={t('recycle_bin')} textColor={colors.text}>
             <View style={[styles.listCard, { backgroundColor: colors.card }]}>
               <SettingsRow
                 icon="trash-bin-outline"
@@ -979,12 +957,12 @@ export default function ProfileScreen({ navigation }) {
                 onPress={() => navigation.navigate('RecycleBin')}
               />
             </View>
-          </Section>
+          </ProfileSection>
         )}
 
         {/* Settings */}
-        <Section title={t('settings_title')}>
-          <SubGroup title={t('settings_group_cleaning')}>
+        <ProfileSection title={t('settings_title')} textColor={colors.text}>
+          <SettingsSubGroup title={t('settings_group_cleaning')} colors={colors}>
             <OptionPicker
               label={t('setting_order')}
               value={settings.order}
@@ -1000,10 +978,10 @@ export default function ProfileScreen({ navigation }) {
               onChange={(v) => setSetting('similarDetection', v)}
               divider={false}
             />
-          </SubGroup>
+          </SettingsSubGroup>
 
           {!isAndroid && (
-            <SubGroup title={t('settings_group_playback')}>
+            <SettingsSubGroup title={t('settings_group_playback')} colors={colors}>
               <ToggleRow
                 label={t('setting_live_autoplay')}
                 value={settings.liveAutoplay}
@@ -1015,19 +993,19 @@ export default function ProfileScreen({ navigation }) {
                 onChange={(v) => setSetting('liveMuted', v)}
                 divider={false}
               />
-            </SubGroup>
+            </SettingsSubGroup>
           )}
 
           {isAndroid && (
-            <SubGroup title={t('settings_group_deletion')}>
+            <SettingsSubGroup title={t('settings_group_deletion')} colors={colors}>
               <DeletionModePicker
                 value={settings.recycleBin}
                 onChange={onDeleteModeChange}
               />
-            </SubGroup>
+            </SettingsSubGroup>
           )}
 
-          <SubGroup title={t('settings_group_reminder')}>
+          <SettingsSubGroup title={t('settings_group_reminder')} colors={colors}>
             <ToggleRow
               label={t('setting_reminder')}
               value={settings.dailyReminder}
@@ -1035,20 +1013,15 @@ export default function ProfileScreen({ navigation }) {
               divider={settings.dailyReminder}
             />
             {settings.dailyReminder && (
-              <OptionPicker
-                label={t('setting_reminder_time')}
-                value={settings.reminderHour || 19}
-                onChange={onReminderHourChange}
-                options={[8, 12, 18, 19, 20, 21].map((hour) => ({
-                  value: hour,
-                  label: `${String(hour).padStart(2, '0')}:00`,
-                }))}
-                divider={false}
+              <ReminderTimeRangePicker
+                start={reminderStart}
+                end={reminderEnd}
+                onChange={onReminderRangeChange}
               />
             )}
-          </SubGroup>
+          </SettingsSubGroup>
 
-          <SubGroup title={t('settings_group_appearance')}>
+          <SettingsSubGroup title={t('settings_group_appearance')} colors={colors}>
             <OptionPicker
               label={t('setting_theme')}
               value={settings.theme}
@@ -1059,6 +1032,15 @@ export default function ProfileScreen({ navigation }) {
                 { value: 'dark', label: t('theme_dark') },
               ]}
             />
+            {isAndroid && (
+              <ToggleRow
+                label={t('setting_android_liquid_glass')}
+                value={androidLiquidGlassAvailable && settings.androidLiquidGlass !== false}
+                onChange={(value) => setSetting('androidLiquidGlass', value)}
+                disabled={!androidLiquidGlassAvailable}
+                subtitle={!androidLiquidGlassAvailable ? t('liquid_glass_unavailable') : undefined}
+              />
+            )}
             <OptionPicker
               label={t('setting_language')}
               value={settings.language || 'system'}
@@ -1069,8 +1051,8 @@ export default function ProfileScreen({ navigation }) {
               ]}
               divider={false}
             />
-          </SubGroup>
-        </Section>
+          </SettingsSubGroup>
+        </ProfileSection>
 
         {/* Footer */}
         <View style={styles.footer}>

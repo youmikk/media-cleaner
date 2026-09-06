@@ -1,6 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppState, InteractionManager, Platform } from 'react-native';
-import { getAssets, getAssetSizes, getAlbumFingerprint } from './albumHelpers';
+import {
+  getAssets,
+  getAssetSizes,
+  getAlbumFingerprint,
+} from './albumHelpers';
 import { analyzePixels, hammingDistance } from './imageHashing';
 import { groupBursts } from './burstDetection';
 import { log } from './logger';
@@ -340,13 +344,42 @@ class ChunkedAnalyzer {
     if (!cache) return { cache: null, stale: false };
     try {
       const fp = await getAlbumFingerprint(albumId, mediaType, 'background');
-      const stale =
+      let stale =
         fp.assetCount !== cache.assetCount ||
         fp.latestModificationTime !== cache.latestModificationTime ||
         fp.newestId !== cache.newestId ||
         fp.oldestId !== cache.oldestId ||
-        fp.edgeIds !== cache.edgeIds;
-      return { cache, stale };
+        fp.edgeIds !== cache.edgeIds ||
+        fp.creationEdgeIds !== cache.creationEdgeIds ||
+        fp.creationEdgeTimes !== cache.creationEdgeTimes ||
+        fp.oldestCreationId !== cache.oldestCreationId ||
+        fp.oldestCreationTime !== cache.oldestCreationTime ||
+        fp.timestampDigest !== cache.timestampDigest;
+      if (!stale && Platform.OS === 'android' && !fp.timestampDigest) stale = true;
+      let hasAddedScopeId = fp.assetCount > cache.assetCount;
+      if (
+        stale &&
+        fp.assetCount === cache.assetCount &&
+        Array.isArray(cache.scopeIds)
+      ) {
+        const previousIds = new Set(cache.scopeIds);
+        const current = await getAssets(
+          albumId,
+          mediaType,
+          MAX_HASHED,
+          'background'
+        );
+        hasAddedScopeId = current.some((asset) => !previousIds.has(asset.id));
+      }
+      // A lower/equal count means no confirmed addition. Deletions and OEM
+      // timestamp-index updates still require derived groups to be refreshed,
+      // but must not pull older photos into the hash window and show users a
+      // second "analysis" pass after cleaning.
+      return {
+        cache,
+        stale,
+        refreshOnly: stale && !hasAddedScopeId,
+      };
     } catch (e) {
       // Freshness is unknown. Never bless a deletion suggestion as current
       // when the MediaStore query that verifies it failed.
@@ -359,8 +392,14 @@ class ChunkedAnalyzer {
     this._initPowerAdaptation();
 
     return new Promise(async (resolve) => {
+      let refreshOnly = false;
       if (!force) {
-        const { cache, stale } = await this.checkCache(albumId, mediaType);
+        const checked = await this.checkCache(
+          albumId,
+          mediaType
+        );
+        const { cache, stale } = checked;
+        refreshOnly = !!checked.refreshOnly;
         if (cache && !stale) {
           resolve(cache);
           return;
@@ -389,6 +428,7 @@ class ChunkedAnalyzer {
         cancelled: false,
         pauseRequested: false,
         queuedForResume: false,
+        refreshOnly,
       };
 
       if (this.current) {
@@ -462,7 +502,7 @@ class ChunkedAnalyzer {
       // Only photos we have NOT seen before need pixel work — everything
       // already in the global store is free.
       const targets =
-        mediaType === 'photo'
+        mediaType === 'photo' && !job.refreshOnly
           ? scope.filter((a) => !this._metricMatches(a, store[a.id]))
           : [];
       const total = targets.length;
@@ -471,7 +511,9 @@ class ChunkedAnalyzer {
         `start ${albumId}/${mediaType} scope=${scope.length} todo=${total}`
           + ` concurrency=${CONCURRENCY} lowPower=${this.lowPower}`
       );
-      this._emit({ running: true, albumId, mediaType, done: 0, total });
+      if (total > 0) {
+        this._emit({ running: true, albumId, mediaType, done: 0, total });
+      }
 
       let i = 0;
       let failed = 0;
@@ -627,13 +669,22 @@ class ChunkedAnalyzer {
         newestId: fp.newestId,
         oldestId: fp.oldestId,
         edgeIds: fp.edgeIds,
+        creationEdgeIds: fp.creationEdgeIds,
+        creationEdgeTimes: fp.creationEdgeTimes,
+        oldestCreationId: fp.oldestCreationId,
+        oldestCreationTime: fp.oldestCreationTime,
+        timestampDigest: fp.timestampDigest,
+        scopeIds: scope.map((asset) => asset.id),
         createdAt: new Date().getTime(),
         clusters,
         bursts,
         lowQuality,
         duplicates, // Array<string[]> — exact-duplicate id groups
       };
-      if (failed === 0) {
+      if (
+        failed === 0 &&
+        (Platform.OS !== 'android' || !!fp.timestampDigest)
+      ) {
         await AsyncStorage.setItem(
           this.cacheKey(albumId, mediaType),
           JSON.stringify(result)
@@ -643,6 +694,7 @@ class ChunkedAnalyzer {
         // partial run. Remove it so the next visit retries failed assets.
         await AsyncStorage.removeItem(this.cacheKey(albumId, mediaType));
       }
+      this._emit({ cacheRevision: Date.now() });
       log(
         'analysis',
         `done ${albumId} in ${Math.round((new Date().getTime() - startedAt) / 1000)}s ` +

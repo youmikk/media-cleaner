@@ -42,7 +42,6 @@ export default function AlbumPicker({
       ? override
       : album.assetCount;
   };
-  const currentCount = countFor(current);
   const visibleCallbackRef = useRef(onVisibleAlbums);
   visibleCallbackRef.current = onVisibleAlbums;
   const onViewableItemsChanged = useRef(({ viewableItems }) => {
@@ -62,11 +61,13 @@ export default function AlbumPicker({
     }
   }, [open, slide]);
 
-  const albumList = (
+  const renderAlbumList = (listProps = {}) => (
     <FlatList
       data={albums}
       keyExtractor={(item) => item.id}
-      style={styles.list}
+      style={[styles.list, listProps.style]}
+      contentContainerStyle={listProps.contentContainerStyle}
+      scrollIndicatorInsets={listProps.scrollIndicatorInsets}
       onViewableItemsChanged={onViewableItemsChanged}
       renderItem={({ item }) => (
         <Pressable
@@ -148,11 +149,6 @@ export default function AlbumPicker({
         >
           {current ? current.title : '…'}
         </Text>
-        {currentCount !== undefined && currentCount !== null && (
-          <Text style={[styles.buttonCount, { color: colors.subtext }]}>
-            {currentCount}
-          </Text>
-        )}
         {progressLoadingByAlbum[selected] ? (
           <ActivityIndicator size="small" color={colors.accent} />
         ) : currentProgress ? (
@@ -175,9 +171,9 @@ export default function AlbumPicker({
           visible={open}
           title={t('choose_album')}
           onClose={() => setOpen(false)}
-        >
-          {albumList}
-        </AppBottomSheet>
+          glassHeader
+          renderContent={renderAlbumList}
+        />
       ) : (
         <Modal
           visible={open}
@@ -195,7 +191,7 @@ export default function AlbumPicker({
                 <Text style={[styles.title, { color: colors.text }]}>
                   {t('choose_album')}
                 </Text>
-                {albumList}
+                {renderAlbumList()}
               </Pressable>
             </Animated.View>
           </Pressable>
@@ -211,7 +207,6 @@ const styles = StyleSheet.create({
   // other controls out of the row.
   button: { flex: 1, minWidth: 0 },
   list: { maxHeight: 420 },
-  buttonCount: { fontSize: 11, fontWeight: '700' },
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.35)',

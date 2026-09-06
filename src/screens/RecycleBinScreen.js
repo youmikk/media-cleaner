@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useId, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -7,8 +7,8 @@ import {
   StyleSheet,
   useWindowDimensions,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from '@react-navigation/native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
 import { useTrash } from '../context/AppContext';
@@ -18,6 +18,8 @@ import { getTrashImageThumbnail, getVideoThumbnail } from '../utils/thumbCache';
 import { Image } from 'expo-image';
 import IconButton from '../components/IconButton';
 import { showAppAlert } from '../components/AppDialog';
+import GlassBackdrop from '../components/GlassBackdrop';
+import GlassSurface from '../components/GlassSurface';
 
 const RECYCLE_ROW_HEIGHT = 86;
 const RECYCLE_ROW_GAP = 8;
@@ -40,7 +42,13 @@ const SCREEN_PADDING = 16;
 export default function RecycleBinScreen({ navigation }) {
   const { colors, t, settings, setSetting } = useSettings();
   const { trash, refreshTrash } = useTrash();
-  const { width } = useWindowDimensions();
+  const { width, fontScale } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const focused = useIsFocused();
+  const glassSource = useId();
+  const [actionsHeight, setActionsHeight] = useState(72);
+  const actionsBottom = Math.max(insets.bottom, 12);
+  const stackedActions = fontScale >= 1.5 || width - insets.left - insets.right < 360;
   const [selected, setSelected] = useState({});
   const [busy, setBusy] = useState(false);
   const [thumbs, setThumbs] = useState({});
@@ -53,7 +61,7 @@ export default function RecycleBinScreen({ navigation }) {
     ? settings.recycleColumns
     : COLUMN_CHOICES[0];
   const tileSize =
-    (width - SCREEN_PADDING * 2 - GRID_GAP * (columns - 1)) / columns;
+    (width - insets.left - insets.right - SCREEN_PADDING * 2 - GRID_GAP * (columns - 1)) / columns;
 
   const cycleColumns = () => {
     const next =
@@ -143,8 +151,8 @@ export default function RecycleBinScreen({ navigation }) {
     }
   };
 
-  // Restores go one at a time (each is a separate createAssetAsync), but the
-  // index is rewritten ONCE at the end — the old code did a full
+  // Restores go one at a time, but the index is rewritten ONCE at the end —
+  // the old code did a full
   // read+serialise+write of the whole index per entry, so restoring a few
   // hundred items rewrote megabytes over and over.
   const restoreSelected = async () => {
@@ -155,14 +163,21 @@ export default function RecycleBinScreen({ navigation }) {
     try {
       for (const entry of selectedEntries) {
         try {
-          await trashManager.restoreFromTrash(entry, { remove: false });
-          restored.push(entry);
+          const asset = await trashManager.restoreFromTrash(entry, { remove: false });
+          restored.push({ ...entry, restoredId: asset.id });
         } catch (e) {
           failed++; // backing file missing — leave the row in place
         }
       }
       if (restored.length > 0) {
-        await trashManager.removeManyFromTrash(restored);
+        try {
+          await trashManager.markRestored(restored);
+        } catch (e) {
+          // The restored media is already back in the gallery. Keep the row
+          // visible and report failure; the native retry is idempotent and
+          // will reconcile the index without creating a second copy.
+          failed += restored.length;
+        }
       }
     } finally {
       setBusy(false);
@@ -313,125 +328,155 @@ export default function RecycleBinScreen({ navigation }) {
 
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
-      <View style={styles.topBar}>
-        <IconButton
-          name="chevron-back"
-          label={t('back')}
-          onPress={() => navigation.goBack()}
-          color={colors.text}
-          iconSize={26}
-        />
-        <Text style={[styles.title, { color: colors.text }]}>
-          {t('recycle_bin')}
-        </Text>
-        <IconButton
-          name={isGrid ? 'list-outline' : 'grid-outline'}
-          label={t(isGrid ? 'recycle_view_list' : 'recycle_view_grid')}
-          onPress={() => setSetting('recycleView', isGrid ? 'list' : 'grid')}
-          color={colors.accent}
-        />
-      </View>
-
-      {trash.length === 0 ? (
-        <View style={styles.empty}>
-          <Ionicons name="trash-bin-outline" size={48} color={colors.subtext} />
-          <Text style={[styles.emptyText, { color: colors.subtext }]}>
-            {t('recycle_empty')}
-          </Text>
-        </View>
-      ) : (
-        <>
-          <View style={styles.toolBar}>
-            <Pressable style={styles.selectAll} onPress={toggleAll}>
-              <Ionicons
-                name={allSelected ? 'checkbox' : 'square-outline'}
-                size={20}
-                color={colors.accent}
-              />
-              <Text style={{ color: colors.text, fontSize: 14, fontWeight: '600' }}>
-                {t('select_all')}
-              </Text>
-            </Pressable>
-            {isGrid && (
-              <Pressable
-                style={[styles.columnChip, { backgroundColor: colors.card }]}
-                onPress={cycleColumns}
-              >
-                <Ionicons name="apps-outline" size={14} color={colors.subtext} />
-                <Text style={{ color: colors.subtext, fontSize: 12, fontWeight: '700' }}>
-                  {t('recycle_columns', { count: columns })}
-                </Text>
-              </Pressable>
-            )}
-          </View>
-          <Text style={[styles.totalSize, { color: colors.subtext }]}>
-            {t('recycle_usage', { size: formatBytes(trashBytes) })}
-          </Text>
-
-          <FlatList
-            // numColumns cannot change on a mounted FlatList, so the layout
-            // and density are baked into the key and it remounts instead.
-            key={isGrid ? `grid-${columns}` : 'list'}
-            data={trash}
-            keyExtractor={(item) => item.fileUri}
-            numColumns={isGrid ? columns : 1}
-            columnWrapperStyle={isGrid ? styles.gridRow : undefined}
-            contentContainerStyle={{ paddingBottom: 140 }}
-            // Every row has a fixed 58px thumbnail plus 14px vertical padding;
-            // telling FlatList the exact geometry avoids measuring each row
-            // while scrolling a large recycle bin. In grid mode FlatList
-            // passes getItemLayout straight through to VirtualizedList, whose
-            // item count is Math.ceil(n / numColumns) — so the index here is a
-            // ROW index, not an item index, and the square tiles make the row
-            // pitch known up front.
-            getItemLayout={
-              isGrid
-                ? (_, rowIndex) => ({
-                    length: tileSize + GRID_GAP,
-                    offset: (tileSize + GRID_GAP) * rowIndex,
-                    index: rowIndex,
-                  })
-                : (_, index) => ({
-                    length: RECYCLE_ITEM_LENGTH,
-                    offset: RECYCLE_ITEM_LENGTH * index,
-                    index,
-                  })
-            }
-            renderItem={({ item }) => (isGrid ? renderTile(item) : renderRow(item))}
-            onViewableItemsChanged={onViewableItemsChanged}
-            viewabilityConfig={viewabilityConfig}
+      <View style={styles.content}>
+        <View style={styles.topBar}>
+          <IconButton
+            name="chevron-back"
+            label={t('back')}
+            onPress={() => navigation.goBack()}
+            color={colors.text}
+            iconSize={26}
           />
+          <Text style={[styles.title, { color: colors.text }]}>
+            {t('recycle_bin')}
+          </Text>
+          <IconButton
+            name={isGrid ? 'list-outline' : 'grid-outline'}
+            label={t(isGrid ? 'recycle_view_list' : 'recycle_view_grid')}
+            onPress={() => setSetting('recycleView', isGrid ? 'list' : 'grid')}
+            color={colors.accent}
+          />
+        </View>
 
-          {selectedEntries.length > 0 && (
-            <View style={styles.actions}>
-              <Pressable
-                style={[styles.actionBtn, { backgroundColor: colors.accent }]}
-                onPress={restoreSelected}
-              >
-                <Ionicons name="refresh" size={16} color="#fff" />
-                <Text style={styles.actionText}>
-                  {t('restore')} ({selectedEntries.length})
+        {trash.length === 0 ? (
+          <View style={styles.empty}>
+            <Ionicons name="trash-bin-outline" size={48} color={colors.subtext} />
+            <Text style={[styles.emptyText, { color: colors.subtext }]}>
+              {t('recycle_empty')}
+            </Text>
+          </View>
+        ) : (
+          <>
+            <View style={styles.toolBar}>
+              <Pressable style={styles.selectAll} onPress={toggleAll}>
+                <Ionicons
+                  name={allSelected ? 'checkbox' : 'square-outline'}
+                  size={20}
+                  color={colors.accent}
+                />
+                <Text style={{ color: colors.text, fontSize: 14, fontWeight: '600' }}>
+                  {t('select_all')}
                 </Text>
               </Pressable>
-              <Pressable
-                style={[styles.actionBtn, { backgroundColor: colors.danger }]}
-                onPress={deleteSelected}
-              >
-                <Ionicons name="trash" size={16} color="#fff" />
-                <Text style={styles.actionText}>
-                  {t('delete_forever')} ({selectedEntries.length})
-                </Text>
-              </Pressable>
+              {isGrid && (
+                <Pressable
+                  style={[styles.columnChip, { backgroundColor: colors.card }]}
+                  onPress={cycleColumns}
+                >
+                  <Ionicons name="apps-outline" size={14} color={colors.subtext} />
+                  <Text style={{ color: colors.subtext, fontSize: 12, fontWeight: '700' }}>
+                    {t('recycle_columns', { count: columns })}
+                  </Text>
+                </Pressable>
+              )}
             </View>
-          )}
-        </>
-      )}
+            <Text style={[styles.totalSize, { color: colors.subtext }]}>
+              {t('recycle_usage', { size: formatBytes(trashBytes) })}
+            </Text>
+
+            <GlassBackdrop sourceKey={glassSource} style={{ backgroundColor: colors.background }}>
+              <FlatList
+                // numColumns cannot change on a mounted FlatList, so the layout
+                // and density are baked into the key and it remounts instead.
+                key={isGrid ? `grid-${columns}` : 'list'}
+                data={trash}
+                keyExtractor={(item) => item.fileUri}
+                numColumns={isGrid ? columns : 1}
+                columnWrapperStyle={isGrid ? styles.gridRow : undefined}
+                contentContainerStyle={{
+                  paddingBottom: selectedEntries.length > 0
+                    ? actionsHeight + actionsBottom + 16
+                    : Math.max(insets.bottom, 16),
+                }}
+                scrollIndicatorInsets={{ bottom: selectedEntries.length > 0 ? actionsHeight + actionsBottom : insets.bottom }}
+                // Every row has a fixed 58px thumbnail plus 14px vertical padding;
+                // telling FlatList the exact geometry avoids measuring each row
+                // while scrolling a large recycle bin. In grid mode FlatList
+                // passes getItemLayout straight through to VirtualizedList, whose
+                // item count is Math.ceil(n / numColumns) — so the index here is a
+                // ROW index, not an item index, and the square tiles make the row
+                // pitch known up front.
+                getItemLayout={
+                  isGrid
+                    ? (_, rowIndex) => ({
+                        length: tileSize + GRID_GAP,
+                        offset: (tileSize + GRID_GAP) * rowIndex,
+                        index: rowIndex,
+                      })
+                    : (_, index) => ({
+                        length: RECYCLE_ITEM_LENGTH,
+                        offset: RECYCLE_ITEM_LENGTH * index,
+                        index,
+                      })
+                }
+                renderItem={({ item }) => (isGrid ? renderTile(item) : renderRow(item))}
+                onViewableItemsChanged={onViewableItemsChanged}
+                viewabilityConfig={viewabilityConfig}
+              />
+            </GlassBackdrop>
+
+            {selectedEntries.length > 0 && (
+              <GlassSurface
+                androidSource={glassSource}
+                effectEnabled={focused}
+                onLayout={({ nativeEvent }) => setActionsHeight(Math.ceil(nativeEvent.layout.height))}
+                style={[styles.actions, {
+                  bottom: actionsBottom,
+                  borderColor: colors.border,
+                }]}
+              >
+                <View style={[styles.actionsInner, stackedActions && styles.stackedActions]}>
+                  <Pressable
+                    style={({ pressed }) => [styles.actionBtn, {
+                      backgroundColor: colors.elevated, borderColor: colors.glassAccent,
+                    }, stackedActions && styles.stackedActionBtn, (pressed || busy) && styles.dimmedAction]}
+                    onPress={restoreSelected}
+                    disabled={busy}
+                    accessibilityRole="button"
+                    accessibilityState={{ disabled: busy, busy }}
+                  >
+                    <Ionicons name="refresh" size={18} color={colors.glassAccent} accessible={false} />
+                    <Text style={[styles.actionText, { color: colors.glassAccent }]}>
+                      {t('restore')} ({selectedEntries.length})
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={({ pressed }) => [styles.actionBtn, {
+                      backgroundColor: colors.elevated, borderColor: colors.danger,
+                    }, stackedActions && styles.stackedActionBtn, (pressed || busy) && styles.dimmedAction]}
+                    onPress={deleteSelected}
+                    disabled={busy}
+                    accessibilityRole="button"
+                    accessibilityState={{ disabled: busy, busy }}
+                  >
+                    <Ionicons name="trash" size={18} color={colors.danger} accessible={false} />
+                    <Text style={[styles.actionText, { color: colors.text }]}>
+                      {t('delete_forever')} ({selectedEntries.length})
+                    </Text>
+                  </Pressable>
+                </View>
+              </GlassSurface>
+            )}
+          </>
+        )}
+      </View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   screen: { flex: 1, paddingHorizontal: 16 },
+  content: { flex: 1 },
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -537,20 +582,32 @@ const styles = StyleSheet.create({
   thumb: { width: '100%', height: '100%' },
   actions: {
     position: 'absolute',
-    bottom: 30,
-    left: 16,
-    right: 16,
-    flexDirection: 'row',
-    gap: 10,
+    left: 0,
+    right: 0,
+    borderRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
   },
+  actionsInner: {
+    flexDirection: 'row',
+    padding: 8,
+    gap: 8,
+  },
+  stackedActions: { flexDirection: 'column' },
+  stackedActionBtn: { flexGrow: 0, flexBasis: 'auto' },
   actionBtn: {
-    flex: 1,
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: 0,
+    minHeight: 48,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
     borderRadius: 14,
-    paddingVertical: 13,
+    borderWidth: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
   },
-  actionText: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  actionText: { flexShrink: 1, fontSize: 14, fontWeight: '700', textAlign: 'center' },
+  dimmedAction: { opacity: 0.55 },
 });

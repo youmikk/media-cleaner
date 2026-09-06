@@ -2,19 +2,10 @@
   "expo": {
     "name": "MediaCleaner",
     "slug": "media-cleaner",
-    "version": "1.22.0",
+    "version": "1.3",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "icon": "./assets/icon.png",
-    "updates": {
-      "url": "https://u.expo.dev/b743ab9c-d60e-4d6c-8da5-7712618b985b",
-      "requestHeaders": {
-        "expo-channel-name": "preview"
-      }
-    },
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
     "splash": {
       "image": "./assets/splash-icon.png",
       "backgroundColor": "#000000",
@@ -24,8 +15,8 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.mediacleaner.app",
       "infoPlist": {
-        "NSPhotoLibraryUsageDescription": "MediaCleaner needs access to your photo library to help you review and clean up photos and videos.",
-        "NSPhotoLibraryAddUsageDescription": "MediaCleaner needs write access to move, restore and delete photos on your behalf.",
+        "NSPhotoLibraryUsageDescription": "净相 (MediaCleaner) needs access to your photo library to help you review and clean up photos and videos.",
+        "NSPhotoLibraryAddUsageDescription": "净相 (MediaCleaner) needs write access to move, restore and delete photos on your behalf.",
         "CADisableMinimumFrameDurationOnPhone": true
       }
     },
@@ -53,8 +44,8 @@
       [
         "expo-media-library",
         {
-          "photosPermission": "Allow MediaCleaner to access your photos to help you clean them up.",
-          "savePhotosPermission": "Allow MediaCleaner to save and restore photos.",
+          "photosPermission": "Allow 净相 (MediaCleaner) to access your photos to help you clean them up.",
+          "savePhotosPermission": "Allow 净相 (MediaCleaner) to save and restore photos.",
           "isAccessMediaLocationEnabled": true
         }
       ],
@@ -64,7 +55,13 @@
           "color": "#0A84FF"
         }
       ],
-      "react-native-bottom-tabs"
+      "react-native-bottom-tabs",
+      [
+        "./plugins/withAppDisplayName",
+        {
+          "displayName": "净相"
+        }
+      ]
     ]
   }
 }

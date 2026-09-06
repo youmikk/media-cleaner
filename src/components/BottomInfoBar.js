@@ -8,7 +8,8 @@ import { formatDate } from '../utils/albumHelpers';
 
 /**
  * Floating info bar shown on cleaning screens (replaces the tab bar).
- * Liquid Glass on iOS 26, blur on older iOS, solid app surface on Android.
+ * Native glass on supported iOS, blur on older iOS, solid surface on Android.
+ * Real-time Android refraction is reserved for home navigation, not media playback.
  * Left: favorite · Center: date (+optional subtitle, opens EXIF) · Right: undo.
  *
  * `floating` mode (video feed): NO bar at all — just the date/address text
@@ -85,7 +86,6 @@ export default function BottomInfoBar({
     >
       <GlassSurface
         style={[styles.bar, { borderColor: colors.border }]}
-        overlayColor={colors.barOverlay}
       >
         <View style={styles.row}>
           {/* Left group: the things you can do TO this photo. Undo stays
@@ -110,7 +110,7 @@ export default function BottomInfoBar({
                 <Ionicons
                   name={isFavorite ? 'heart' : 'heart-outline'}
                   size={24}
-                  color={isFavorite ? colors.heart : colors.subtext}
+                  color={isFavorite ? colors.heart : colors.glassSubtext}
                 />
               </Pressable>
             )}
@@ -128,7 +128,7 @@ export default function BottomInfoBar({
                 <Ionicons
                   name="share-outline"
                   size={22}
-                  color={colors.subtext}
+                  color={colors.glassSubtext}
                 />
               </Pressable>
             )}
@@ -150,14 +150,14 @@ export default function BottomInfoBar({
                 <Ionicons
                   name="information-circle-outline"
                   size={15}
-                  color={colors.subtext}
+                  color={colors.glassSubtext}
                 />
               </View>
               {!!address && (
                 <View style={styles.addressRow}>
-                  <Ionicons name="location-outline" size={11} color={colors.subtext} />
+                  <Ionicons name="location-outline" size={11} color={colors.glassSubtext} />
                   <Text
-                    style={[styles.address, { color: colors.subtext }]}
+                    style={[styles.address, { color: colors.glassSubtext }]}
                     numberOfLines={1}
                   >
                     {address}
@@ -180,7 +180,7 @@ export default function BottomInfoBar({
             accessibilityLabel={t('undo')}
             accessibilityState={{ disabled: undoCount === 0 }}
           >
-            <Ionicons name="arrow-undo" size={22} color={colors.accent} />
+            <Ionicons name="arrow-undo" size={22} color={colors.glassAccent} />
             {undoCount > 0 && (
               <View style={[styles.badge, { backgroundColor: colors.danger }]}>
                 <Text style={styles.badgeText}>{undoCount}</Text>

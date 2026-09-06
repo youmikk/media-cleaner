@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Modal,
   View,
@@ -6,8 +6,10 @@ import {
   Pressable,
   StyleSheet,
   useWindowDimensions,
+  Platform,
 } from 'react-native';
 import { Image } from 'expo-image';
+import * as MediaLibrary from 'expo-media-library';
 import { Ionicons } from '@expo/vector-icons';
 import {
   GestureHandlerRootView,
@@ -30,7 +32,7 @@ const MAX_SCALE = 6;
  * zoomed. When NOT zoomed a horizontal fling goes to the previous / next
  * item. Keyed by asset id from the parent so zoom state resets per photo.
  */
-function ZoomablePage({ uri, width, height, onPrev, onNext }) {
+function ZoomablePage({ uri, width, height, onPrev, onNext, onLoadError }) {
   const scale = useSharedValue(1);
   const savedScale = useSharedValue(1);
   const tx = useSharedValue(0);
@@ -113,6 +115,7 @@ function ZoomablePage({ uri, width, height, onPrev, onNext }) {
           style={{ width: '100%', height: '100%' }}
           contentFit="contain"
           cachePolicy="memory-disk"
+          onError={onLoadError}
         />
       </Animated.View>
     </GestureDetector>
@@ -138,6 +141,8 @@ export default function PhotoViewer({
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [index, setIndex] = useState(initialIndex);
+  const [uriById, setUriById] = useState({});
+  const fallbackRef = useRef(new Map());
 
   useEffect(() => {
     if (visible) setIndex(initialIndex);
@@ -148,6 +153,35 @@ export default function PhotoViewer({
 
   const goPrev = () => setIndex((i) => Math.max(0, i - 1));
   const goNext = () => setIndex((i) => Math.min(assets.length - 1, i + 1));
+  const handleLoadError = useCallback(async (failedAsset, currentUri) => {
+    if (!failedAsset) return;
+    const applyNext = (entry) => {
+      const next = entry.candidates[entry.index];
+      entry.index += 1;
+      if (next) setUriById((current) => ({ ...current, [failedAsset.id]: next }));
+    };
+    const existing = fallbackRef.current.get(failedAsset.id);
+    if (existing) {
+      applyNext(existing);
+      return;
+    }
+    try {
+      const info = await MediaLibrary.getAssetInfoAsync(failedAsset.id);
+      const numericId = String(failedAsset.id).split('/')[0];
+      const candidates = [...new Set([
+        info.localUri,
+        info.uri,
+        Platform.OS === 'android'
+          ? `content://media/external/file/${numericId}`
+          : null,
+      ].filter((uri) => uri && uri !== currentUri))];
+      const entry = { candidates, index: 0 };
+      fallbackRef.current.set(failedAsset.id, entry);
+      applyNext(entry);
+    } catch (e) {
+      // No alternate URI; keep the viewer responsive for adjacent items.
+    }
+  }, []);
 
   return (
     <Modal
@@ -160,11 +194,17 @@ export default function PhotoViewer({
         {asset && (
           <ZoomablePage
             key={asset.id}
-            uri={thumbs[asset.id] || asset.uri}
+            uri={uriById[asset.id] || thumbs[asset.id] || asset.uri}
             width={width}
             height={height}
             onPrev={goPrev}
             onNext={goNext}
+            onLoadError={() =>
+              handleLoadError(
+                asset,
+                uriById[asset.id] || thumbs[asset.id] || asset.uri
+              )
+            }
           />
         )}
 

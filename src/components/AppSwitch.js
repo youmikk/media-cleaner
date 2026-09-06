@@ -8,6 +8,7 @@ import {
   View,
 } from 'react-native';
 import { useSettings } from '../context/SettingsContext';
+import { useGlassEffects } from '../context/GlassEffectsContext';
 
 /** iOS keeps its native switch; Android gets one app-owned visual language. */
 export default function AppSwitch({
@@ -17,15 +18,24 @@ export default function AppSwitch({
   disabled = false,
 }) {
   const { colors } = useSettings();
+  const { reduceMotion, effectsEnabled } = useGlassEffects();
   const progress = useRef(new Animated.Value(value ? 1 : 0)).current;
 
   useEffect(() => {
-    Animated.timing(progress, {
+    if (Platform.OS !== 'android') return;
+    if (reduceMotion || !effectsEnabled) {
+      progress.stopAnimation();
+      progress.setValue(value ? 1 : 0);
+      return;
+    }
+    const animation = Animated.timing(progress, {
       toValue: value ? 1 : 0,
       duration: 160,
       useNativeDriver: true,
-    }).start();
-  }, [progress, value]);
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [effectsEnabled, progress, reduceMotion, value]);
 
   if (Platform.OS !== 'android') {
     return (

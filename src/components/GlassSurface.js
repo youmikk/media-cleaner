@@ -1,18 +1,24 @@
 import React from 'react';
-import { View, StyleSheet, Platform } from 'react-native';
+import { View, StyleSheet, Platform, processColor } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { useSettings } from '../context/SettingsContext';
+import { useGlassEffects } from '../context/GlassEffectsContext';
+import { NativeGlassView, androidLiquidGlassAvailable } from '../../modules/liquid-glass';
+import { log } from '../utils/logger';
 
 let GlassView = null;
 let liquidGlassAvailable = false;
 try {
-  // Native iOS 26 Liquid Glass (expo-glass-effect, SDK 54+).
-  // eslint-disable-next-line global-require
-  const glass = require('expo-glass-effect');
-  GlassView = glass.GlassView;
-  liquidGlassAvailable =
-    typeof glass.isLiquidGlassAvailable === 'function' &&
-    glass.isLiquidGlassAvailable();
+  if (Platform.OS === 'ios') {
+    const glass = require('expo-glass-effect');
+    GlassView = glass.GlassView;
+    // Availability alone is insufficient on some iOS 26 builds. A missing
+    // runtime guard in an old binary is also a reason to use the blur fallback.
+    liquidGlassAvailable =
+      typeof glass.isLiquidGlassAvailable === 'function' &&
+      typeof glass.isGlassEffectAPIAvailable === 'function' &&
+      glass.isLiquidGlassAvailable() && glass.isGlassEffectAPIAvailable();
+  }
 } catch (e) {
   GlassView = null;
   liquidGlassAvailable = false;
@@ -23,12 +29,11 @@ try {
  * - iOS 26+: real Liquid Glass via expo-glass-effect (refraction, specular
  *   highlights, adaptive tint — the system material).
  * - Older iOS: expo-blur frosted-glass simulation with a translucent overlay.
- * - Android: an opaque app-owned elevated surface; OEM blur is intentionally
- *   avoided so the visual language stays stable across manufacturers.
+ * - Android 13+: AndroidLiquidGlassView AGSL for an explicit sibling source.
+ * - Other runtimes, power saving and reduced transparency: solid app surface.
  *
- * Children are rendered on top in both branches; pass `style` for the
- * capsule/bar shape (borderRadius etc.) and `overlayColor` for the
- * fallback's tint wash.
+ * The root and content never change type when an effect changes. Losing a
+ * material must not remount controls, reset scroll or recreate a video player.
  */
 export default function GlassSurface({
   style,
@@ -37,49 +42,75 @@ export default function GlassSurface({
   overlayColor,
   glassEffectStyle = 'regular',
   tintColor,
-  interactive = false, // iOS 26: press/long-press glass response
+  androidSource,
+  effectEnabled = true,
+  onLayout,
 }) {
-  const { colors } = useSettings();
+  const { colors, isDark, settings } = useSettings();
+  const { effectsEnabled, reduceMotion } = useGlassEffects();
+  const radius = StyleSheet.flatten(style)?.borderRadius || 0;
+  const surfaceTint = tintColor || overlayColor || colors.liquidTint;
+  const androidTint = processColor(surfaceTint) ?? processColor(colors.elevated) ?? 0;
+  const androidFallback = processColor(colors.elevated) ?? 0;
+  const layerStyle = [StyleSheet.absoluteFill, { borderRadius: radius }];
+  const showEffect = effectsEnabled && effectEnabled;
+  let material = null;
 
-  // Android uses the app's own solid surface. OEM blur implementations vary
-  // heavily in colour, clipping and performance, which made the same control
-  // look unrelated across Xiaomi, vivo and stock Android devices.
-  if (Platform.OS === 'android') {
-    return (
-      <View style={[style, { backgroundColor: colors.elevated }]}>
-        {children}
-      </View>
+  if (Platform.OS === 'android' && androidSource && androidLiquidGlassAvailable && NativeGlassView) {
+    material = (
+      <NativeGlassView
+        key="android-glass"
+        pointerEvents="none"
+        importantForAccessibility="no-hide-descendants"
+        style={layerStyle}
+        sourceKey={androidSource}
+        effectEnabled={showEffect && !reduceMotion && settings.androidLiquidGlass !== false}
+        cornerRadius={radius}
+        surfaceTint={androidTint}
+        fallbackColor={androidFallback}
+        onStatus={reportAndroidGlassStatus}
+      />
     );
-  }
-
-  if (GlassView && liquidGlassAvailable) {
-    return (
+  } else if (showEffect && Platform.OS === 'ios' && GlassView && liquidGlassAvailable) {
+    material = (
       <GlassView
-        style={style}
+        pointerEvents="none"
+        accessible={false}
+        accessibilityElementsHidden
+        style={layerStyle}
         glassEffectStyle={glassEffectStyle}
-        tintColor={tintColor}
-        isInteractive={interactive}
-      >
-        {children}
-      </GlassView>
+        tintColor={surfaceTint}
+        colorScheme={isDark ? 'dark' : 'light'}
+        // The bar contains several independent controls. Stretching its whole
+        // material on each press competes with their own selection feedback.
+        isInteractive={false}
+      />
+    );
+  } else if (showEffect && Platform.OS === 'ios') {
+    material = (
+      <BlurView pointerEvents="none" intensity={intensity} tint={colors.glassTint} style={layerStyle}>
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: surfaceTint }]} />
+      </BlurView>
     );
   }
 
   return (
-    <BlurView
-      intensity={Platform.OS === 'ios' ? intensity : Math.min(100, intensity + 40)}
-      tint={colors.glassTint}
-      style={style}
-    >
-      <View
-        style={[
-          StyleSheet.absoluteFill,
-          { backgroundColor: overlayColor || colors.glassOverlay },
-        ]}
-      />
+    <View onLayout={onLayout} style={[style, styles.clip]}>
+      {/* An opaque underlay on iOS would block native backdrop sampling. */}
+      {(!material || Platform.OS !== 'ios') && (
+        <View key="fallback" pointerEvents="none" style={[layerStyle, { backgroundColor: colors.elevated }]} />
+      )}
+      {material}
       {children}
-    </BlurView>
+    </View>
   );
 }
 
+function reportAndroidGlassStatus(event) {
+  const { state, reason, sourceKey } = event.nativeEvent || {};
+  // Native emits transitions only, never a per-frame log or media information.
+  log('glass', `android state=${state} reason=${reason} source=${sourceKey || 'unknown'}`);
+}
+
+const styles = StyleSheet.create({ clip: { overflow: 'hidden' } });
 export { liquidGlassAvailable };

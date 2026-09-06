@@ -1,5 +1,9 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getAlbumFingerprint, ALL_ALBUM_ID } from './albumHelpers';
+import { Platform } from 'react-native';
+import {
+  getAlbumFingerprint,
+  ALL_ALBUM_ID,
+} from './albumHelpers';
 import { utf8ByteLength, withLock } from './safeStore';
 
 /**
@@ -28,16 +32,28 @@ export async function getLibraryFingerprint() {
     getAlbumFingerprint(ALL_ALBUM_ID, 'video', 'background'),
   ]);
   return {
+    timestampDigest:
+      photo.timestampDigest && video.timestampDigest
+        ? `${photo.timestampDigest}:${video.timestampDigest}`
+        : null,
     photoCount: photo.assetCount || 0,
     photoLatest: photo.latestModificationTime || 0,
     photoNewestId: photo.newestId || null,
     photoOldestId: photo.oldestId || null,
     photoEdgeIds: photo.edgeIds || '',
+    photoCreationEdgeIds: photo.creationEdgeIds || '',
+    photoCreationEdgeTimes: photo.creationEdgeTimes || '',
+    photoOldestCreationId: photo.oldestCreationId || null,
+    photoOldestCreationTime: photo.oldestCreationTime || 0,
     videoCount: video.assetCount || 0,
     videoLatest: video.latestModificationTime || 0,
     videoNewestId: video.newestId || null,
     videoOldestId: video.oldestId || null,
     videoEdgeIds: video.edgeIds || '',
+    videoCreationEdgeIds: video.creationEdgeIds || '',
+    videoCreationEdgeTimes: video.creationEdgeTimes || '',
+    videoOldestCreationId: video.oldestCreationId || null,
+    videoOldestCreationTime: video.oldestCreationTime || 0,
   };
 }
 
@@ -45,15 +61,24 @@ function sameFingerprint(a, b) {
   if (!a || !b) return false;
   return (
     a.photoCount === b.photoCount &&
+    a.timestampDigest === b.timestampDigest &&
     a.photoLatest === b.photoLatest &&
     a.photoNewestId === b.photoNewestId &&
     a.photoOldestId === b.photoOldestId &&
     a.photoEdgeIds === b.photoEdgeIds &&
+    a.photoCreationEdgeIds === b.photoCreationEdgeIds &&
+    a.photoCreationEdgeTimes === b.photoCreationEdgeTimes &&
+    a.photoOldestCreationId === b.photoOldestCreationId &&
+    a.photoOldestCreationTime === b.photoOldestCreationTime &&
     a.videoCount === b.videoCount &&
     a.videoLatest === b.videoLatest &&
     a.videoNewestId === b.videoNewestId &&
     a.videoOldestId === b.videoOldestId &&
-    a.videoEdgeIds === b.videoEdgeIds
+    a.videoEdgeIds === b.videoEdgeIds &&
+    a.videoCreationEdgeIds === b.videoCreationEdgeIds &&
+    a.videoCreationEdgeTimes === b.videoCreationEdgeTimes &&
+    a.videoOldestCreationId === b.videoOldestCreationId &&
+    a.videoOldestCreationTime === b.videoOldestCreationTime
   );
 }
 
@@ -64,6 +89,7 @@ function sameFingerprint(a, b) {
  */
 export async function getSuggestions(fingerprint) {
   try {
+    if (Platform.OS === 'android' && !fingerprint?.timestampDigest) return null;
     const raw = await AsyncStorage.getItem(KEY);
     if (!raw) return null;
     const entry = JSON.parse(raw);
@@ -78,6 +104,7 @@ export async function getSuggestions(fingerprint) {
 
 export async function saveSuggestions(data, fingerprint) {
   try {
+    if (Platform.OS === 'android' && !fingerprint?.timestampDigest) return;
     const capped = {
       largest: (data.largest || []).slice(0, 10),
       bursts: (data.bursts || []).slice(0, 30),

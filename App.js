@@ -21,9 +21,11 @@ import {
 } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { Image as ExpoImage } from 'expo-image';
+import * as MediaLibrary from 'expo-media-library';
 import { subscribeMemoryWarning } from './src/utils/batteryUtils';
 import { SettingsProvider, useSettings } from './src/context/SettingsContext';
 import { AppProvider } from './src/context/AppContext';
+import { GlassEffectsProvider } from './src/context/GlassEffectsContext';
 import RootNavigator from './src/navigation';
 import OnboardingScreen from './src/screens/OnboardingScreen';
 import { ensureMediaPermission, getMediaPermission } from './src/utils/permissions';
@@ -36,6 +38,7 @@ import {
   APP_VERSION,
 } from './src/utils/updateChecker';
 import { installLogger } from './src/utils/logger';
+import { invalidateLibraryIndex } from './src/utils/albumHelpers';
 import AppDialogHost, { showAppAlert } from './src/components/AppDialog';
 
 // Capture crashes and console errors from the very first frame.
@@ -109,6 +112,21 @@ function AppInner() {
     return unsub;
   }, []);
 
+  // MediaStore/PhotoKit can update DATE_TAKEN in the background after an OEM
+  // gallery finishes indexing. Drop only our read caches when that happens;
+  // otherwise a card can retain the old time while a by-id detail query sees
+  // the new one, which looks like this app changed the user's media.
+  useEffect(() => {
+    let subscription = null;
+    try {
+      subscription = MediaLibrary.addListener(() => invalidateLibraryIndex());
+    } catch (e) {
+      // Listener unavailable in an older runtime; fingerprints still guard
+      // persisted caches on the next screen focus.
+    }
+    return () => subscription?.remove();
+  }, []);
+
   useEffect(() => {
     trashManager.purgeExpired().catch(() => {});
     AsyncStorage.getItem(TUTORIAL_KEY)
@@ -171,9 +189,7 @@ function AppInner() {
     ]).catch(() => {});
   };
 
-  // An OTA update can land at any time, including while the app sits in the
-  // background — and a user may well have revoked access in the meantime.
-  // The first launch on a new bundle therefore audits permissions once and,
+  // The first launch after an APK/IPA upgrade audits permissions once and,
   // if anything is missing, reopens the onboarding page in permissions-only
   // mode. consumeUpdateApplied() is true exactly once per update, so this
   // never turns into a recurring nag.
@@ -302,9 +318,11 @@ export default function App() {
       <SafeAreaProvider>
         <SettingsProvider>
           <AppDialogHost />
-          <AppProvider>
-            <AppInner />
-          </AppProvider>
+          <GlassEffectsProvider>
+            <AppProvider>
+              <AppInner />
+            </AppProvider>
+          </GlassEffectsProvider>
         </SettingsProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>

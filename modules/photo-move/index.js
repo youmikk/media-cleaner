@@ -70,9 +70,58 @@ export async function moveToAlbum(assetIds, albumName, destDir = null) {
   }
 }
 
-/** True when this build can do in-place moves (Android only). */
+/**
+ * True only for metadata-safe MediaStore moves (Android native API v2+).
+ * Version 1 used filesystem rename + rescan and is intentionally rejected:
+ * some OEM providers recreated the row with a different gallery timestamp.
+ */
 export function hasNativeMove() {
-  return !!(native && native.moveToAlbum);
+  try {
+    return !!(
+      native &&
+      native.moveToAlbum &&
+      native.moveApiVersion &&
+      Number(native.moveApiVersion()) >= 2
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+/** True only when Android can restore a row and verify all recorded dates. */
+export function hasSafeRestore() {
+  try {
+    return !!(
+      native &&
+      native.getProtectedMetadata &&
+      native.restoreFromTrash &&
+      native.restoreApiVersion &&
+      Number(native.restoreApiVersion()) >= 1
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+/** Raw MediaStore fields captured before the original row is deleted. */
+export async function getProtectedMetadata(assetId) {
+  if (!hasSafeRestore()) throw new Error('unavailable');
+  return native.getProtectedMetadata(assetId);
+}
+
+/** Restore an app-internal backup without resetting its MediaStore dates. */
+export async function restoreFromTrash(fileUri, metadata, originalDir) {
+  if (!hasSafeRestore()) throw new Error('unavailable');
+  return native.restoreFromTrash(fileUri, JSON.stringify(metadata), originalDir);
+}
+
+export function hasAlbumTimestampDigest() {
+  return !!(native && native.albumTimestampDigest);
+}
+
+export async function albumTimestampDigest(albumId, mediaType) {
+  if (!hasAlbumTimestampDigest()) throw new Error('unavailable');
+  return native.albumTimestampDigest(albumId, mediaType);
 }
 
 /** True when batched MediaStore/PhotoKit size lookups are available. */

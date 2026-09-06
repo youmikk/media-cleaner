@@ -59,9 +59,11 @@ export default function TimePicker({ years = [], value, onSelect }) {
       end: new Date(year, month + 1, 1).getTime(),
     });
 
-  const timeList = (
+  const renderTimeList = (listProps = {}) => (
     <SectionList
-      style={styles.list}
+      style={[styles.list, listProps.style]}
+      contentContainerStyle={listProps.contentContainerStyle}
+      scrollIndicatorInsets={listProps.scrollIndicatorInsets}
       sections={[{ data: years }]}
       keyExtractor={(item) => String(item.year)}
       ListHeaderComponent={
@@ -199,9 +201,9 @@ export default function TimePicker({ years = [], value, onSelect }) {
           visible={open}
           title={t('time_title')}
           onClose={() => setOpen(false)}
-        >
-          {timeList}
-        </AppBottomSheet>
+          glassHeader
+          renderContent={renderTimeList}
+        />
       ) : (
         <Modal
           visible={open}
@@ -218,7 +220,7 @@ export default function TimePicker({ years = [], value, onSelect }) {
               <Text style={[styles.title, { color: colors.text }]}>
                 {t('time_title')}
               </Text>
-              {timeList}
+              {renderTimeList()}
             </Pressable>
           </Pressable>
         </Modal>

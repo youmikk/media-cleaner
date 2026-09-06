@@ -2,6 +2,7 @@ import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import LiquidTabBar from '../components/LiquidTabBar';
+import GlassBackdrop from '../components/GlassBackdrop';
 import { useSettings } from '../context/SettingsContext';
 import AlbumSelectScreen from '../screens/AlbumSelectScreen';
 import CleaningScreen from '../screens/CleaningScreen';
@@ -29,35 +30,39 @@ const ProfileStack = createNativeStackNavigator();
 
 function PhotosNavigator() {
   return (
-    <PhotosStack.Navigator screenOptions={{ headerShown: false }}>
-      <PhotosStack.Screen name="AlbumSelect" component={AlbumSelectScreen} />
-      <PhotosStack.Screen
-        name="Cleaning"
-        component={CleaningScreen}
-        options={{
-          gestureEnabled: false,
-          // With the native tab bar we can't hide it per-route — the
-          // cleaning flow covers it with a full-screen modal instead.
-          presentation: useNativeTabs ? 'fullScreenModal' : 'card',
-        }}
-      />
-    </PhotosStack.Navigator>
+    <GlassBackdrop sourceKey="PhotosTab">
+      <PhotosStack.Navigator screenOptions={{ headerShown: false }}>
+        <PhotosStack.Screen name="AlbumSelect" component={AlbumSelectScreen} />
+        <PhotosStack.Screen
+          name="Cleaning"
+          component={CleaningScreen}
+          options={{
+            gestureEnabled: false,
+            // With the native tab bar we can't hide it per-route — the
+            // cleaning flow covers it with a full-screen modal instead.
+            presentation: useNativeTabs ? 'fullScreenModal' : 'card',
+          }}
+        />
+      </PhotosStack.Navigator>
+    </GlassBackdrop>
   );
 }
 
 function VideosNavigator() {
   return (
-    <VideosStack.Navigator screenOptions={{ headerShown: false }}>
-      <VideosStack.Screen name="VideoAlbumSelect" component={VideoAlbumSelectScreen} />
-      <VideosStack.Screen
-        name="VideoCleaning"
-        component={VideoCleaningScreen}
-        options={{
-          gestureEnabled: false,
-          presentation: useNativeTabs ? 'fullScreenModal' : 'card',
-        }}
-      />
-    </VideosStack.Navigator>
+    <GlassBackdrop sourceKey="VideosTab">
+      <VideosStack.Navigator screenOptions={{ headerShown: false }}>
+        <VideosStack.Screen name="VideoAlbumSelect" component={VideoAlbumSelectScreen} />
+        <VideosStack.Screen
+          name="VideoCleaning"
+          component={VideoCleaningScreen}
+          options={{
+            gestureEnabled: false,
+            presentation: useNativeTabs ? 'fullScreenModal' : 'card',
+          }}
+        />
+      </VideosStack.Navigator>
+    </GlassBackdrop>
   );
 }
 
@@ -71,39 +76,41 @@ function ProfileNavigator() {
     presentation: useNativeTabs ? 'fullScreenModal' : 'card',
   };
   return (
-    <ProfileStack.Navigator screenOptions={{ headerShown: false }}>
-      <ProfileStack.Screen name="Profile" component={ProfileScreen} />
-      <ProfileStack.Screen
-        name="Favorites"
-        component={FavoritesScreen}
-        options={fullScreen}
-      />
-      <ProfileStack.Screen
-        name="SmartCleaning"
-        component={CleaningScreen}
-        options={{ ...fullScreen, gestureEnabled: false }}
-      />
-      <ProfileStack.Screen
-        name="RecycleBin"
-        component={RecycleBinScreen}
-        options={fullScreen}
-      />
-      <ProfileStack.Screen
-        name="BurstClean"
-        component={BurstCleanScreen}
-        options={fullScreen}
-      />
-      <ProfileStack.Screen
-        name="Insights"
-        component={GalleryInsightsScreen}
-        options={fullScreen}
-      />
-      <ProfileStack.Screen
-        name="Compress"
-        component={CompressScreen}
-        options={fullScreen}
-      />
-    </ProfileStack.Navigator>
+    <GlassBackdrop sourceKey="ProfileTab">
+      <ProfileStack.Navigator screenOptions={{ headerShown: false }}>
+        <ProfileStack.Screen name="Profile" component={ProfileScreen} />
+        <ProfileStack.Screen
+          name="Favorites"
+          component={FavoritesScreen}
+          options={fullScreen}
+        />
+        <ProfileStack.Screen
+          name="SmartCleaning"
+          component={CleaningScreen}
+          options={{ ...fullScreen, gestureEnabled: false }}
+        />
+        <ProfileStack.Screen
+          name="RecycleBin"
+          component={RecycleBinScreen}
+          options={fullScreen}
+        />
+        <ProfileStack.Screen
+          name="BurstClean"
+          component={BurstCleanScreen}
+          options={fullScreen}
+        />
+        <ProfileStack.Screen
+          name="Insights"
+          component={GalleryInsightsScreen}
+          options={fullScreen}
+        />
+        <ProfileStack.Screen
+          name="Compress"
+          component={CompressScreen}
+          options={fullScreen}
+        />
+      </ProfileStack.Navigator>
+    </GlassBackdrop>
   );
 }
 

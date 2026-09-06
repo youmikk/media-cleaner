@@ -11,6 +11,34 @@ import { log, logSync } from './logger';
 import { runMediaWork } from './mediaWorkScheduler';
 
 /**
+ * A rejected Android batch can still be partial on vendor MediaStore builds.
+ * Remove only backups whose original row is positively confirmed to remain;
+ * a missing/unreadable row keeps its backup as the last recoverable copy.
+ */
+async function discardBackupsForSurvivingOriginals(assets, entries) {
+  const removable = [];
+  for (let i = 0; i < assets.length; i += 6) {
+    const batch = assets.slice(i, i + 6);
+    // eslint-disable-next-line no-await-in-loop
+    const exists = await Promise.all(
+      batch.map(async (asset) => {
+        try {
+          return !!(await MediaLibrary.getAssetInfoAsync(asset.id));
+        } catch (e) {
+          return false;
+        }
+      })
+    );
+    for (let j = 0; j < batch.length; j++) {
+      if (exists[j] && entries[i + j]) removable.push(entries[i + j]);
+    }
+  }
+  if (removable.length > 0) {
+    await trashManager.removeManyFromTrash(removable).catch(() => {});
+  }
+}
+
+/**
  * Delete a WHOLE BATCH of assets with a SINGLE media-library call — one
  * system confirmation dialog per group instead of one per photo.
  *
@@ -100,13 +128,13 @@ export async function batchDelete(assets, { useRecycleBin = false } = {}) {
     );
   } catch (e) {
     if (trashEntries.length > 0) {
-      await trashManager.removeManyFromTrash(trashEntries).catch(() => {});
+      await discardBackupsForSurvivingOriginals(deletable, trashEntries);
     }
     throw e;
   }
   if (!ok) {
     if (trashEntries.length > 0) {
-      await trashManager.removeManyFromTrash(trashEntries).catch(() => {});
+      await discardBackupsForSurvivingOriginals(deletable, trashEntries);
     }
     throw new Error('delete-rejected');
   }

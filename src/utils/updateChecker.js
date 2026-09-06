@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { log } from './logger';
 
-export const APP_VERSION = '1.22.0';
+export const APP_VERSION = '1.3';
 const REPO = 'youmikk/media-cleaner';
 const RELEASES_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 const RELEASE_API_URLS = [
@@ -68,15 +68,6 @@ async function fetchJson(url, headers = {}) {
   }
 }
 
-// expo-updates is a native module — absent in Expo Go; guard the import.
-let Updates = null;
-try {
-  // eslint-disable-next-line global-require
-  Updates = require('expo-updates');
-} catch (e) {
-  Updates = null;
-}
-
 function parseVersion(v) {
   return String(v || '')
     .replace(/^v/i, '')
@@ -124,60 +115,12 @@ function manifestDownloadUrl(manifest, platform, tag) {
 }
 
 /**
- * A) OTA hot update via expo-updates (EAS Update).
- * Returns 'applied' (update fetched — call Updates.reloadAsync next),
- * 'none' (already current) or 'unavailable' (Expo Go / dev).
- */
-export async function checkOTA() {
-  if (!Updates || !Updates.checkForUpdateAsync) return 'unavailable';
-  try {
-    if (Updates.isEmbeddedLaunch === undefined && !Updates.channel) {
-      // running in Expo Go / dev client without update config
-      return 'unavailable';
-    }
-    const result = await Updates.checkForUpdateAsync();
-    if (result.isAvailable) {
-      await Updates.fetchUpdateAsync();
-      return 'applied';
-    }
-    // Only fetch after a positive availability check. Calling fetch after a
-    // negative result races the native update controller and can make a later
-    // manual check miss an available update.
-    return 'none';
-  } catch (e) {
-    return 'unavailable';
-  }
-}
-
-/**
- * Apply the fetched update. Returns true when the reload was accepted.
- * (On Android, reloadAsync silently fails if invoked while an Alert is
- * still dismissing — callers should delay slightly and check the result.)
- */
-export async function reloadWithUpdate() {
-  if (!Updates || !Updates.reloadAsync) return false;
-  try {
-    await Updates.reloadAsync();
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
-
-/**
- * True EXACTLY ONCE after a new JS bundle became active, then false again.
- *
- * Keyed on the running bundle's updateId rather than a flag set before
- * reloadAsync, because an OTA can also land without us doing anything:
- * expo-updates downloads at launch and activates on the NEXT start, with no
- * code of ours in between. Comparing ids catches both routes.
- *
- * The very first run only records the id — a fresh install is not an update.
+ * True exactly once after an APK/IPA version upgrade. The first install only
+ * records the version; later package upgrades trigger the permission audit.
  */
 export async function consumeUpdateApplied() {
   try {
-    // null while the embedded bundle is running (no OTA active, Expo Go).
-    const current = String((Updates && Updates.updateId) || 'embedded');
+    const current = APP_VERSION;
     const seen = await AsyncStorage.getItem(UPDATE_ID_KEY);
     if (seen !== current) await AsyncStorage.setItem(UPDATE_ID_KEY, current);
     if (!seen) return false;
@@ -209,7 +152,7 @@ export async function fetchLatestChangelog() {
 }
 
 /**
- * B) New-package check against GitHub Releases.
+ * New-package check against GitHub Releases.
  * Returns { hasUpdate, version, url } — url prefers the platform's install
  * package and falls back to the release page. Pair it with mirrorUrl() only
  * when url is a real release asset URL.

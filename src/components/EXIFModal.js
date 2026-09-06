@@ -62,8 +62,16 @@ export default function EXIFModal({ visible, asset, onClose }) {
           log('exif.basic', `asset-info unavailable id=${asset.id}; fallback`);
         }
         row(t('exif_file'), () => info.filename || '—');
-        row(t('exif_created'), () => formatDate(info.creationTime, language));
-        row(t('exif_modified'), () => formatDate(info.modificationTime, language));
+        // Keep the sheet on the exact same timestamp source as the card that
+        // opened it. Replacing a persisted list asset with a live MediaStore
+        // object here made the visible date appear to "refresh" even though
+        // the app had not categorized or written the media.
+        row(t('exif_created'), () =>
+          formatDate(asset.creationTime ?? info.creationTime, language)
+        );
+        row(t('exif_modified'), () =>
+          formatDate(asset.modificationTime ?? info.modificationTime, language)
+        );
         row(t('exif_dimensions'), () => `${info.width} × ${info.height}`);
         row(t('exif_duration'), () =>
           info.duration ? `${Number(info.duration).toFixed(1)}s` : null

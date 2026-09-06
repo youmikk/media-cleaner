@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useId, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -8,8 +8,8 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from '@react-navigation/native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
@@ -17,6 +17,8 @@ import { useFavorites } from '../context/AppContext';
 import { getAssetsByIds } from '../utils/albumHelpers';
 import { getVideoThumbnail } from '../utils/thumbCache';
 import IconButton from '../components/IconButton';
+import GlassBackdrop from '../components/GlassBackdrop';
+import GlassSurface from '../components/GlassSurface';
 
 const GAP = 6;
 const RESOLVE_CHUNK = 600;
@@ -26,6 +28,10 @@ export default function FavoritesScreen({ navigation }) {
   const { colors, t, settings, setSetting } = useSettings();
   const { favorites, toggleFavorite } = useFavorites();
   const { width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const focused = useIsFocused();
+  const glassSource = useId();
+  const [headerHeight, setHeaderHeight] = useState(56);
   const [assets, setAssets] = useState([]);
   const [thumbs, setThumbs] = useState({});
   const [loading, setLoading] = useState(true);
@@ -33,7 +39,7 @@ export default function FavoritesScreen({ navigation }) {
   favoritesRef.current = favorites;
   const isGrid = settings.favoriteView !== 'list';
   const columns = Math.max(2, Math.min(4, settings.favoriteColumns || 3));
-  const tileSize = Math.floor((width - 32 - GAP * (columns - 1)) / columns);
+  const tileSize = Math.floor((width - insets.left - insets.right - 32 - GAP * (columns - 1)) / columns);
 
   useFocusEffect(
     useCallback(() => {
@@ -151,95 +157,127 @@ export default function FavoritesScreen({ navigation }) {
     </View>
   );
 
+  const listToolbar = isGrid && visibleAssets.length > 0 ? (
+    <View style={styles.toolbar}>
+      <Text style={[styles.count, { color: colors.subtext }]}>
+        {t('favorite_count', { count: visibleAssets.length })}
+      </Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={t('recycle_columns', { count: columns })}
+        style={({ pressed }) => [styles.columnChip, pressed && { backgroundColor: colors.elevated }]}
+        onPress={cycleColumns}
+      >
+        <Ionicons name="apps-outline" size={18} color={colors.accent} accessible={false} />
+        <Text style={[styles.columnLabel, { color: colors.text }]}>
+          {t('recycle_columns', { count: columns })}
+        </Text>
+      </Pressable>
+    </View>
+  ) : null;
+
   return (
     <SafeAreaView
       edges={['top', 'left', 'right']}
       style={[styles.screen, { backgroundColor: colors.background }]}
     >
-      <View style={styles.topBar}>
-        <IconButton
-          name="chevron-back"
-          label={t('back')}
-          onPress={() => navigation.goBack()}
-          color={colors.text}
-          iconSize={26}
-        />
-        <Text style={[styles.title, { color: colors.text }]}>{t('my_favorites')}</Text>
-        <IconButton
-          name={isGrid ? 'list-outline' : 'grid-outline'}
-          label={t(isGrid ? 'recycle_view_list' : 'recycle_view_grid')}
-          onPress={() => setSetting('favoriteView', isGrid ? 'list' : 'grid')}
-          color={colors.accent}
-        />
+      <View style={styles.content}>
+        {/* The header is outside its source and stays first in accessibility order. */}
+        <GlassSurface
+          androidSource={glassSource}
+          effectEnabled={focused && !loading && visibleAssets.length > 0}
+          onLayout={({ nativeEvent }) => setHeaderHeight(Math.ceil(nativeEvent.layout.height))}
+          style={[styles.header, { borderColor: colors.border }]}
+        >
+          <View style={styles.topBar}>
+            <IconButton
+              name="chevron-back"
+              label={t('back')}
+              onPress={() => navigation.goBack()}
+              color={colors.text}
+              iconSize={26}
+            />
+            <Text style={[styles.title, { color: colors.text }]}>{t('my_favorites')}</Text>
+            <IconButton
+              name={isGrid ? 'list-outline' : 'grid-outline'}
+              label={t(isGrid ? 'recycle_view_list' : 'recycle_view_grid')}
+              onPress={() => setSetting('favoriteView', isGrid ? 'list' : 'grid')}
+              color={colors.glassAccent}
+            />
+          </View>
+        </GlassSurface>
+
+        <GlassBackdrop sourceKey={glassSource} style={{ backgroundColor: colors.background }}>
+          {loading ? (
+            <View style={[styles.empty, { paddingTop: headerHeight, paddingBottom: insets.bottom }]}>
+              <ActivityIndicator size="large" color={colors.accent} />
+            </View>
+          ) : visibleAssets.length === 0 ? (
+            <View style={[styles.empty, { paddingTop: headerHeight, paddingBottom: insets.bottom }]}>
+              <Ionicons name="heart-outline" size={48} color={colors.subtext} />
+              <Text style={{ color: colors.subtext }}>{t('favorites_empty')}</Text>
+            </View>
+          ) : (
+            <FlatList
+              key={isGrid ? `grid-${columns}` : 'list'}
+              data={visibleAssets}
+              keyExtractor={(item) => item.id}
+              numColumns={isGrid ? columns : 1}
+              columnWrapperStyle={isGrid ? styles.gridRow : undefined}
+              ListHeaderComponent={listToolbar}
+              contentContainerStyle={{ paddingTop: headerHeight + 12, paddingBottom: Math.max(insets.bottom, 16) }}
+              scrollIndicatorInsets={{ top: headerHeight, bottom: insets.bottom }}
+              initialNumToRender={18}
+              maxToRenderPerBatch={18}
+              windowSize={7}
+              renderItem={({ item }) => (isGrid ? renderTile(item) : renderRow(item))}
+            />
+          )}
+        </GlassBackdrop>
       </View>
-
-      {isGrid && visibleAssets.length > 0 && (
-        <View style={styles.toolbar}>
-          <Text style={{ color: colors.subtext, fontSize: 13 }}>
-            {t('favorite_count', { count: visibleAssets.length })}
-          </Text>
-          <Pressable
-            style={[styles.columnChip, { backgroundColor: colors.card }]}
-            onPress={cycleColumns}
-          >
-            <Ionicons name="apps-outline" size={14} color={colors.subtext} />
-            <Text style={{ color: colors.subtext, fontSize: 12, fontWeight: '700' }}>
-              {t('recycle_columns', { count: columns })}
-            </Text>
-          </Pressable>
-        </View>
-      )}
-
-      {loading ? (
-        <View style={styles.empty}>
-          <ActivityIndicator size="large" color={colors.accent} />
-        </View>
-      ) : visibleAssets.length === 0 ? (
-        <View style={styles.empty}>
-          <Ionicons name="heart-outline" size={48} color={colors.subtext} />
-          <Text style={{ color: colors.subtext }}>{t('favorites_empty')}</Text>
-        </View>
-      ) : (
-        <FlatList
-          key={isGrid ? `grid-${columns}` : 'list'}
-          data={visibleAssets}
-          keyExtractor={(item) => item.id}
-          numColumns={isGrid ? columns : 1}
-          columnWrapperStyle={isGrid ? styles.gridRow : undefined}
-          contentContainerStyle={{ paddingBottom: 60 }}
-          initialNumToRender={18}
-          maxToRenderPerBatch={18}
-          windowSize={7}
-          renderItem={({ item }) => (isGrid ? renderTile(item) : renderRow(item))}
-        />
-      )}
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   screen: { flex: 1, paddingHorizontal: 16 },
+  content: { flex: 1 },
+  header: {
+    position: 'absolute', top: 0, left: 0, right: 0, zIndex: 1,
+    borderRadius: 16, borderWidth: StyleSheet.hairlineWidth,
+  },
   topBar: {
-    height: 52,
+    minHeight: 56,
+    paddingHorizontal: 4,
+    paddingVertical: 4,
+    gap: 8,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  title: { fontSize: 18, fontWeight: '800' },
+  title: { flex: 1, textAlign: 'center', fontSize: 18, fontWeight: '800' },
   toolbar: {
-    minHeight: 46,
+    minHeight: 48,
+    paddingHorizontal: 12,
+    paddingBottom: 8,
+    gap: 8,
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
   columnChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    gap: 8,
+    minHeight: 48,
+    maxWidth: '100%',
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 8,
   },
+  count: { flexShrink: 1, fontSize: 13 },
+  columnLabel: { flexShrink: 1, fontSize: 12, fontWeight: '700' },
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
   gridRow: { gap: GAP, marginBottom: GAP },
   tile: { borderRadius: 8, overflow: 'hidden' },

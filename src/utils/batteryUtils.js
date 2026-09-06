@@ -9,16 +9,20 @@ let lastLowPower = null;
 let memoryWarningCount = 0;
 
 /**
- * Subscribe to power-state changes. Calls `onChange(isLowPower)` immediately
- * with the current state and on every change. Returns an unsubscribe fn.
+ * Report the initial power state once resolved, unless a newer system event
+ * has already arrived, then report changes until unsubscribed.
  */
 export function subscribeLowPower(onChange) {
   let sub;
+  let active = true;
+  let receivedChange = false;
   const report = (lowPower, source) => {
+    if (!active) return;
     if (lastLowPower !== lowPower) {
       lastLowPower = lowPower;
-      Battery.getPowerStateAsync()
+      Promise.resolve().then(() => Battery.getPowerStateAsync())
         .then((state) => {
+          if (!active) return;
           log(
             'perf',
             `power-state lowPower=${lowPower} battery=${
@@ -26,27 +30,36 @@ export function subscribeLowPower(onChange) {
             }% source=${source}`
           );
         })
-        .catch(() => log('perf', `power-state lowPower=${lowPower} source=${source}`));
+        .catch(() => {
+          if (active) log('perf', `power-state lowPower=${lowPower} source=${source}`);
+        });
     }
     onChange(lowPower);
   };
-  (async () => {
-    try {
-      const state = await Battery.getPowerStateAsync();
-      report(!!state.lowPowerMode, 'initial');
-    } catch (e) {
-      report(false, 'initial-failed');
-    }
-  })();
   try {
     sub = Battery.addLowPowerModeListener(({ lowPowerMode }) => {
+      receivedChange = true;
       report(!!lowPowerMode, 'change');
     });
   } catch (e) {
     sub = null;
   }
+  (async () => {
+    try {
+      const state = await Battery.getPowerStateAsync();
+      // A live system event is newer than this asynchronous startup query.
+      if (!receivedChange) report(!!state.lowPowerMode, 'initial');
+    } catch (e) {
+      if (!receivedChange) report(false, 'initial-failed');
+    }
+  })();
   return () => {
-    if (sub && sub.remove) sub.remove();
+    active = false;
+    try {
+      if (sub && sub.remove) sub.remove();
+    } catch (e) {
+      // A disposed native emitter must not break foreground refresh/cleanup.
+    }
   };
 }
 

@@ -1,10 +1,11 @@
 package expo.modules.photomove
 
 import android.content.Context
+import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -18,18 +19,18 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
+import org.json.JSONObject
 
 /**
  * photoo-style in-place photo moving.
  *
- * With the "All files access" permission the file is moved with
- * File.renameTo (falling back to a stream copy that restores the original
- * mtime) and MediaScanner re-indexes both paths. The bytes, EXIF, taken
- * date and modified time are all untouched — only the location changes.
+ * With the "All files access" permission the MediaStore row's RELATIVE_PATH
+ * is updated in place. The row id, bytes, EXIF and every timestamp remain the
+ * same; unlike a filesystem rename + rescan, this does not create a new row
+ * with a new DATE_ADDED value.
  */
 class PhotoMoveModule : Module() {
   override fun definition() = ModuleDefinition {
@@ -37,6 +38,48 @@ class PhotoMoveModule : Module() {
 
     Function("cpuCores") {
       Runtime.getRuntime().availableProcessors()
+    }
+
+    // JS refuses to categorize on older binaries. Version 1 used a raw
+    // filesystem rename followed by MediaScanner, which some OEM galleries
+    // re-indexed with a new added/modified time.
+    Function("moveApiVersion") { 2 }
+
+    // Restoring with MediaLibrary.createAssetAsync creates a new row with
+    // today's DATE_ADDED/DATE_MODIFIED on Android. JS only enables restore
+    // when this metadata-preserving implementation is present.
+    Function("restoreApiVersion") { 1 }
+
+    AsyncFunction("getProtectedMetadata") { assetId: String ->
+      val context = appContext.reactContext ?: throw Exception("NO_CONTEXT")
+      val id = assetId.substringBefore('/').toLongOrNull()
+        ?: throw Exception("INVALID_ID")
+      val uri = ContentUris.withAppendedId(
+        MediaStore.Files.getContentUri("external"),
+        id
+      )
+      val snapshot = readMoveSnapshot(context, uri)
+        ?: throw Exception("NOT_FOUND")
+      val metadata = snapshotToMap(snapshot).toMutableMap()
+      val storageRoot = Environment.getExternalStorageDirectory().canonicalFile
+      val originalFile = File(snapshot.path).canonicalFile
+      val rootPrefix = storageRoot.absolutePath.trimEnd(File.separatorChar) + File.separator
+      metadata["originalDir"] = originalFile.parentFile?.absolutePath
+      metadata["pathRestorable"] = originalFile.absolutePath.startsWith(rootPrefix)
+      metadata
+    }
+
+    AsyncFunction("albumTimestampDigest") { albumId: String, mediaType: String ->
+      val context = appContext.reactContext ?: throw Exception("NO_CONTEXT")
+      albumTimestampDigest(context, albumId, mediaType)
+    }
+
+    AsyncFunction("restoreFromTrash") {
+        fileUri: String,
+        metadataJson: String,
+        originalDir: String? ->
+      val context = appContext.reactContext ?: throw Exception("NO_CONTEXT")
+      restoreOne(context, fileUri, metadataJson, originalDir)
     }
 
     Function("hasAllFilesPermission") {
@@ -342,14 +385,15 @@ class PhotoMoveModule : Module() {
         }
 
         while (c.moveToNext()) {
-          // DATE_ADDED is in SECONDS, DATE_TAKEN in MILLISECONDS — mixing the
-          // two silently files half the library under 1970.
+          // Match expo-media-library exactly: its Android `creationTime` is
+          // DATE_TAKEN, including zero when the provider has not populated
+          // it. Falling back to DATE_ADDED here gave one asset two different
+          // "creation" times depending on which cache/read path supplied it.
           val taken = if (takenC >= 0 && !c.isNull(takenC)) c.getLong(takenC) else 0L
-          val created = if (taken > 0) taken else c.getLong(addedC) * 1000L
           out.add(
             ScanRow(
               id = c.getLong(idC).toString(),
-              creationTime = created.toDouble(),
+              creationTime = taken.toDouble(),
               modificationTime = c.getLong(modC) * 1000.0,
               width = c.getInt(wC),
               height = c.getInt(hC),
@@ -364,6 +408,49 @@ class PhotoMoveModule : Module() {
     } catch (e: Exception) {
       // An unreadable collection yields nothing rather than failing the scan.
     }
+  }
+
+  /** Full raw timestamp digest for one MediaStore bucket or whole library. */
+  private fun albumTimestampDigest(
+    context: Context,
+    albumId: String,
+    mediaType: String
+  ): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    val collections = mutableListOf<Pair<Uri, Int>>()
+    if (mediaType != "video") {
+      collections.add(MediaStore.Images.Media.EXTERNAL_CONTENT_URI to 0)
+    }
+    if (mediaType != "photo") {
+      collections.add(MediaStore.Video.Media.EXTERNAL_CONTENT_URI to 1)
+    }
+    for ((collection, kind) in collections) {
+      val scoped = albumId.isNotBlank() && albumId != "all"
+      val selection = if (scoped) "${MediaStore.MediaColumns.BUCKET_ID} = ?" else null
+      val args = if (scoped) arrayOf(albumId) else null
+      val cursor = context.contentResolver.query(
+        collection,
+        arrayOf(
+          MediaStore.MediaColumns._ID,
+          MediaStore.MediaColumns.DATE_TAKEN,
+          MediaStore.MediaColumns.DATE_ADDED,
+          MediaStore.MediaColumns.DATE_MODIFIED
+        ),
+        selection,
+        args,
+        "${MediaStore.MediaColumns._ID} ASC"
+      ) ?: throw Exception("TIMESTAMP_QUERY_FAILED")
+      cursor.use { c ->
+        while (c.moveToNext()) {
+          val taken = if (c.isNull(1)) "null" else c.getLong(1).toString()
+          digest.update(
+            "$kind:${c.getLong(0)}:$taken:${c.getLong(2)}:${c.getLong(3)};"
+              .toByteArray(Charsets.UTF_8)
+          )
+        }
+      }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
   }
 
   /**
@@ -489,6 +576,175 @@ class PhotoMoveModule : Module() {
   }
 
   /**
+   * Restore an app-trash byte-for-byte copy as a new MediaStore row while
+   * explicitly carrying forward every original time field we recorded
+   * before deletion. The row is published only after byte and metadata
+   * verification; on any mismatch it is deleted and the trash copy remains.
+   */
+  private fun restoreOne(
+    context: Context,
+    fileUri: String,
+    metadataJson: String,
+    originalDir: String?
+  ): Map<String, Any?> {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+      return mapOf("ok" to false, "error" to "unsupported_android")
+    }
+    var inserted: Uri? = null
+    return try {
+      val source = File(fileUri.removePrefix("file://")).canonicalFile
+      if (!source.exists() || !source.isFile || source.length() <= 0L) {
+        return mapOf("ok" to false, "error" to "trash_file_missing")
+      }
+      val meta = JSONObject(metadataJson)
+      val displayName = meta.optString("displayName", "").trim()
+      if (
+        displayName.isEmpty() ||
+        displayName.contains('/') ||
+        displayName.contains('\\') ||
+        displayName == "." ||
+        displayName == ".."
+      ) {
+        return mapOf("ok" to false, "error" to "invalid_filename")
+      }
+
+      val storageRoot = Environment.getExternalStorageDirectory().canonicalFile
+      val targetDir = originalDir?.takeIf { it.isNotBlank() }?.let { File(it).canonicalFile }
+        ?: return mapOf("ok" to false, "error" to "original_folder_missing")
+      val rootPrefix = storageRoot.absolutePath.trimEnd(File.separatorChar) + File.separator
+      if (!targetDir.absolutePath.startsWith(rootPrefix)) {
+        return mapOf("ok" to false, "error" to "invalid_destination")
+      }
+      val relativePath = targetDir.absolutePath
+        .removePrefix(rootPrefix)
+        .replace(File.separatorChar, '/')
+        .trim('/') + "/"
+      if (File(targetDir, displayName).exists()) {
+        // A restore may have completed while the AsyncStorage index update
+        // failed. Treat the exact same row as an idempotent retry; a different
+        // file with the same name remains a hard collision.
+        val existing = findExistingRestored(context, targetDir, displayName)
+        if (existing != null && restoredMatchesMetadata(existing.second, meta)) {
+          return mapOf(
+            "ok" to true,
+            "id" to existing.first,
+            "path" to existing.second.path,
+            "alreadyRestored" to true
+          )
+        }
+        return mapOf("ok" to false, "error" to "name_collision")
+      }
+
+      val isVideo = meta.optString("mediaType", "photo") == "video"
+      val collection = if (isVideo) {
+        MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+      } else {
+        MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+      }
+      val dateAddedKnown = meta.has("dateAdded") && !meta.isNull("dateAdded")
+      val dateModifiedKnown = meta.has("dateModified") && !meta.isNull("dateModified")
+      val dateTakenKnown =
+        meta.optBoolean("dateTakenPresent", false) && meta.has("dateTaken")
+      val dateAdded = if (dateAddedKnown) meta.optLong("dateAdded") else 0L
+      val dateModified = if (dateModifiedKnown) meta.optLong("dateModified") else 0L
+      val dateTaken = if (dateTakenKnown) meta.optLong("dateTaken") else 0L
+      val fileMtime = meta.optLong("fileMtime", 0L)
+      val mimeType = meta.optString("mimeType", "").takeIf { it.isNotBlank() }
+      val expectedSize = meta.optLong("size", 0L)
+      val expectedWidth = meta.optInt("width", 0)
+      val expectedHeight = meta.optInt("height", 0)
+      val expectedDuration = meta.optLong("duration", 0L)
+      val expectedOrientation = meta.optInt("orientation", 0)
+      if (expectedSize <= 0L || source.length() != expectedSize) {
+        return mapOf("ok" to false, "error" to "trash_copy_incomplete")
+      }
+
+      val initial = ContentValues().apply {
+        put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+        put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+        mimeType?.let { put(MediaStore.MediaColumns.MIME_TYPE, it) }
+        if (dateAddedKnown) put(MediaStore.MediaColumns.DATE_ADDED, dateAdded)
+        if (dateModifiedKnown) put(MediaStore.MediaColumns.DATE_MODIFIED, dateModified)
+        if (dateTakenKnown) put(MediaStore.MediaColumns.DATE_TAKEN, dateTaken)
+        // Width, height, duration and orientation are provider-derived on
+        // several OEM builds and may be rejected when supplied on insert.
+        // The bytes must reproduce them after publish; strict verification
+        // below still rolls the row back if any value differs.
+        put(MediaStore.MediaColumns.IS_PENDING, 1)
+      }
+      inserted = context.contentResolver.insert(collection, initial)
+        ?: return mapOf("ok" to false, "error" to "insert_failed")
+
+      context.contentResolver.openFileDescriptor(inserted!!, "w")?.use { descriptor ->
+        FileInputStream(source).use { input ->
+          FileOutputStream(descriptor.fileDescriptor).use { output ->
+            input.copyTo(output)
+            output.flush()
+            output.fd.sync()
+          }
+        }
+      } ?: throw Exception("open_destination_failed")
+
+      var restored = readMoveSnapshot(context, inserted!!)
+      val restoredFile = restored?.path?.let { File(it) }
+      val expectedMtime = if (fileMtime > 0L) fileMtime else dateModified * 1000L
+      if (restoredFile != null && expectedMtime > 0L) {
+        restoredFile.setLastModified(expectedMtime)
+      }
+      val publish = ContentValues().apply {
+        put(MediaStore.MediaColumns.IS_PENDING, 0)
+        if (dateAddedKnown) put(MediaStore.MediaColumns.DATE_ADDED, dateAdded)
+        if (dateModifiedKnown) put(MediaStore.MediaColumns.DATE_MODIFIED, dateModified)
+        if (dateTakenKnown) put(MediaStore.MediaColumns.DATE_TAKEN, dateTaken)
+      }
+      if (context.contentResolver.update(inserted!!, publish, null, null) != 1) {
+        throw Exception("publish_failed")
+      }
+      restored = readMoveSnapshot(context, inserted!!)
+      // Some OEM providers finish their metadata pass just after IS_PENDING
+      // clears. Re-read after a short settling window before the JS side is
+      // allowed to remove the only backup copy.
+      Thread.sleep(300)
+      restored = readMoveSnapshot(context, inserted!!)
+      val finalFile = restored?.path?.let { File(it) }
+      val valid = restored != null &&
+        restored.size == expectedSize &&
+        restored.displayName == displayName &&
+        (!dateAddedKnown || restored.dateAdded == dateAdded) &&
+        (!dateModifiedKnown || restored.dateModified == dateModified) &&
+        restored.dateTaken == (if (dateTakenKnown) dateTaken else null) &&
+        (mimeType == null || restored.mimeType == mimeType) &&
+        (expectedWidth <= 0 || restored.width == expectedWidth) &&
+        (expectedHeight <= 0 || restored.height == expectedHeight) &&
+        (!isVideo || expectedDuration <= 0L || restored.duration == expectedDuration) &&
+        (isVideo || restored.orientation == expectedOrientation) &&
+        restored.mediaType == (if (isVideo) {
+          MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
+        } else {
+          MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE
+        }) &&
+        finalFile?.exists() == true &&
+        (expectedMtime <= 0L || finalFile.lastModified() == expectedMtime)
+      if (!valid) throw Exception("metadata_verification_failed")
+
+      mapOf(
+        "ok" to true,
+        "id" to (inserted!!.lastPathSegment ?: ""),
+        "path" to restored!!.path
+      )
+    } catch (e: Exception) {
+      inserted?.let {
+        try {
+          context.contentResolver.delete(it, null, null)
+        } catch (ignored: Exception) {
+          // Best effort: the unpublished row is invisible to other apps.
+        }
+      }
+      mapOf("ok" to false, "error" to (e.message ?: "restore_failed"))
+    }
+  }
+
+  /**
    * Move one asset. `destDirOverride` is an absolute directory path used to
    * UNDO a previous move: the original may well have lived in DCIM/Camera,
    * and re-deriving the destination from an album name would drop it into
@@ -501,26 +757,18 @@ class PhotoMoveModule : Module() {
     albumName: String,
     destDirOverride: String? = null
   ): Map<String, Any?> {
-    var dest: File? = null
-    var copied = false
     return try {
       val id = idStr.substringBefore('/').toLong()
       val filesUri = MediaStore.Files.getContentUri("external")
-      var srcPath: String? = null
-      context.contentResolver.query(
-        filesUri,
-        arrayOf(MediaStore.MediaColumns.DATA),
-        "${MediaStore.MediaColumns._ID} = ?",
-        arrayOf(id.toString()),
-        null
-      )?.use { c -> if (c.moveToFirst()) srcPath = c.getString(0) }
-
-      val source = srcPath?.let { File(it) }
-      if (source == null || !source.exists()) {
+      val itemUri = ContentUris.withAppendedId(filesUri, id)
+      val before = readMoveSnapshot(context, itemUri)
+      val source = before?.path?.let { File(it) }
+      if (before == null || source == null || !source.exists()) {
         return mapOf("id" to idStr, "ok" to false, "error" to "not_found")
       }
       val oldPath = source.absolutePath
       val oldDir = source.parentFile?.absolutePath
+      val originalFileMtime = source.lastModified()
 
       val destDir = if (!destDirOverride.isNullOrBlank()) {
         File(destDirOverride)
@@ -537,91 +785,249 @@ class PhotoMoveModule : Module() {
           safeName
         )
       }
-      if (!destDir.exists()) destDir.mkdirs()
-      var target = File(destDir, source.name)
-      var n = 1
-      while (target.exists() && n < 1000) {
-        target = File(destDir, "${source.nameWithoutExtension}_$n.${source.extension}")
-        n++
+      val storageRoot = Environment.getExternalStorageDirectory().canonicalFile
+      val canonicalDest = destDir.canonicalFile
+      val rootPrefix = storageRoot.absolutePath.trimEnd(File.separatorChar) + File.separator
+      if (!canonicalDest.absolutePath.startsWith(rootPrefix)) {
+        return mapOf("id" to idStr, "ok" to false, "error" to "invalid_destination")
       }
-      // Never let FileOutputStream truncate an existing user file when the
-      // bounded collision search is exhausted.
-      if (target.exists()) {
+      val relativePath = canonicalDest.absolutePath
+        .removePrefix(rootPrefix)
+        .replace(File.separatorChar, '/')
+        .trim('/') + "/"
+
+      val target = File(canonicalDest, before.displayName)
+      // A collision must fail instead of silently renaming the user's file.
+      // The filename is protected metadata too.
+      if (target.exists() && target.absolutePath != source.absolutePath) {
         return mapOf("id" to idStr, "ok" to false, "error" to "name_collision")
       }
-      dest = target
-
-      val originalMtime = source.lastModified()
-      val sourceLength = source.length()
-      var moved = source.renameTo(target)
-      if (!moved) {
-        // Cross-volume: stream copy, then verify BEFORE touching the source.
-        source.inputStream().use { input ->
-          FileOutputStream(target).use { output ->
-            input.copyTo(output)
-            output.flush()
-            // close() only guarantees the bytes reached the page cache. If
-            // the device loses power (or the process is killed) after the
-            // source is deleted but before the pages are written back, the
-            // photo is gone for good. Force it down first.
-            try {
-              output.fd.sync()
-            } catch (e: Exception) {
-              // sync unsupported on this fs — verification below still runs
-            }
-          }
-        }
-        copied = true
-        if (!target.exists() || target.length() != sourceLength) {
-          target.delete()
-          return mapOf("id" to idStr, "ok" to false, "error" to "copy_incomplete")
-        }
-        target.setLastModified(originalMtime)
-        // A failed delete used to still report success, leaving the SAME
-        // photo in two folders — which the duplicate detector then offered
-        // up for cleaning.
-        if (!source.delete()) {
-          target.delete()
-          return mapOf("id" to idStr, "ok" to false, "error" to "source_locked")
-        }
-        moved = true
+      if (target.absolutePath == source.absolutePath) {
+        return mapOf(
+          "id" to idStr,
+          "newId" to idStr,
+          "ok" to true,
+          "newPath" to source.absolutePath,
+          "oldPath" to oldPath,
+          "oldDir" to oldDir
+        )
       }
+
+      val moved = updateMoveRow(
+        context,
+        itemUri,
+        relativePath,
+        target.name,
+        before
+      )
+      // Do not retry with path-only values. Some providers reject writes to
+      // timestamp columns; moving anyway would reproduce the exact metadata
+      // regression this API exists to prevent.
       if (!moved) {
         return mapOf("id" to idStr, "ok" to false, "error" to "move_failed")
       }
 
-      // Re-index both paths and wait briefly for the destination callback.
-      // A filesystem move normally creates a NEW MediaStore id; returning
-      // the old id made immediate undo/delete target an entry that no longer
-      // existed.
-      val scanLatch = CountDownLatch(1)
-      var newId: String? = null
-      MediaScannerConnection.scanFile(
-        context,
-        arrayOf(oldPath, target.absolutePath),
-        null,
-        { path, uri ->
-          if (path == target.absolutePath) {
-            newId = uri?.lastPathSegment
-            scanLatch.countDown()
-          }
-        }
-      )
-      scanLatch.await(5, TimeUnit.SECONDS)
+      var after = readMoveSnapshot(context, itemUri)
+      val movedFile = after?.path?.let { File(it) }
+      if (movedFile != null && movedFile.exists() && movedFile.lastModified() != originalFileMtime) {
+        movedFile.setLastModified(originalFileMtime)
+        after = readMoveSnapshot(context, itemUri)
+      }
+      val fileMtimePreserved = movedFile?.lastModified() == originalFileMtime
+
+      if (
+        !sameProtectedMetadata(before, after) ||
+        movedFile == null ||
+        !movedFile.exists() ||
+        !fileMtimePreserved
+      ) {
+        // A vendor MediaStore provider changed protected metadata. Put the
+        // same row back immediately; never report a successful category move.
+        val oldRelative = File(oldPath).parentFile?.canonicalFile?.absolutePath
+          ?.removePrefix(rootPrefix)
+          ?.replace(File.separatorChar, '/')
+          ?.trim('/')
+          ?.plus("/")
+          ?: return mapOf("id" to idStr, "ok" to false, "error" to "rollback_path_missing")
+        updateMoveRow(
+          context,
+          itemUri,
+          oldRelative,
+          before.displayName,
+          before
+        )
+        File(oldPath).takeIf { it.exists() }?.setLastModified(originalFileMtime)
+        val restored = readMoveSnapshot(context, itemUri)
+        val restoredFile = restored?.path?.let { File(it) }
+        val rollbackOk = sameProtectedMetadata(before, restored) && restoredFile?.exists() == true
+        return mapOf(
+          "id" to idStr,
+          "ok" to false,
+          "error" to if (rollbackOk) "metadata_changed_rolled_back" else "metadata_rollback_failed"
+        )
+      }
+
+      val verified = after
+        ?: return mapOf("id" to idStr, "ok" to false, "error" to "verification_failed")
+
       mapOf(
         "id" to idStr,
-        "newId" to (newId ?: idStr),
+        "newId" to idStr,
         "ok" to true,
-        "newPath" to target.absolutePath,
+        "newPath" to verified.path,
         "oldPath" to oldPath,
         "oldDir" to oldDir
       )
     } catch (e: Exception) {
-      // A partially written destination must never survive: MediaScanner
-      // would index the truncated file and the user gets a corrupt photo
-      // next to the intact original.
-      if (copied) dest?.delete()
       mapOf("id" to idStr, "ok" to false, "error" to (e.message ?: "unknown"))
     }
+  }
+
+  private data class MoveSnapshot(
+    val path: String,
+    val displayName: String,
+    val size: Long,
+    val dateAdded: Long,
+    val dateModified: Long,
+    val dateTaken: Long?,
+    val mimeType: String?,
+    val width: Int,
+    val height: Int,
+    val duration: Long,
+    val orientation: Int,
+    val mediaType: Int
+  )
+
+  private fun findExistingRestored(
+    context: Context,
+    targetDir: File,
+    displayName: String
+  ): Pair<String, MoveSnapshot>? {
+    val targetPath = File(targetDir, displayName).canonicalPath
+    val collection = MediaStore.Files.getContentUri("external")
+    return context.contentResolver.query(
+      collection,
+      arrayOf(MediaStore.MediaColumns._ID),
+      "${MediaStore.MediaColumns.DATA} = ?",
+      arrayOf(targetPath),
+      null
+    )?.use { cursor ->
+      if (!cursor.moveToFirst()) return@use null
+      val id = cursor.getLong(0).toString()
+      val uri = ContentUris.withAppendedId(collection, cursor.getLong(0))
+      val snapshot = readMoveSnapshot(context, uri) ?: return@use null
+      id to snapshot
+    }
+  }
+
+  private fun restoredMatchesMetadata(snapshot: MoveSnapshot, meta: JSONObject): Boolean {
+    val dateTakenPresent = meta.optBoolean("dateTakenPresent", false)
+    val fileMtime = meta.optLong("fileMtime", 0L)
+    val file = File(snapshot.path)
+    return snapshot.displayName == meta.optString("displayName") &&
+      snapshot.size == meta.optLong("size", -1L) &&
+      snapshot.dateAdded == meta.optLong("dateAdded", -1L) &&
+      snapshot.dateModified == meta.optLong("dateModified", -1L) &&
+      (if (dateTakenPresent) snapshot.dateTaken == meta.optLong("dateTaken") else snapshot.dateTaken == null) &&
+      snapshot.mimeType == meta.optString("mimeType", "").takeIf { it.isNotBlank() } &&
+      snapshot.width == meta.optInt("width", 0) &&
+      snapshot.height == meta.optInt("height", 0) &&
+      snapshot.duration == meta.optLong("duration", 0L) &&
+      snapshot.orientation == meta.optInt("orientation", 0) &&
+      snapshot.mediaType == (if (meta.optString("mediaType") == "video") {
+        MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
+      } else {
+        MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE
+      }) &&
+      file.exists() && fileMtime > 0L && file.lastModified() == fileMtime
+  }
+
+  private fun snapshotToMap(snapshot: MoveSnapshot): Map<String, Any?> = mapOf(
+    "displayName" to snapshot.displayName,
+    "size" to snapshot.size.toDouble(),
+    "dateAdded" to snapshot.dateAdded.toDouble(),
+    "dateModified" to snapshot.dateModified.toDouble(),
+    "dateTakenPresent" to (snapshot.dateTaken != null),
+    "dateTaken" to snapshot.dateTaken?.toDouble(),
+    "mimeType" to snapshot.mimeType,
+    "width" to snapshot.width,
+    "height" to snapshot.height,
+    "duration" to snapshot.duration.toDouble(),
+    "orientation" to snapshot.orientation,
+    "mediaType" to if (
+      snapshot.mediaType == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
+    ) "video" else "photo",
+    "fileMtime" to File(snapshot.path).takeIf { it.exists() }?.lastModified()?.toDouble()
+  )
+
+  private fun readMoveSnapshot(context: Context, uri: Uri): MoveSnapshot? {
+    val projection = arrayOf(
+      MediaStore.MediaColumns.DATA,
+      MediaStore.MediaColumns.DISPLAY_NAME,
+      MediaStore.MediaColumns.SIZE,
+      MediaStore.MediaColumns.DATE_ADDED,
+      MediaStore.MediaColumns.DATE_MODIFIED,
+      MediaStore.MediaColumns.DATE_TAKEN,
+      MediaStore.MediaColumns.MIME_TYPE,
+      MediaStore.MediaColumns.WIDTH,
+      MediaStore.MediaColumns.HEIGHT,
+      MediaStore.Video.Media.DURATION,
+      MediaStore.Images.Media.ORIENTATION,
+      MediaStore.Files.FileColumns.MEDIA_TYPE
+    )
+    return context.contentResolver.query(uri, projection, null, null, null)?.use { c ->
+      if (!c.moveToFirst()) return@use null
+      val takenColumn = c.getColumnIndex(MediaStore.MediaColumns.DATE_TAKEN)
+      MoveSnapshot(
+        path = c.getString(0),
+        displayName = c.getString(1),
+        size = c.getLong(2),
+        dateAdded = c.getLong(3),
+        dateModified = c.getLong(4),
+        dateTaken = if (takenColumn >= 0 && !c.isNull(takenColumn)) c.getLong(takenColumn) else null,
+        mimeType = if (c.isNull(6)) null else c.getString(6),
+        width = c.getInt(7),
+        height = c.getInt(8),
+        duration = c.getLong(9),
+        orientation = c.getInt(10),
+        mediaType = c.getInt(11)
+      )
+    }
+  }
+
+  private fun updateMoveRow(
+    context: Context,
+    uri: Uri,
+    relativePath: String,
+    displayName: String,
+    snapshot: MoveSnapshot
+  ): Boolean {
+    return try {
+      val values = ContentValues().apply {
+        put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+        put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+        put(MediaStore.MediaColumns.DATE_ADDED, snapshot.dateAdded)
+        put(MediaStore.MediaColumns.DATE_MODIFIED, snapshot.dateModified)
+        snapshot.dateTaken?.let { put(MediaStore.MediaColumns.DATE_TAKEN, it) }
+      }
+      context.contentResolver.update(uri, values, null, null) == 1
+    } catch (e: Exception) {
+      false
+    }
+  }
+
+  private fun sameProtectedMetadata(before: MoveSnapshot, after: MoveSnapshot?): Boolean {
+    return after != null &&
+      before.size == after.size &&
+      before.dateAdded == after.dateAdded &&
+      before.dateModified == after.dateModified &&
+      before.dateTaken == after.dateTaken &&
+      before.displayName == after.displayName &&
+      before.mimeType == after.mimeType &&
+      before.width == after.width &&
+      before.height == after.height &&
+      before.duration == after.duration &&
+      before.orientation == after.orientation &&
+      before.mediaType == after.mediaType
   }
 }

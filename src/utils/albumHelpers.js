@@ -11,7 +11,9 @@ export const ALL_ALBUM_ID = 'all';
 const PAGE_SIZE = 200;
 const MAX_ASSETS = 20000; // safety cap for very large libraries
 const ALBUMS_TTL_MS = 30000;
-const FINGERPRINT_TTL_MS = 5000;
+// Media-library change events invalidate this immediately. A longer fallback
+// avoids re-reading a full Android timestamp digest on repeated focus events.
+const FINGERPRINT_TTL_MS = 30000;
 // A follow-up page slower than this is worth a log line; the rest are noise.
 const SLOW_PAGE_MS = 150;
 const albumsMemoryCache = new Map();
@@ -26,6 +28,7 @@ const assetInfoMemoryCache = new Map();
 // make revisiting suggestion groups instant without retaining an unbounded
 // copy of every asset inspected during the process lifetime.
 const ASSET_INFO_CACHE_LIMIT = 2000;
+const ASSET_INFO_TTL_MS = 5 * 60 * 1000;
 const assetFetchPromises = new Map();
 const SNAPSHOT_SAMPLE = 60; // size sampling cap when there is no native query
 const SNAPSHOT_CONCURRENCY = 6;
@@ -47,19 +50,23 @@ const MAX_CACHED_LIST = 4800;
 export const MAX_ASSETS_BY_IDS = 600;
 
 function getCachedAssetInfo(id) {
-  const value = assetInfoMemoryCache.get(id);
-  if (!value) return null;
+  const entry = assetInfoMemoryCache.get(id);
+  if (!entry) return null;
+  if (Date.now() - entry.at > ASSET_INFO_TTL_MS) {
+    assetInfoMemoryCache.delete(id);
+    return null;
+  }
   // Map iteration order is insertion order: reinserting makes this the most
   // recently used entry without maintaining a second linked structure.
   assetInfoMemoryCache.delete(id);
-  assetInfoMemoryCache.set(id, value);
-  return value;
+  assetInfoMemoryCache.set(id, entry);
+  return entry.value;
 }
 
 function cacheAssetInfo(id, value) {
   if (!value) return;
   assetInfoMemoryCache.delete(id);
-  assetInfoMemoryCache.set(id, value);
+  assetInfoMemoryCache.set(id, { at: Date.now(), value });
   while (assetInfoMemoryCache.size > ASSET_INFO_CACHE_LIMIT) {
     const oldest = assetInfoMemoryCache.keys().next().value;
     assetInfoMemoryCache.delete(oldest);
@@ -481,6 +488,29 @@ function buildIndex(raw) {
   };
 }
 
+async function getAlbumTimestampDigest(albumId, mediaType, priority) {
+  if (Platform.OS !== 'android' || Number(Platform.Version) < 29) return null;
+  // eslint-disable-next-line global-require
+  const PhotoMove = require('../../modules/photo-move');
+  if (!PhotoMove.hasAlbumTimestampDigest()) return null;
+  try {
+    return await runMediaWork(
+      () => PhotoMove.albumTimestampDigest(albumId || ALL_ALBUM_ID, mediaType),
+      priority
+    );
+  } catch (e) {
+    log('time', `album timestamp digest failed ${mediaType}/${albumId}`);
+    return null;
+  }
+}
+
+function hasNativeAlbumTimestampDigest() {
+  if (Platform.OS !== 'android' || Number(Platform.Version) < 29) return false;
+  // eslint-disable-next-line global-require
+  const PhotoMove = require('../../modules/photo-move');
+  return PhotoMove.hasAlbumTimestampDigest();
+}
+
 /** The cached scan if it is warm — never triggers one. */
 function peekLibraryIndex(mediaType = 'all') {
   if (!scanCache) return null;
@@ -576,6 +606,7 @@ export function invalidateLibraryIndex() {
   scanPromise = null;
   fingerprintMemoryCache.clear();
   albumsMemoryCache.clear();
+  assetInfoMemoryCache.clear();
 }
 
 /**
@@ -602,6 +633,7 @@ export function pruneLibraryIndex(deletedIds = []) {
   // Ids arrive in expo-media-library's "<id>/L0/001" form on iOS; the scan is
   // keyed by the bare MediaStore/PhotoKit id.
   const gone = new Set(deletedIds.map((id) => String(id).split('/')[0]));
+  for (const id of deletedIds) assetInfoMemoryCache.delete(id);
   const old = scanCache.index;
   const ids = [];
   const creationTime = [];
@@ -1066,14 +1098,40 @@ export async function getAlbumFingerprint(
       first: 1,
       sortBy: [[MediaLibrary.SortBy.modificationTime, true]],
     };
-    const [page, oldestPage] = await runMediaWork(
-      () =>
-        Promise.all([
-          MediaLibrary.getAssetsAsync(options),
-          MediaLibrary.getAssetsAsync(oldestOptions),
-        ]),
-      priority
-    );
+    // DATE_TAKEN can be filled in later by an OEM media provider without
+    // changing DATE_MODIFIED. Track both creation-time edges as well, or a
+    // persisted list can keep an old timestamp and suddenly "refresh" when
+    // another path resolves the same asset live by id.
+    const creationNewestOptions = {
+      ...options,
+      first: 3,
+      sortBy: [[MediaLibrary.SortBy.creationTime, false]],
+    };
+    const creationOldestOptions = {
+      ...options,
+      first: 1,
+      sortBy: [[MediaLibrary.SortBy.creationTime, true]],
+    };
+    const useNativeTimestampDigest = hasNativeAlbumTimestampDigest();
+    const mediaQueries = [
+      MediaLibrary.getAssetsAsync(options),
+      MediaLibrary.getAssetsAsync(oldestOptions),
+    ];
+    if (!useNativeTimestampDigest) {
+      mediaQueries.push(
+        MediaLibrary.getAssetsAsync(creationNewestOptions),
+        MediaLibrary.getAssetsAsync(creationOldestOptions)
+      );
+    }
+    const [pages, timestampDigest] = await Promise.all([
+      runMediaWork(() => Promise.all(mediaQueries), priority),
+      useNativeTimestampDigest
+        ? getAlbumTimestampDigest(albumId, mediaType, priority)
+        : Promise.resolve(null),
+    ]);
+    const [page, oldestPage] = pages;
+    const creationNewestPage = pages[2] || { assets: [] };
+    const creationOldestPage = pages[3] || { assets: [] };
     const newest = page.assets[0];
     const oldest = oldestPage.assets[0];
     const result = {
@@ -1084,6 +1142,14 @@ export async function getAlbumFingerprint(
       newestId: newest ? newest.id : null,
       oldestId: oldest ? oldest.id : null,
       edgeIds: page.assets.map((a) => a.id).join('|'),
+      creationEdgeIds: creationNewestPage.assets.map((a) => a.id).join('|'),
+      creationEdgeTimes: creationNewestPage.assets
+        .map((a) => Number(a.creationTime) || 0)
+        .join('|'),
+      oldestCreationId: creationOldestPage.assets[0]?.id || null,
+      oldestCreationTime:
+        Number(creationOldestPage.assets[0]?.creationTime) || 0,
+      timestampDigest,
     };
     log(
       'perf',
@@ -1187,7 +1253,10 @@ export function buildYearHistogram(assets) {
 // ---- Persistent asset-list cache (Fossify/photoo-style local index) ----
 // The full asset list of an album, keyed by fingerprint: when the album is
 // unchanged, cleaning screens open with ZERO MediaStore scanning.
-const LIST_PREFIX = 'asset_list_v1_';
+// v2 adds capture-time edges to the fingerprint. A v1 list could stay
+// "fresh" after an OEM MediaStore provider populated/changed DATE_TAKEN,
+// making the cleaning card and EXIF sheet disagree until an unrelated edit.
+const LIST_PREFIX = 'asset_list_v2_';
 
 function slimAsset(a) {
   return {
@@ -1225,10 +1294,25 @@ export async function getCachedAssetList(
       fingerprint.latestModificationTime !== fp.latestModificationTime ||
       fingerprint.newestId !== fp.newestId ||
       fingerprint.oldestId !== fp.oldestId ||
-      fingerprint.edgeIds !== fp.edgeIds
+      fingerprint.edgeIds !== fp.edgeIds ||
+      fingerprint.creationEdgeIds !== fp.creationEdgeIds ||
+      fingerprint.creationEdgeTimes !== fp.creationEdgeTimes ||
+      fingerprint.oldestCreationId !== fp.oldestCreationId ||
+      fingerprint.oldestCreationTime !== fp.oldestCreationTime ||
+      fingerprint.timestampDigest !== fp.timestampDigest
     ) {
+      const creationChanged =
+        fingerprint.creationEdgeIds !== fp.creationEdgeIds ||
+        fingerprint.creationEdgeTimes !== fp.creationEdgeTimes ||
+        fingerprint.oldestCreationId !== fp.oldestCreationId ||
+        fingerprint.oldestCreationTime !== fp.oldestCreationTime ||
+        fingerprint.timestampDigest !== fp.timestampDigest;
+      if (creationChanged) {
+        log('time', `capture fingerprint changed ${mediaType}/${albumId}`);
+      }
       return null; // album changed — caller rescans (and re-saves)
     }
+    if (Platform.OS === 'android' && !fp.timestampDigest) return null;
     return assets;
   } catch (e) {
     return null;
@@ -1249,10 +1333,17 @@ export async function saveCachedAssetList(albumId, mediaType, assets) {
     // Only COMPLETE lists may be cached: a partial index would silently
     // hide the rest of the album from the cleaning flow.
     if (fp.assetCount && assets.length !== fp.assetCount) return;
+    // Android persistent lists are only safe when every raw timestamp can be
+    // verified. Older APKs keep working, but skip this cache rather than
+    // serve stale dates that look like the app changed the gallery.
+    if (Platform.OS === 'android' && !fp.timestampDigest) return;
     const slim = [...assets]
       .sort((a, b) => (b.creationTime || 0) - (a.creationTime || 0))
       .map(slimAsset);
-    const payload = JSON.stringify({ fingerprint: fp, assets: slim });
+    const payload = JSON.stringify({
+      fingerprint: fp,
+      assets: slim,
+    });
     // Byte length, not String.length: the payload is stored as UTF-8 and a
     // Chinese album/file name costs 3 bytes per character, so the old
     // character-count guard let ~2.2 MB payloads through — which Android

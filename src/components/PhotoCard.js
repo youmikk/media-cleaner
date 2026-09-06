@@ -101,7 +101,11 @@ function VideoBody({ asset, active = true, onLoadError }) {
   const errorFiredRef = useRef(false);
   const player = useVideoPlayer(asset.uri, (p) => {
     p.loop = true;
-    p.muted = true; // autoplay politely muted; native controls can unmute
+    // This is the user's cleaning screen, not a silent preview feed. Keeping
+    // `muted=true` here made Android stay silent even after the user opened
+    // sound in the native controls.
+    p.muted = false;
+    p.volume = 1;
     // ExoPlayer otherwise buffers roughly 50 seconds. One live player with
     // the default is still enough to OOM on a large 4K video.
     try {
@@ -151,7 +155,7 @@ function VideoBody({ asset, active = true, onLoadError }) {
 }
 
 /** Still image, or its Live Photo form once the paired video resolves. */
-function StillBody({ asset, inactive }) {
+function StillBody({ asset, inactive, onLoadError }) {
   const { settings } = useSettings();
   const liveSource = usePairedLivePhoto(asset, !inactive);
   const liveRef = useRef(null);
@@ -209,6 +213,7 @@ function StillBody({ asset, inactive }) {
       cachePolicy="memory-disk"
       priority="high" // the on-screen photo beats any queued prefetch
       transition={120}
+      onError={onLoadError}
     />
   );
 }
@@ -235,7 +240,11 @@ export default function PhotoCard({
       ) : isVideo ? (
         <VideoBody asset={asset} active={active} onLoadError={onLoadError} />
       ) : (
-        <StillBody asset={asset} inactive={inactive} />
+        <StillBody
+          asset={asset}
+          inactive={inactive}
+          onLoadError={onLoadError}
+        />
       )}
       {isVideo && (
         <View style={styles.liveBadge}>

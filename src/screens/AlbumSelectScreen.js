@@ -1,19 +1,22 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   InteractionManager,
+  ScrollView,
   View,
   Text,
   StyleSheet,
   useWindowDimensions,
+  Platform,
 } from 'react-native';
-import { useFocusEffect } from '@react-navigation/native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
 import AlbumPicker from '../components/AlbumPicker';
 import TimePicker from '../components/TimePicker';
 import GroupSizeStepper from '../components/GroupSizeStepper';
 import StackedCards from '../components/StackedCards';
 import AnalysisProgress from '../components/AnalysisProgress';
+import GlassBackdrop from '../components/GlassBackdrop';
 import analyzer from '../utils/chunkedAnalyzer';
 import * as sessionManager from '../utils/sessionManager';
 import * as reviewedStore from '../utils/reviewedStore';
@@ -32,6 +35,7 @@ import {
   ALL_ALBUM_ID,
 } from '../utils/albumHelpers';
 import { log } from '../utils/logger';
+import { getTabBarLayout } from '../utils/tabBarLayout';
 
 // Preview pool cached per album. Three are shown; the extras exist so
 // "random" order can show a DIFFERENT three without a rescan.
@@ -181,7 +185,12 @@ export default function AlbumSelectScreen({
   cleaningRoute = 'Cleaning',
 }) {
   const { colors, t, settings, setSetting } = useSettings();
-  const { width } = useWindowDimensions();
+  const dimensions = useWindowDimensions();
+  const { width } = dimensions;
+  const tabBarLayout = getTabBarLayout(dimensions, useSafeAreaInsets());
+  const focused = useIsFocused();
+  const analysisSource = useId();
+  const [analysisHeight, setAnalysisHeight] = useState(88);
   const isVideo = mediaType === 'video';
   const groupSizeKey = isVideo ? 'videoGroupSize' : 'groupSize';
   const groupSize = settings[groupSizeKey] || 5;
@@ -534,7 +543,13 @@ export default function AlbumSelectScreen({
           cached.fingerprint.latestModificationTime === fp.latestModificationTime &&
           cached.fingerprint.newestId === fp.newestId &&
           cached.fingerprint.oldestId === fp.oldestId &&
-          cached.fingerprint.edgeIds === fp.edgeIds
+          cached.fingerprint.edgeIds === fp.edgeIds &&
+          cached.fingerprint.creationEdgeIds === fp.creationEdgeIds &&
+          cached.fingerprint.creationEdgeTimes === fp.creationEdgeTimes &&
+          cached.fingerprint.oldestCreationId === fp.oldestCreationId &&
+          cached.fingerprint.oldestCreationTime === fp.oldestCreationTime &&
+          cached.fingerprint.timestampDigest === fp.timestampDigest &&
+          (Platform.OS !== 'android' || !!fp.timestampDigest)
         ) {
           return; // unchanged — ZERO scanning this visit
         }
@@ -592,8 +607,7 @@ export default function AlbumSelectScreen({
         if (!alive) return;
         if (!cache || stale) {
           startTimer = setTimeout(() => {
-            if (alive)
-              analyzer.analyzeAlbum(albumId, { mediaType: 'photo', force: true });
+            if (alive) analyzer.analyzeAlbum(albumId, { mediaType: 'photo' });
           }, 2500);
         }
       })();
@@ -685,84 +699,104 @@ export default function AlbumSelectScreen({
       : previewThumbs;
   // Front card is the hero; the fan needs ~1.4x this much width around it.
   const cardW = Math.min(Math.round(width * 0.58), 250);
+  const analysisVisible = analysisState?.running && analysisState.total > 0;
 
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.screen, { backgroundColor: colors.background }]}>
-      <Text style={[styles.header, { color: colors.text }]}>
-        {t(isVideo ? 'clean_videos' : 'clean_photos')}
-      </Text>
+      <View style={styles.content}>
+        {/* Let short windows / large system text scroll above the floating bar;
+            compressing a fixed-height preview hides the count and start hint. */}
+        <GlassBackdrop sourceKey={analysisSource} style={{ backgroundColor: colors.background }}>
+          <ScrollView
+            style={styles.homeScroll}
+            contentContainerStyle={[styles.homeContent, {
+              paddingBottom: tabBarLayout.clearance + (analysisVisible ? analysisHeight + 12 : 0),
+            }]}
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={styles.controls}>
+              <View style={styles.primaryControls}>
+                <AlbumPicker
+                  albums={albums}
+                  selected={albumId}
+                  progressByAlbum={progressByAlbum}
+                  progressLoadingByAlbum={progressLoadingByAlbum}
+                  totalCounts={totalCounts}
+                  onVisibleAlbums={loadVisibleProgress}
+                  onSelect={(a) => {
+                    if (a.id !== albumId) setSummary(null); // don't show stale thumbs
+                    setAlbumId(a.id);
+                    setTimeFilter(null);
+                  }}
+                />
+                <GroupSizeStepper
+                  value={groupSize}
+                  onChange={(v) => setSetting(groupSizeKey, v)}
+                />
+              </View>
+              <View style={styles.timeControl}>
+                <TimePicker
+                  years={summary ? summary.years : []}
+                  value={timeFilter}
+                  onSelect={setTimeFilter}
+                />
+              </View>
+            </View>
 
-      <View style={styles.controls}>
-        <AlbumPicker
-          albums={albums}
-          selected={albumId}
-          progressByAlbum={progressByAlbum}
-          progressLoadingByAlbum={progressLoadingByAlbum}
-          totalCounts={totalCounts}
-          onVisibleAlbums={loadVisibleProgress}
-          onSelect={(a) => {
-            if (a.id !== albumId) setSummary(null); // don't show stale thumbs
-            setAlbumId(a.id);
-            setTimeFilter(null);
-          }}
-        />
-        <TimePicker
-          years={summary ? summary.years : []}
-          value={timeFilter}
-          onSelect={setTimeFilter}
-        />
-        <GroupSizeStepper
-          value={groupSize}
-          onChange={(v) => setSetting(groupSizeKey, v)}
+            <View style={styles.centerArea}>
+              <StackedCards
+                items={thumbs}
+                cardWidth={cardW}
+                isVideo={isVideo}
+                onPress={startCleaning}
+              />
+              <Text style={[styles.count, { color: colors.subtext }]}>
+                {filteredCount === 0
+                  ? t(isVideo ? 'no_videos' : 'no_photos')
+                  : t(isVideo ? 'video_count' : 'photo_count', { count: filteredCount })}
+              </Text>
+              {filteredCount > 0 && (
+                <Text style={[styles.hint, { color: colors.subtext }]}>
+                  {t('start_hint')}
+                </Text>
+              )}
+            </View>
+          </ScrollView>
+        </GlassBackdrop>
+
+        <AnalysisProgress
+          state={analysisState}
+          mediaType={mediaType}
+          onCancel={() => analyzer.cancel(albumId)}
+          androidSource={analysisSource}
+          effectEnabled={focused}
+          onLayout={({ nativeEvent }) => setAnalysisHeight(Math.ceil(nativeEvent.layout.height))}
         />
       </View>
-
-      <View style={styles.centerArea}>
-        <StackedCards
-          items={thumbs}
-          cardWidth={cardW}
-          isVideo={isVideo}
-          onPress={startCleaning}
-        />
-        <Text style={[styles.count, { color: colors.subtext }]}>
-          {filteredCount === 0
-            ? t(isVideo ? 'no_videos' : 'no_photos')
-            : t(isVideo ? 'video_count' : 'photo_count', { count: filteredCount })}
-        </Text>
-        {filteredCount > 0 && (
-          <Text style={[styles.hint, { color: colors.subtext }]}>
-            {t('start_hint')}
-          </Text>
-        )}
-      </View>
-
-      <AnalysisProgress
-        state={analysisState}
-        mediaType={mediaType}
-        onCancel={() => analyzer.cancel(albumId)}
-      />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   screen: { flex: 1, paddingHorizontal: 16 },
-  header: { fontSize: 30, fontWeight: '800', marginTop: 12, marginBottom: 14 },
+  content: { flex: 1 },
+  homeScroll: { flex: 1 },
+  homeContent: { flexGrow: 1 },
   controls: {
+    alignItems: 'stretch',
+    gap: 8,
+    marginTop: 12,
+  },
+  primaryControls: {
     flexDirection: 'row',
-    justifyContent: 'flex-start',
     alignItems: 'center',
-    // Three controls of identical height (see pickerButtonStyle). They wrap
-    // rather than squeeze on narrow screens; the card area below simply gets
-    // whatever height is left, so both tabs still agree with each other.
-    flexWrap: 'wrap',
     gap: 8,
   },
+  timeControl: { alignSelf: 'flex-start' },
   centerArea: {
-    flex: 1,
+    flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 90,
     marginTop: 4,
   },
   count: { marginTop: 26, fontSize: 15, fontWeight: '700' },

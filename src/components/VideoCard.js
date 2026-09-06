@@ -31,6 +31,7 @@ export default function VideoCard({
   const player = useVideoPlayer(asset.uri, (p) => {
     p.loop = true;
     p.muted = false;
+    p.volume = 1;
     p.timeUpdateEventInterval = 0.25;
     // OOM guard (Android OutOfMemoryError in the feed): ExoPlayer's default
     // load control pre-buffers ~50s of media — for high-bitrate videos that

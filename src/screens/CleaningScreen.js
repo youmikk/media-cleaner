@@ -41,7 +41,6 @@ import GlowingTrashBar from '../components/GlowingTrashBar';
 import EXIFModal from '../components/EXIFModal';
 import SimilarModal from '../components/SimilarModal';
 import PhotoViewer from '../components/PhotoViewer';
-import MoveSheet from '../components/MoveSheet';
 import AlbumChips from '../components/AlbumChips';
 import GroupConfirmSheet from '../components/GroupConfirmSheet';
 import IconButton from '../components/IconButton';
@@ -52,7 +51,7 @@ import * as sessionManager from '../utils/sessionManager';
 import * as reviewedStore from '../utils/reviewedStore';
 import * as suggestionStore from '../utils/suggestionStore';
 import * as PhotoMove from '../../modules/photo-move';
-import { log } from '../utils/logger';
+import { log, logSync } from '../utils/logger';
 import analyzer from '../utils/chunkedAnalyzer';
 import { reverseGeocode } from '../utils/geocode';
 import {
@@ -80,7 +79,6 @@ try {
 }
 
 const SWIPE_X = 70;
-const MOVE_THRESHOLD = 120;
 // Plain ease-out transition — no spring, no wobble: the card just glides
 // to its resting position and stops.
 const EASE = { duration: 200, easing: Easing.out(Easing.cubic) };
@@ -98,8 +96,9 @@ function sortGroup(g) {
   return [...g].sort((a, b) => (b.creationTime || 0) - (a.creationTime || 0));
 }
 
-function makeGroups(list, size) {
-  return chunk(list, size).map(sortGroup);
+function makeGroups(list, size, preserveOrder = false) {
+  const groups = chunk(list, size);
+  return preserveOrder ? groups : groups.map(sortGroup);
 }
 
 function shuffle(list) {
@@ -203,7 +202,6 @@ export default function CleaningScreen({ route, navigation }) {
   const [showSimilar, setShowSimilar] = useState(false);
   // Full-screen pinch/pan/double-tap viewer for the photo under the finger.
   const [showZoom, setShowZoom] = useState(false);
-  const [showMove, setShowMove] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [advancing, setAdvancing] = useState(false);
   const advancingRef = useRef(false);
@@ -212,8 +210,8 @@ export default function CleaningScreen({ route, navigation }) {
   const [toast, setToast] = useState(null);
   const [realAlbums, setRealAlbums] = useState([]); // for the quick chips
   const [appActive, setAppActive] = useState(AppState.currentState === 'active');
-  const [videoUriById, setVideoUriById] = useState({});
-  const videoFallbacksRef = useRef(new Map());
+  const [mediaUriById, setMediaUriById] = useState({});
+  const mediaFallbacksRef = useRef(new Map());
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
@@ -239,16 +237,16 @@ export default function CleaningScreen({ route, navigation }) {
     };
   }, []);
 
-  const handleVideoLoadError = useCallback(async (asset) => {
+  const handleMediaLoadError = useCallback(async (asset) => {
     if (!asset) return;
     const applyNext = (entry) => {
       const next = entry.candidates[entry.index];
       entry.index += 1;
       if (!next || !aliveRef.current) return false;
-      setVideoUriById((current) => ({ ...current, [asset.id]: next }));
+      setMediaUriById((current) => ({ ...current, [asset.id]: next }));
       return true;
     };
-    const existing = videoFallbacksRef.current.get(asset.id);
+    const existing = mediaFallbacksRef.current.get(asset.id);
     if (existing) {
       applyNext(existing);
       return;
@@ -264,9 +262,9 @@ export default function CleaningScreen({ route, navigation }) {
           : null,
       ].filter((uri) => uri && uri !== asset.uri))];
       const entry = { candidates, index: 0 };
-      videoFallbacksRef.current.set(asset.id, entry);
-      // PhotoCard is keyed by URI, so every candidate remounts the player.
-      // Calling replace() on a live/releasing player can crash natively.
+      mediaFallbacksRef.current.set(asset.id, entry);
+      // PhotoCard is keyed by URI. Videos remount instead of calling replace
+      // on a live player; photos get a clean decoder/cache instance too.
       applyNext(entry);
     } catch (e) {
       // No alternate URI. Keep the poster instead of retrying forever.
@@ -547,12 +545,21 @@ export default function CleaningScreen({ route, navigation }) {
         // Explicit subset (suggestions) — small, load directly.
         const assets = await getAssetsByIds(assetIds);
         if (!alive) return;
-        const ordered =
-          settings.order === 'random' && !resuming ? shuffle(assets) : assets;
+        // Largest Files is a ranked result. The general cleaning flow sorts
+        // groups by capture time, which could put the actual largest item at
+        // the end of its group. Keep this suggestion's explicit size order.
+        const preserveSuggestionOrder = suggestionKey === 'largest';
+        const ordered = preserveSuggestionOrder
+          ? [...assets].sort(
+              (a, b) => (Number(sizesById?.[b.id]) || 0) - (Number(sizesById?.[a.id]) || 0)
+            )
+          : settings.order === 'random' && !resuming
+            ? shuffle(assets)
+            : assets;
         allRef.current = ordered;
         cursorRef.current = { after: undefined, hasNext: false };
         orderRef.current = ordered.map((a) => a.id);
-        setGroups(makeGroups(ordered, groupSize));
+        setGroups(makeGroups(ordered, groupSize, preserveSuggestionOrder));
         initializedRef.current = true;
       } else if (resuming && pending.segmented && !pending.legacyOrder) {
         // Large libraries persist only the small unprocessed window plus the
@@ -1085,10 +1092,6 @@ export default function CleaningScreen({ route, navigation }) {
     afterRemovalAdvance(visible.length - 1);
   }, [current, mark, visible.length, afterRemovalAdvance]);
 
-  const onSwipeDown = useCallback(() => {
-    if (current) setShowMove(true);
-  }, [current]);
-
   // ---- System share sheet for the photo on screen ----
   // getAssetInfoAsync first: `asset.uri` can be a ph:// or content:// handle
   // that other apps cannot open, while localUri is a real file path.
@@ -1119,12 +1122,10 @@ export default function CleaningScreen({ route, navigation }) {
     next: onSwipeNext,
     prev: onSwipePrev,
     del: onSwipeDelete,
-    down: onSwipeDown,
   };
   const callNext = useCallback(() => handlersRef.current.next(), []);
   const callPrev = useCallback(() => handlersRef.current.prev(), []);
   const callDel = useCallback(() => handlersRef.current.del(), []);
-  const callDown = useCallback(() => handlersRef.current.down(), []);
 
   // Captured per render and read inside the worklets below.
   const restOffset = -currentIdx * SCREEN_W;
@@ -1133,7 +1134,7 @@ export default function CleaningScreen({ route, navigation }) {
   const hasPrev = currentIdx > 0;
 
   const pan = Gesture.Pan()
-    .enabled(!showConfirm && !showMove && !showSimilar && !showExif && !showZoom)
+    .enabled(!showConfirm && !showSimilar && !showExif && !showZoom)
     .onStart(() => {
       'worklet';
       // Claim the vertical axis for THIS card only.
@@ -1190,9 +1191,6 @@ export default function CleaningScreen({ route, navigation }) {
         ty.value = withTiming(-SCREEN_H, { duration: 140 }, (finished) => {
           if (finished) runOnJS(callDel)();
         });
-      } else if (e.translationY > MOVE_THRESHOLD) {
-        ty.value = withTiming(0, EASE);
-        runOnJS(callDown)();
       } else {
         ty.value = withTiming(0, EASE);
       }
@@ -1205,7 +1203,7 @@ export default function CleaningScreen({ route, navigation }) {
   // different inputs); the threshold keeps an incidental two-finger drag
   // from opening the viewer.
   const pinch = Gesture.Pinch()
-    .enabled(!showConfirm && !showMove && !showSimilar && !showExif && !showZoom)
+    .enabled(!showConfirm && !showSimilar && !showExif && !showZoom)
     .onBegin(() => {
       'worklet';
       zoomArmed.value = true;
@@ -1224,7 +1222,7 @@ export default function CleaningScreen({ route, navigation }) {
 
   const photoGesture = Gesture.Simultaneous(pan, pinch);
 
-  // ---- Move flow (shared by swipe-down sheet AND the quick chips) ----
+  // ---- Move flow (triggered by the bottom category chips) ----
   // Categorizing ≠ deleting: the photo STAYS in the cleaning flow; only the
   // ✓ chip switches to the new album. After categorizing, the flow ADVANCES
   // to the next photo automatically; tapping the ✓ chip again UNDOES it.
@@ -1233,6 +1231,10 @@ export default function CleaningScreen({ route, navigation }) {
   // Categorizing on Android REQUIRES the in-place move permission — no
   // permission means the tap prompts for it instead of moving anything.
   const maybeOfferNativeMove = () => {
+    if (!PhotoMove.hasNativeMove()) {
+      showAppAlert(t('safe_move_unavailable_title'), t('safe_move_unavailable_message'));
+      return;
+    }
     showAppAlert(t('native_move_title'), t('native_move_message'), [
       { text: t('cancel'), style: 'cancel' },
       {
@@ -1299,8 +1301,9 @@ export default function CleaningScreen({ route, navigation }) {
         PhotoMove.hasNativeMove() &&
         PhotoMove.hasAllFilesPermission()
       ) {
-        // photoo-style TRUE in-place move: bytes, EXIF and mtime all
-        // untouched — no copy, no pending deletion.
+        // Safe move v2 updates the existing MediaStore row and rejects the
+        // operation if any protected timestamp or byte size changes.
+        await logSync('move', 'category start safeApi=2 count=1');
         const [res] = await PhotoMove.moveToAlbum([id], album.title);
         if (!res || !res.ok) throw new Error(res && res.error);
         asset.uri = 'file://' + res.newPath; // keep displaying the photo
@@ -1317,14 +1320,14 @@ export default function CleaningScreen({ route, navigation }) {
           fromAlbumTitle:
             (realAlbums.find((a) => a.id === fromAlbumId) || {}).title || null,
         };
-      } else if (Platform.OS === 'android' && PhotoMove.hasNativeMove()) {
-        // Native module present but "All files access" not granted yet:
-        // prompt once and do nothing — categorizing only ever uses the
-        // info-preserving in-place move.
+      } else if (Platform.OS === 'android') {
+        // Old binaries and Expo Go must not fall through to the generic
+        // Android move: older implementations can recreate the MediaStore
+        // row and change the user's gallery time.
         maybeOfferNativeMove();
         return;
       } else {
-        // iOS (collections — file untouched) or Expo Go dev fallback.
+        // iOS collections only; the underlying file is untouched.
         await moveAssetsToAlbum([current], album);
         overrideHistoryRef.current[id] = { fromAlbumId, toAlbumId: album.id };
       }
@@ -1346,15 +1349,11 @@ export default function CleaningScreen({ route, navigation }) {
       // skipped an unseen photo.
       if (currentRef.current && currentRef.current.id === asset.id) callNext();
     } catch (e) {
-      // move failed — nothing changes
+      log('move', `category rejected: ${(e && e.message) || e}`);
+      showToast(t('safe_move_failed'));
     } finally {
       movingRef.current = false;
     }
-  };
-
-  const handleMove = async (album) => {
-    setShowMove(false);
-    await moveCurrentTo(album);
   };
 
   // "+" chip: create a NEW album with the current photo (photo stays).
@@ -1370,7 +1369,7 @@ export default function CleaningScreen({ route, navigation }) {
         PhotoMove.hasNativeMove() &&
         PhotoMove.hasAllFilesPermission()
       ) {
-        // In-place move — the target folder is created automatically.
+        await logSync('move', 'create-album start safeApi=2 count=1');
         const [res] = await PhotoMove.moveToAlbum([id], name);
         if (!res || !res.ok) throw new Error(res && res.error);
         asset.uri = 'file://' + res.newPath;
@@ -1395,8 +1394,9 @@ export default function CleaningScreen({ route, navigation }) {
           next[movedId] = album ? album.id : name;
           return next;
         });
-      } else if (Platform.OS === 'android' && PhotoMove.hasNativeMove()) {
-        // Needs "All files access" — prompt once, do nothing this time.
+      } else if (Platform.OS === 'android') {
+        // Never use MediaLibrary's Android fallback: it is not guaranteed to
+        // preserve the existing MediaStore row on every OEM provider.
         maybeOfferNativeMove();
         return;
       } else {
@@ -1417,7 +1417,8 @@ export default function CleaningScreen({ route, navigation }) {
       showToast(t('moved_to', { album: name }));
       if (currentRef.current && currentRef.current.id === asset.id) callNext();
     } catch (e) {
-      // creation failed — photo stays
+      log('move', `create-album rejected: ${(e && e.message) || e}`);
+      showToast(t('safe_move_failed'));
     } finally {
       movingRef.current = false;
     }
@@ -1437,6 +1438,7 @@ export default function CleaningScreen({ route, navigation }) {
         // album-title fallback only exists for records written before that
         // was captured.
         const backTitle = rec.fromAlbumTitle || 'Camera';
+        await logSync('move', 'undo-category start safeApi=2 count=1');
         const [res] = await PhotoMove.moveToAlbum(
           [id],
           backTitle,
@@ -1694,6 +1696,7 @@ export default function CleaningScreen({ route, navigation }) {
   // photo selected for deletion cannot disappear merely because it moved to
   // a different group.
   useEffect(() => {
+    if (suggestionKey === 'largest') return;
     if (orderModeRef.current === settings.order) return;
     if (
       !initializedRef.current ||
@@ -1793,6 +1796,7 @@ export default function CleaningScreen({ route, navigation }) {
     markedIds,
     groupSize,
     assetIds,
+    suggestionKey,
   ]);
 
   const deleteMarkedNow = async () => {
@@ -2087,7 +2091,7 @@ export default function CleaningScreen({ route, navigation }) {
         <View style={styles.photoArea}>
           {stack.map(({ asset, index }) => {
             const isCurrent = index === currentIdx;
-            const overrideUri = videoUriById[asset.id];
+            const overrideUri = mediaUriById[asset.id];
             const cardAsset = overrideUri ? { ...asset, uri: overrideUri } : asset;
             return (
               <StackLayer
@@ -2109,14 +2113,9 @@ export default function CleaningScreen({ route, navigation }) {
                     !showConfirm &&
                     !showExif &&
                     !showSimilar &&
-                    !showZoom &&
-                    !showMove
+                    !showZoom
                   }
-                  onLoadError={
-                    isCurrent && asset.mediaType === 'video'
-                      ? () => handleVideoLoadError(cardAsset)
-                      : undefined
-                  }
+                  onLoadError={() => handleMediaLoadError(cardAsset)}
                   isFavorite={isFavorite(asset.id)}
                   marked={markedIds.has(asset.id)}
                   sizeLabel={isCurrent ? sizeLabelFor(asset) : null}
@@ -2261,13 +2260,6 @@ export default function CleaningScreen({ route, navigation }) {
             visible.filter((v) => !assets.some((a) => a.id === v.id)).length
           );
         }}
-      />
-
-      <MoveSheet
-        visible={showMove}
-        excludeAlbumId={albumId}
-        onClose={() => setShowMove(false)}
-        onSelect={handleMove}
       />
 
       <GroupConfirmSheet

@@ -23,7 +23,8 @@ export const DEFAULT_SETTINGS = {
   liveMuted: true, // iOS: mute Live Photo playback
   recycleBin: false, // Android only; direct deletion is the default
   dailyReminder: false,
-  reminderHour: 19,
+  reminderStartMinute: 18 * 60,
+  reminderEndMinute: 21 * 60,
   // Recycle-bin browsing: 'list' is the detailed row layout, 'grid' the
   // thumbnail wall. Persisted so the choice survives leaving the screen.
   recycleView: 'list',
@@ -31,6 +32,7 @@ export const DEFAULT_SETTINGS = {
   favoriteView: 'grid',
   favoriteColumns: 3,
   theme: 'system', // 'system' | 'light' | 'dark'
+  androidLiquidGlass: true,
   language: 'system', // 'system' (follow device) | 'zh' | 'en'
 };
 

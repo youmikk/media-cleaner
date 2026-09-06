@@ -1,18 +1,24 @@
 import React, { useRef } from 'react';
-import { View, Text, Pressable, StyleSheet } from 'react-native';
+import { View, Text, Pressable, ScrollView, StyleSheet, useWindowDimensions } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
 import GlassSurface from './GlassSurface';
+import { getTabBarLayout } from '../utils/tabBarLayout';
 
 /**
  * Non-blocking analysis overlay pinned above the tab bar.
  * Shows progress, an ETA (photoo-style, from the live scan rate),
  * low-power state and a cancel button.
  */
-export default function AnalysisProgress({ state, mediaType = 'photo', onCancel }) {
+export default function AnalysisProgress({
+  state, mediaType = 'photo', onCancel, androidSource, effectEnabled = true, onLayout,
+}) {
   const { colors, t } = useSettings();
   const insets = useSafeAreaInsets();
+  const dimensions = useWindowDimensions();
+  const tabBarLayout = getTabBarLayout(dimensions, insets);
+  const maxLabelHeight = Math.max(48, Math.min(112, dimensions.height - insets.top - tabBarLayout.clearance - 84));
 
   // ETA from the observed rate. Keyed by total so a new run resets it.
   const etaRef = useRef({ total: 0, startTime: 0, startDone: 0 });
@@ -39,7 +45,7 @@ export default function AnalysisProgress({ state, mediaType = 'photo', onCancel 
   // Hide entirely for zero-work refreshes (all photos already analyzed).
   if (!state || !state.running || !state.total) return null;
 
-  const pct = state.total > 0 ? state.done / state.total : 0;
+  const pct = Math.min(1, Math.max(0, (Number(state.done) || 0) / state.total));
   let label = t(mediaType === 'video' ? 'analyzing_videos' : 'analyzing', {
     done: state.done,
     total: state.total,
@@ -50,28 +56,35 @@ export default function AnalysisProgress({ state, mediaType = 'photo', onCancel 
 
   return (
     <View
-      // Sits ABOVE the floating tab bar (capsule ≈64px + its bottom offset).
-      style={[styles.wrap, { bottom: Math.max(insets.bottom, 12) + 80 }]}
+      // Shares the actual bar geometry, including safe areas and text scaling.
+      style={[styles.wrap, { bottom: tabBarLayout.clearance - 8 }]}
       pointerEvents="box-none"
+      onLayout={onLayout}
     >
-      <GlassSurface style={[styles.card, { borderColor: colors.border }]}>
+      <GlassSurface androidSource={androidSource} effectEnabled={effectEnabled} style={[styles.card, { borderColor: colors.border }]}>
         <View style={styles.inner}>
-        <View style={styles.row}>
-          <Text style={[styles.text, { color: colors.text }]} numberOfLines={1}>
-            {label}
-          </Text>
-          <Pressable onPress={onCancel} hitSlop={8} style={styles.cancel}>
-            <Ionicons name="close-circle" size={22} color={colors.subtext} />
-          </Pressable>
-        </View>
-        <View style={[styles.track, { backgroundColor: colors.chartTrack }]}>
-          <View
-            style={[
-              styles.fill,
-              { backgroundColor: colors.accent, width: `${Math.round(pct * 100)}%` },
-            ]}
-          />
-        </View>
+          <View style={styles.row}>
+            <ScrollView style={[styles.labelViewport, { maxHeight: maxLabelHeight }]} nestedScrollEnabled>
+              <Text style={[styles.text, { color: colors.text }]}>{label}</Text>
+            </ScrollView>
+            <Pressable
+              onPress={onCancel}
+              hitSlop={4}
+              style={({ pressed }) => [styles.cancel, pressed && { backgroundColor: colors.elevated }]}
+              accessibilityRole="button"
+              accessibilityLabel={t('cancel')}
+            >
+              <Ionicons name="close-circle" size={22} color={colors.glassSubtext} accessible={false} />
+            </Pressable>
+          </View>
+          <View style={[styles.track, { backgroundColor: colors.chartTrack }]}>
+            <View
+              style={[
+                styles.fill,
+                { backgroundColor: colors.accent, width: `${Math.round(pct * 100)}%` },
+              ]}
+            />
+          </View>
         </View>
       </GlassSurface>
     </View>
@@ -81,8 +94,8 @@ export default function AnalysisProgress({ state, mediaType = 'photo', onCancel 
 const styles = StyleSheet.create({
   wrap: {
     position: 'absolute',
-    left: 16,
-    right: 16,
+    left: 0,
+    right: 0,
   },
   card: {
     borderRadius: 16,
@@ -91,8 +104,9 @@ const styles = StyleSheet.create({
   },
   inner: { padding: 12 },
   row: { flexDirection: 'row', alignItems: 'center' },
-  text: { flex: 1, fontSize: 13, fontWeight: '600' },
-  cancel: { marginLeft: 8 },
+  labelViewport: { flex: 1, minWidth: 0 },
+  text: { fontSize: 13, fontWeight: '600' },
+  cancel: { marginLeft: 8, minWidth: 48, minHeight: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
   track: { height: 4, borderRadius: 2, marginTop: 8, overflow: 'hidden' },
   fill: { height: 4, borderRadius: 2 },
 });
