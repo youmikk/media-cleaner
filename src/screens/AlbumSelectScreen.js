@@ -187,10 +187,11 @@ export default function AlbumSelectScreen({
   const { colors, t, settings, setSetting } = useSettings();
   const dimensions = useWindowDimensions();
   const { width } = dimensions;
-  const tabBarLayout = getTabBarLayout(dimensions, useSafeAreaInsets());
+  const insets = useSafeAreaInsets();
+  const tabBarLayout = getTabBarLayout(dimensions, insets);
   const focused = useIsFocused();
   const analysisSource = useId();
-  const [analysisHeight, setAnalysisHeight] = useState(88);
+  const [analysisHeight, setAnalysisHeight] = useState(58);
   const isVideo = mediaType === 'video';
   const groupSizeKey = isVideo ? 'videoGroupSize' : 'groupSize';
   const groupSize = settings[groupSizeKey] || 5;
@@ -697,8 +698,9 @@ export default function AlbumSelectScreen({
     : sessionPreview
       ? sessionPreview.thumbs
       : previewThumbs;
-  // Front card is the hero; the fan needs ~1.4x this much width around it.
-  const cardW = Math.min(Math.round(width * 0.58), 250);
+  // The 1.38-wide fan must fit inside the same safe-area gutters as controls.
+  const contentWidth = Math.max(0, width - insets.left - insets.right - 32);
+  const cardW = Math.min(Math.round(width * 0.58), 250, Math.floor(contentWidth / 1.38));
   const analysisVisible = analysisState?.running && analysisState.total > 0;
 
   return (
@@ -790,9 +792,10 @@ const styles = StyleSheet.create({
   primaryControls: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
     gap: 8,
   },
-  timeControl: { alignSelf: 'flex-start' },
+  timeControl: { alignSelf: 'flex-start', maxWidth: '100%' },
   centerArea: {
     flexGrow: 1,
     alignItems: 'center',

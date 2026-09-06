@@ -50,7 +50,9 @@ export function subscribeLowPower(onChange) {
       // A live system event is newer than this asynchronous startup query.
       if (!receivedChange) report(!!state.lowPowerMode, 'initial');
     } catch (e) {
-      if (!receivedChange) report(false, 'initial-failed');
+      // A failed foreground read is not an exit from Low Power Mode. Keep the
+      // known state so recovery does not flash quality or repeat the notice.
+      if (!receivedChange) report(lastLowPower ?? false, 'initial-failed');
     }
   })();
   return () => {

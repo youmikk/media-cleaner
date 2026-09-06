@@ -22,13 +22,15 @@ function fixture(file, options = {}) {
     insets: { top: 44, bottom: 34, left: 0, right: 0 },
     settings: { androidLiquidGlass: true, favoriteView: 'grid', favoriteColumns: 3 },
     policy: { effectsEnabled: true, reduceMotion: false },
+    power: { lowPower: false, adaptiveLowPower: false, active: true },
     ...options,
   };
   const colors = {
     background: '#F6F7FA', card: '#FFFFFF', elevated: '#FFFFFF', text: '#17181C',
     subtext: '#5F636B', border: '#EEEEEE', accent: '#0B6EDB', accentSoft: '#EEEEFF',
     danger: '#D93025', heart: '#D81B60', glassAccent: '#003F86', glassSubtext: '#484852',
-    liquidTint: 'rgba(255,255,255,0.76)', glassTint: 'light', chartTrack: '#EEEEEE',
+    liquidTint: 'rgba(255,255,255,0.40)', glassTint: 'light', chartTrack: '#EEEEEE',
+    glassHighlight: 'rgba(255,255,255,0.65)', glassShadow: 'rgba(0,0,0,0.10)',
   };
   const hooks = {
     ...React,
@@ -57,6 +59,8 @@ function fixture(file, options = {}) {
     Platform: { OS: config.os, Version: config.api || 33 },
     StyleSheet: { create: value => value, flatten, hairlineWidth: 1, absoluteFill: { position: 'absolute' } },
     useWindowDimensions: () => config, processColor: () => 1,
+    AccessibilityInfo: { announceForAccessibility() {} },
+    AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) },
     Animated: { Value, View: 'AnimatedView', timing: animate, spring: animate },
   };
   ['View', 'Text', 'Modal', 'Pressable', 'FlatList', 'SectionList', 'ScrollView', 'Switch', 'ActivityIndicator']
@@ -71,6 +75,9 @@ function fixture(file, options = {}) {
     '../../modules/liquid-glass': { NativeGlassView: 'NativeGlassView', NativeGlassSource: 'NativeGlassSource', androidLiquidGlassAvailable: true },
     '../context/SettingsContext': { useSettings: () => ({ colors, settings: config.settings, t: key => key, language: 'en', setSetting() {} }) },
     '../context/GlassEffectsContext': { useGlassEffects: () => config.policy },
+    './PowerModeContext': { usePowerMode: () => config.power },
+    '../context/PowerModeContext': { usePowerMode: () => config.power },
+    './SettingsContext': { useSettings: () => ({ settings: config.settings }) },
     '../context/AppContext': { useFavorites: () => ({ favorites: { a: true }, toggleFavorite() {} }), useTrash: () => ({ trash: [{ fileUri: 'a', size: 12 }], refreshTrash() {} }) },
     '../utils/logger': { log() {} }, '../utils/albumHelpers': { formatBytes: value => String(value), ALL_ALBUM_ID: 'all', peekAlbumSummary: () => null },
     '../utils/reviewedStore': { scopeFor: type => type },
@@ -86,10 +93,12 @@ function fixture(file, options = {}) {
     }).code);
     const mod = { exports: {} };
     vm.runInNewContext(compiled.get(relative), {
-      module: mod, exports: mod.exports, console,
+      module: mod, exports: mod.exports, console, setTimeout, clearTimeout,
+      ...options.globals,
       require(name) {
         if (name in imports) return imports[name];
         if (name === '../utils/tabBarLayout') return load('src/utils/tabBarLayout.js');
+        if (name === '../theme/shapes') return load('src/theme/shapes.js');
         if (/^(\.\/|\.\.\/components\/)(GlassSurface|GlassBackdrop|IconButton|AppBottomSheet|AnalysisProgress|AlbumPicker|TimePicker|GroupSizeStepper|StackedCards|AppDialog)$/.test(name)) {
           return { __esModule: true, default: name.split('/').pop(), showAppAlert() {} };
         }
@@ -133,7 +142,7 @@ test('material policy changes never replace navigation content', () => {
       assert.equal(tree.type, 'View');
       assert.equal(tree.props.children[2], child);
       assert.equal(tree.props.onLayout, onLayout);
-      if (os === 'android') assert.equal(one(tree, 'NativeGlassView').props.effectEnabled, enabled && visible && !reduced && setting);
+      if (os === 'android') assert.equal(one(tree, 'NativeGlassView').props.effectEnabled, enabled && visible && setting);
       else assert.equal(findAll(tree, 'GlassView').length, enabled && visible ? 1 : 0);
     }
   }
@@ -150,7 +159,7 @@ test('missing native views and unavailable iOS APIs use a safe surface', () => {
   assert.equal(findAll(ios.render(), 'BlurView').length, 1);
 });
 
-test('Android blur fallback respects the saved setting and motion policy', () => {
+test('Android blur fallback respects the saved setting and keeps material with reduced motion', () => {
   const f = fixture('src/components/GlassSurface.js', { imports: {
     '../../modules/liquid-glass': { NativeGlassView: null, androidLiquidGlassAvailable: false },
   } });
@@ -162,8 +171,25 @@ test('Android blur fallback respects the saved setting and motion policy', () =>
   assert.equal(findAll(f.render(props), 'BlurView').length, 0);
   f.config.settings.androidLiquidGlass = true;
   f.config.policy.reduceMotion = true;
+  assert.equal(findAll(f.render(props), 'BlurView').length, 1);
+  f.config.policy.effectsEnabled = false;
   assert.equal(findAll(f.render(props), 'BlurView').length, 0);
   assert.equal(findAll(f.render(), 'BlurView').length, 0);
+});
+
+test('native material receives rounded geometry and lets iOS choose its own tint', () => {
+  const android = fixture('src/components/GlassSurface.js');
+  const props = { androidSource: 'PhotosTab', style: { borderRadius: 30 } };
+  const native = one(android.render(props), 'NativeGlassView');
+  assert.equal(native.props.cornerRadius, 30);
+  assert.equal(flatten(native.props.style).borderRadius, 30);
+  assert.ok(native.props.highlightColor);
+  assert.ok(native.props.shadowColor);
+  const ios = fixture('src/components/GlassSurface.js', { os: 'ios' });
+  const material = one(ios.render(props), 'GlassView');
+  assert.equal(material.props.borderRadius, 30);
+  assert.equal(material.props.tintColor, undefined);
+  assert.equal(one(ios.render({ ...props, tintColor: '#123456' }), 'GlassView').props.tintColor, '#123456');
 });
 
 function effectPolicyFixture(accessibility) {
@@ -174,9 +200,6 @@ function effectPolicyFixture(accessibility) {
         Platform: { OS: 'ios' },
         AccessibilityInfo: { addEventListener: () => ({ remove() {} }), ...accessibility },
         AppState: { currentState: null, addEventListener: () => ({ remove() {} }) },
-      },
-      '../utils/batteryUtils': {
-        subscribeLowPower(callback) { callback(false); return () => {}; },
       },
     },
   });
@@ -199,6 +222,127 @@ test('failed motion query preserves a known Reduce Transparency preference', asy
   f.effects.forEach(effect => effect());
   await new Promise(setImmediate);
   assert.equal(f.render().props.value.effectsEnabled, false);
+});
+
+test('power adaptation keeps the system material and lowers Android capture quality', () => {
+  for (const os of ['ios', 'android']) {
+    const f = fixture('src/context/GlassEffectsContext.js', { os, exportName: 'GlassEffectsProvider' });
+    f.config.power.adaptiveLowPower = true;
+    const policy = f.render().props.value;
+    assert.equal(policy.effectsEnabled, true);
+    assert.equal(policy.reduceMotion, true);
+    assert.equal(policy.lowPower, true);
+    const surface = fixture('src/components/GlassSurface.js', { os, policy });
+    const tree = surface.render({ androidSource: 'PhotosTab' });
+    if (os === 'android') {
+      assert.equal(one(tree, 'NativeGlassView').props.lowPowerMode, true);
+      assert.equal(one(tree, 'NativeGlassView').props.effectEnabled, true);
+    } else {
+      assert.equal(findAll(tree, 'GlassView').length, 1);
+    }
+  }
+});
+
+test('power preference updates analysis and ignores stale foreground subscriptions', () => {
+  const powerCallbacks = [], analysis = [];
+  let appStateChange;
+  const f = fixture('src/context/PowerModeContext.js', {
+    exportName: 'PowerModeProvider',
+    imports: {
+      'react-native': { AppState: { currentState: null, addEventListener(_, callback) {
+        appStateChange = callback;
+        return { remove() {} };
+      } } },
+      '../utils/batteryUtils': { subscribeLowPower(callback) {
+        powerCallbacks.push(callback);
+        return () => {};
+      } },
+      '../utils/chunkedAnalyzer': { setLowPowerMode: value => analysis.push(value) },
+    },
+  });
+  assert.equal(f.render().props.value.lowPower, false);
+  const cleanup = f.effects[0]();
+  powerCallbacks[0](true);
+  assert.equal(f.render().props.value.adaptiveLowPower, true);
+  f.effects[1]();
+  f.config.settings.adaptiveLowPower = false;
+  const off = f.render().props.value;
+  assert.equal(off.lowPower, true);
+  assert.equal(off.adaptiveLowPower, false);
+  f.effects[1]();
+  assert.deepEqual(analysis, [true, false]);
+  appStateChange('background');
+  assert.equal(f.render().props.value.active, false);
+  appStateChange('active');
+  assert.equal(f.render().props.value.lowPower, true);
+  powerCallbacks[0](false);
+  assert.equal(f.render().props.value.lowPower, true);
+  powerCallbacks[1](false);
+  assert.equal(f.render().props.value.lowPower, false);
+  cleanup();
+  powerCallbacks[1](true);
+  assert.equal(f.render().props.value.lowPower, false);
+});
+
+test('low-power notice appears once per entry, survives a disabled adaptation setting, and dismisses', () => {
+  let expire;
+  const f = fixture('src/components/LowPowerNotice.js', { globals: {
+    setTimeout(callback, delay) { assert.equal(delay, 7000); expire = callback; return 1; },
+    clearTimeout() {},
+  } });
+  assert.equal(f.render(), null);
+  f.effects[0]();
+  f.config.power.lowPower = true;
+  f.render();
+  f.effects[0]();
+  const notice = f.render();
+  assert.equal(one(notice, 'Text').props.children, 'low_power_entered');
+  one(notice, 'IconButton').props.onPress();
+  f.render();
+  f.effects[0]();
+  assert.equal(f.render(), null);
+  f.config.power.active = false;
+  f.render(); f.effects[0]();
+  f.config.power.active = true;
+  f.render(); f.effects[0]();
+  assert.equal(f.render(), null);
+  f.config.power.lowPower = false;
+  f.render(); f.effects[0]();
+  f.config.power.lowPower = true;
+  f.config.power.adaptiveLowPower = true;
+  f.render(); f.effects[0]();
+  assert.equal(one(f.render(), 'Text').props.children, 'low_power_entered_adaptive');
+  f.effects[1]();
+  expire();
+  assert.equal(f.render(), null);
+});
+
+test('a failed power query preserves the last system state without overriding a live event', async () => {
+  let onChange;
+  let failRead = false;
+  const f = fixture('src/utils/batteryUtils.js', { imports: {
+    'expo-battery': {
+      addLowPowerModeListener(callback) { onChange = callback; return { remove() {} }; },
+      async getPowerStateAsync() {
+        if (failRead) throw new Error('Power service unavailable');
+        return { lowPowerMode: true, batteryLevel: 0.15 };
+      },
+    },
+    './logger': { log() {} },
+  } });
+  const states = [];
+  const stop = f.exports.subscribeLowPower(value => states.push(value));
+  await new Promise(setImmediate);
+  stop();
+  failRead = true;
+  const stopRefresh = f.exports.subscribeLowPower(value => states.push(value));
+  await new Promise(setImmediate);
+  assert.deepEqual(states, [true, true]);
+  onChange({ lowPowerMode: false });
+  assert.deepEqual(states, [true, true, false]);
+  stopRefresh();
+  onChange({ lowPowerMode: true });
+  assert.deepEqual(states, [true, true, false]);
 });
 
 test('optional Android adapter guards unsupported runtimes and incomplete binaries', () => {
@@ -388,16 +532,58 @@ test('recycle actions and analysis use safe-content parents and measured bottom 
   assert.equal(findAll(one(homeTree, 'GlassBackdrop'), 'AnalysisProgress').length, 0);
 });
 
-test('analysis label stays bounded while progress and cancellation work', () => {
+test('analysis keeps a compact label and a full cancel target without a growing viewport', () => {
   for (const fontScale of [1, 2, 3]) {
     const f = fixture('src/components/AnalysisProgress.js', { fontScale, height: 568 });
     let cancelled = 0;
     assert.equal(f.render({ state: { running: true, total: 0 } }), null);
     const tree = f.render({ state: { running: true, total: 100, done: 140 }, androidSource: 'home', onCancel: () => cancelled++ });
-    const scroll = one(tree, 'ScrollView');
-    assert.ok(flatten(scroll.props.style).maxHeight <= 112);
-    one(tree, 'Pressable').props.onPress(); assert.equal(cancelled, 1);
+    assert.equal(findAll(tree, 'ScrollView').length, 0);
+    const label = one(tree, 'Text');
+    assert.equal(label.props.numberOfLines, fontScale > 1.3 ? 2 : 1);
+    assert.equal(label.props.accessibilityLabel, label.props.children);
+    const cancel = one(tree, 'Pressable');
+    const cancelStyle = flatten(cancel.props.style({ pressed: false }));
+    assert.equal(cancelStyle.position, 'absolute');
+    assert.equal(cancelStyle.width, 48); assert.equal(cancelStyle.height, 48);
+    const surface = one(tree, 'GlassSurface');
+    const inner = surface.props.children;
+    const row = inner.props.children[0], track = inner.props.children[1];
+    const compactHeight = flatten(inner.props.style).padding * 2 + flatten(row.props.style).minHeight
+      + flatten(track.props.style).marginTop + flatten(track.props.style).height;
+    assert.equal(compactHeight, 58);
+    cancel.props.onPress(); assert.equal(cancelled, 1);
     assert.ok(findAll(tree, 'View').some(view => flatten(view.props.style).width === '100%'));
+  }
+});
+
+test('home controls wrap and preview fan stays within safe-area gutters', () => {
+  for (const [width, left, right, fontScale] of [[320, 0, 0, 1], [375, 0, 0, 3], [320, 44, 44, 2], [812, 44, 44, 1]]) {
+    const f = fixture('src/screens/AlbumSelectScreen.js', {
+      width, fontScale, insets: { top: 24, bottom: 34, left, right },
+    });
+    const tree = f.render({ navigation: { navigate() {} } });
+    const controls = findAll(tree, 'View').find(view =>
+      Array.isArray(view.props.children) && view.props.children.some(child => child?.type === 'AlbumPicker'));
+    assert.equal(flatten(controls.props.style).flexWrap, 'wrap');
+    const date = findAll(tree, 'View').find(view => view.props.children?.type === 'TimePicker');
+    assert.equal(flatten(date.props.style).maxWidth, '100%');
+    const fanWidth = Math.round(one(tree, 'StackedCards').props.cardWidth * 1.38);
+    assert.ok(fanWidth <= width - left - right - 32);
+  }
+
+  for (const os of ['ios', 'android']) {
+    const geometry = fixture('src/components/pickerButtonStyle.js', { os }).exports;
+    const { button } = geometry.pickerStyles;
+    assert.equal(button.height, undefined);
+    assert.equal(button.minHeight, os === 'android' ? 48 : 44);
+    assert.equal(button.maxWidth, '100%');
+    const picker = fixture('src/components/AlbumPicker.js', { os, imports: { './pickerButtonStyle': geometry } });
+    const trigger = findAll(picker.render({ albums: [], onSelect() {} }), 'Pressable')[0];
+    const style = flatten(trigger.props.style({ pressed: false }));
+    assert.equal(style.flexBasis, 160);
+    assert.equal(style.flexShrink, 1);
+    assert.equal(style.minWidth, 0);
   }
 });
 

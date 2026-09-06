@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import * as MediaLibrary from 'expo-media-library';
 import { useSettings } from '../context/SettingsContext';
+import { iosShapes } from '../theme/shapes';
 import IconButton from './IconButton';
 import { formatBytes, formatDate, getAssetSize } from '../utils/albumHelpers';
 import { reverseGeocode } from '../utils/geocode';
@@ -278,6 +279,7 @@ const styles = StyleSheet.create({
   sheet: {
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
+    ...iosShapes.sheet,
     padding: 20,
     paddingBottom: 34,
   },

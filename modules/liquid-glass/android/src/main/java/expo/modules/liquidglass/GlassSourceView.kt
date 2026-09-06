@@ -1,6 +1,7 @@
 package expo.modules.liquidglass
 
 import android.content.Context
+import android.view.View
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.views.ExpoView
 import java.lang.ref.WeakReference
@@ -8,6 +9,18 @@ import java.lang.ref.WeakReference
 /** Passive scene wrapper: it owns no bitmap, timer or extra drawing loop. */
 class GlassSourceView(context: Context, appContext: AppContext) : ExpoView(context, appContext) {
   private var sourceKey = ""
+  var contentVersion = 0L
+    private set
+
+  override fun onDescendantInvalidated(child: View, target: View) {
+    contentVersion++
+    super.onDescendantInvalidated(child, target)
+  }
+
+  override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+    super.onSizeChanged(w, h, oldw, oldh)
+    contentVersion++
+  }
 
   fun setSourceKey(value: String) {
     unregister()

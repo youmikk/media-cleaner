@@ -7,6 +7,10 @@ export const LANGUAGES = [
 
 const translations = {
   en: {
+    settings_group_performance: 'Performance',
+    setting_adaptive_low_power: 'Adapt to Low Power Mode',
+    low_power_entered: 'Low Power Mode is on',
+    low_power_entered_adaptive: 'Low Power Mode is on. Power adaptation is active.',
     tab_photos: 'Photos',
     tab_videos: 'Videos',
     tab_profile: 'Profile',
@@ -20,7 +24,7 @@ const translations = {
     analyzing_videos: 'Analyzing videos… ({done}/{total})',
     // Short form for the narrow suggestion card, which shows the % separately.
     analyzing_short: 'Analyzing…',
-    analysis_paused_low_power: 'Analysis paused – low power mode',
+    analysis_paused_memory: 'Analysis paused - memory pressure',
     analysis_low_power_chunk: 'Low power mode – analyzing slowly',
     eta_minutes: '~{min} min left',
     eta_seconds: '~{sec}s left',
@@ -302,6 +306,10 @@ const translations = {
     share: 'Share',
   },
   zh: {
+    settings_group_performance: '性能',
+    setting_adaptive_low_power: '自适应低电量模式',
+    low_power_entered: '已进入低电量模式',
+    low_power_entered_adaptive: '已进入低电量模式，省电适配已开启',
     tab_photos: '照片',
     tab_videos: '视频',
     tab_profile: '我的',
@@ -314,7 +322,7 @@ const translations = {
     analyzing: '正在分析照片… ({done}/{total})',
     analyzing_videos: '正在分析视频… ({done}/{total})',
     analyzing_short: '正在分析…',
-    analysis_paused_low_power: '分析已暂停 – 低电量模式',
+    analysis_paused_memory: '内存紧张，分析暂时暂停',
     analysis_low_power_chunk: '低电量模式 – 正在缓慢分析',
     eta_minutes: '约剩 {min} 分钟',
     eta_seconds: '约剩 {sec} 秒',

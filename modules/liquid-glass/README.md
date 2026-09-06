@@ -1,149 +1,95 @@
 # Android Liquid Glass adapter
 
-This local Expo module embeds the unmodified AGSL shader from
-[AndroidLiquidGlassView](https://github.com/QmDeve/AndroidLiquidGlassView),
-by QmDeve, licensed under MIT. This is not Kyant0/AndroidLiquidGlass
-(a separate Apache-2.0 project). The complete upstream notice is kept in
-`LICENSE-AndroidLiquidGlassView.txt` and at the top of
-`android/src/main/res/raw/mediacleaner_liquidglass.agsl`. The referenced raw
-resource, including its notice, is packaged with the Android application.
+This Expo module uses the official lens and directional highlight AGSL from
+[Kyant0/AndroidLiquidGlass](https://github.com/Kyant0/AndroidLiquidGlass/)
+1.0.6, commit `896a94a3ade1cc1a940b92365f942a34971fecda`.
+The source is [backdrop/Shaders.kt](https://github.com/Kyant0/AndroidLiquidGlass/blob/896a94a3ade1cc1a940b92365f942a34971fecda/backdrop/src/main/java/com/kyant/backdrop/Shaders.kt):
+`RoundedRectSDF`, `RoundedRectRefractionShaderString`, and
+`DefaultHighlightShaderString`. Kotlin interpolation is expanded into
+`android/src/main/res/raw/kyant_refraction.agsl` and `kyant_highlight.agsl`;
+the shader algorithms are unchanged. Both retain Kyant's copyright notice.
+The full [Apache 2.0 license](android/src/main/assets/licenses/AndroidLiquidGlass.txt)
+is packaged in the APK's assets.
 
-The adapter intentionally does not depend on the upstream AAR. The current
-1.0.4/1.0.5 artifacts require compile SDK 37; this app uses SDK 36. The
-shader is hosted in a small app-owned bounded `RenderNode`, without adding
-an AAR dependency or changing the Expo/RN toolchain.
-Explicit sources cover the floating navigation, recycle-bin actions, Favorites
-header, analysis overlay, and Android album/time picker headers. The adapter
-does not capture screenshots, write media files, or run a timer/bitmap loop.
+This is a native View adaptation of those rendering primitives, not the
+upstream Compose UI/AAR. Kyant's 1.0.6 Compose library requires Kotlin 2.3.10
+and Compose 1.10.3. Reusing its AGSL avoids changing this Expo/RN toolchain.
+React Native continues to own navigation, controls, layout and accessibility.
+The previous QmDeve shader and its license have been removed.
 
-Support and fallback behavior:
+## Rendering
 
-- Android 13 / API 33 and newer, hardware-accelerated, non-low-RAM devices:
-  AGSL refraction is enabled when the shared app effect policy allows it and
-  `settings.androidLiquidGlass` is not false (enabled by default). The Android
-  Appearance switch persists the preference; disabling it releases the effect
-  without replacing the navigation controls. Unsupported builds show a disabled
-  switch without overwriting that preference. There is no corresponding iOS
-  switch; native material support and system accessibility settings apply there.
-- Android below API 33, Expo Go, and older binaries without this module use
-  an `expo-blur` fallback for bounded surfaces with explicit sources, with no
-  AGSL refraction. Both Android materials respect the glass preference,
-  low-power mode, reduced motion and memory warnings. Disabled effects and
-  native rendering failures keep the existing solid surface visible.
-- A new dev/EAS build is required after changing this native module; JavaScript
-  updates alone cannot add it to an installed binary.
+`GlassRenderer` follows Kyant's bottom-tabs material order: saturation 1.5,
+8dp blur, 24dp lens height/amount, 40% surface tint, and directional highlight.
+Small surfaces clamp lens height to half their height. `LiquidGlassView`
+clips its entire native drawing to a rounded path, including the fallback.
+The highlight and subtle dark edge keep the shape visible over flat content.
 
-The shader source currently corresponds to `res/raw/liquidglass_effect.agsl`
-in the verified upstream `com.qmdeve.liquidglass:core:1.0.5` AAR
-(SHA-256 of the AAR:
-`F8234A19E1DB41CB11D21DCDF1CA4B6D1A395A3EBE00BC870339AAD80601B2D7`).
+Only an explicit sibling source in the same window can be sampled. The source
+scene is recorded through a bounded RenderNode with a 24dp blur margin.
+The visible surface is at most 200dp tall; the full capture, including its
+margin, is capped at 1,048,576 sampled pixels. This is not a measured cap on
+total GPU memory. No screenshots, media decoding, MediaStore calls or image
+files are used. References are weak and unregister on detach.
 
-## Runtime limits
+Sources cover the navigation capsule, recycle-bin actions, Favorites title,
+analysis progress, and Android album/time picker headers. Each instance
+records its own region. Sources must never contain their own material.
+Media cards, video playback, suggestion cards and short confirmation dialogs
+keep their existing rendering.
 
-The output RenderNode is the size of the bar, at most 200dp tall and
-1,048,576 physical pixels. These are rendering bounds, not a measured limit
-on total GPU memory. The source scene is drawn through that clipped region
-using existing native views; no media decoding or MediaStore writes are
-performed by this module. Keep the source subtree separate from the glass
-subtree so it cannot sample itself.
+## Low Power Mode
 
-Recording follows existing view-tree frames, with no repeating timer or
-continuous self-invalidation. Detaching, hiding or defocusing the window, disabling effects,
-or a rendering failure releases the RenderNode. A failed renderer is not
-retried on every frame. Scene references are weak and unregister on detach.
+`PowerModeProvider` owns the system power subscription. The persisted
+`settings.adaptiveLowPower` switch is enabled by default and controls the
+application's adaptations on both platforms. It does not change the system's
+Low Power Mode or override reduced transparency and memory safeguards.
 
-`GlassEffectsProvider` shares accessibility, foreground and power-state
-subscriptions across surfaces. It refreshes power and accessibility settings
-on foreground and ignores outdated async results. On iOS, the existing
-`expo-glass-effect` material is guarded by both availability APIs; reduced
-transparency uses a solid surface. Reduced motion disables selection springs.
-Both platforms keep their controls in a stable sibling of the material.
-Screen-level overlays also disable effects when their route loses focus.
-Android Modal pickers have their own source; while they are focused, native
-window-focus handling pauses rendering in the covered application window.
+- Android native glass: capture width and height are halved and sampling is
+  limited to one update per 67ms, about 15 per second. Text, buttons, clipping
+  and highlights remain at full resolution. A source invalidation schedules
+  a final sample if scrolling stops inside the interval; no repeating timer
+  runs over an unchanged source. Detach, hidden windows, lost focus and
+  disabled effects cancel the pending callback and release the RenderNode.
+- iOS: keep `expo-glass-effect` / `UIGlassEffect` and let UIKit manage its
+  material. The app does not paint an opaque layer over it or claim to control
+  its sampling. Default tint is left to the system.
+- Both platforms: stop optional app springs and use the analyzer's existing
+  smaller batches (50 to 10), preserving decode concurrency and memory caps.
+  Turning adaptation off restores app behavior while system restrictions stay.
+- A dismissible notice appears on entering system Low Power Mode, including
+  startup while it is active. Foreground refreshes preserve state and do not
+  repeat the notice. The notice still appears with adaptation switched off.
 
-## Additional surface audit
+Apple documents [reduced CPU/GPU performance and app adaptation](https://developer.apple.com/documentation/foundation/processinfo/islowpowermodeenabled),
+and [a 60Hz ProMotion ceiling and some disabled visual effects](https://support.apple.com/en-us/101604).
+Neither statement requires replacing native glass with a solid app surface.
+Actual UIKit appearance remains system-controlled.
 
-These are the deliberately bounded Android glass surfaces; media cards and
-playback layers remain solid for performance.
-Each additional glass instance records its own source region, even when it
-shares a source key. Do not treat a shared source as a shared render pass.
+The iOS shape overrides in `src/theme/shapes.js` follow Apple's
+[rounded and concentric shape guidance](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass).
+The tab capsule uses half its layout height, with its inner radius reduced
+by the content inset. Controls and sheets use continuous curves; these are
+app-selected dimensions, not claimed Apple system constants.
 
-| Surface | Status | Implementation |
-| --- | --- | --- |
-| Recycle-bin batch actions | Added | The list is the source and one sibling glass action bar floats above it. Restore/delete keep explicit colors and labels; safe-area-aware placement and measured bottom clearance keep rows reachable. |
-| Favorites header | Added | The header overlays the list, with measured top inset and one common material; individual media and heart controls remain ordinary surfaces. |
-| Analysis progress overlay | Added | The home content is isolated from the overlay, so it cannot sample itself. The overlay remains bounded and shares the tab-bar clearance. |
-| Picker-sheet header | Added for Android | `AppBottomSheet` exposes explicit `glassHeader` + `renderContent` props. Album and time pickers use a unique source inside their Modal; the header is a measured sibling and the virtualized list receives top/indicator insets. |
-| Suggestion cards | Keep solid | Several concurrent surfaces over mostly solid backgrounds add rendering work and reduce small-text readability. |
-| Android video player and cleaning information bar | Keep solid | Avoid additional sampling over the live TextureView/player. iOS continues to use the existing system material policy. |
+## Compatibility
 
-Implementation points: `src/screens/RecycleBinScreen.js`,
-`src/screens/FavoritesScreen.js`, `src/components/AnalysisProgress.js`,
-`src/components/AppBottomSheet.js`, `src/components/AlbumPicker.js`,
-`src/components/TimePicker.js`, `src/components/SuggestionCard.js`,
-`src/components/BottomInfoBar.js`, and `src/components/VideoCard.js`.
-Every candidate must stay within the same-window, non-recursive source and
-surface-size limits above, respect the Android switch and shared effect
-policy, and pass light/dark contrast, large-text and physical-device frame
-timing checks before rollout.
-
-Short Android settings/confirmation sheets (`DeletionModePicker`, `OptionPicker`,
-`AppDialog`) and individual settings buttons/switches remain solid. They have no scrolling content behind
-them, so a separate glass surface would add sampling and visual noise without
-providing useful refraction. `AppSwitch` and `ReminderTimeRangePicker` keep
-explicit state/value contrast instead of per-control sampling. App switches
-and the shared sheet also respect reduced motion. Existing iOS native menus
-and switches retain their platform behavior; its album/time Modal paths are
-unchanged. A glass header does not imply a glass surface for every list item.
+AGSL requires Android 13 / API 33+, hardware acceleration and a non-low-RAM
+device. `settings.androidLiquidGlass` independently enables the material.
+Older Android versions and runtimes without this optional module use bounded
+`expo-blur` surfaces. In power adaptation that fallback uses a lower blur
+intensity. Reduced motion alone does not disable the static glass material.
+Unavailable iOS glass APIs use blur; reduced transparency and memory warnings
+use solid surfaces. Material changes preserve the content subtree.
 
 ## Verification
 
-JavaScript exports for Android and iOS, autolinking, shader provenance,
-theme-token contrast, layout bounds and mocked fallback/lifecycle checks can
-run without compiling Android. Mocked checks do not verify native rendering.
-
-Run the focused component contracts from the repository root after installing
-dependencies:
-
-```sh
-node --test modules/liquid-glass/tests/ui-contracts.test.cjs
-```
-
-The script uses Node's built-in test runner and existing Babel dependencies.
-Shallow hook and native-view mocks check stable fallback structure, selection
-and dismiss callbacks, source separation, measured list padding, safe-area
-properties, bounded labels, and reduced-motion behavior. They do not execute
-Yoga layout or native rendering and cannot establish actual text bounds, frame
-timing, GPU usage, or media behavior.
-
-Before release, use a new installed build on real devices:
-
-1. Android 13+ on both Adreno and Mali where available: switch the three
-   tabs, scroll Profile, change theme, and check the glass tracks the current
-   scene without self-sampling, stale content, black frames or frozen taps.
-2. Open photo/video cleaning and return. The main glass bar should unmount
-   during cleaning; playback must remain responsive with one active player.
-3. Toggle system power saving and reduced motion, then background/foreground
-   the app. Check fallback and recovery without resetting controls or scroll.
-   A live power event must win over a late startup query, and callbacks from
-   a removed power subscription must not change the current effect policy.
-4. Test Android 12 or older, Expo Go, and an older binary without the module:
-   the blur fallback must still navigate and become solid when effects are
-   disabled. Check 320/375pt widths, large text and
-   resized windows for content clearance and tap targets.
-5. On iOS 26, check light/dark overrides, Reduce Transparency, Reduce Motion
-   and VoiceOver. Check blur fallback on older iOS. Native tint composition
-   and actual text bounds need visual inspection beyond token calculations.
-6. Compare frame timing and GPU memory on the same device, scene and scroll
-   action with effects enabled and disabled. No FPS or speedup is claimed
-   until those measurements exist. Native `glass` logs report status changes,
-   not individual frames or media information.
-7. Scroll Favorites and select items in the recycle bin in both layouts. The
-   header/action material must follow the thumbnails; large text, notches,
-   and gesture bars must not hide rows or batch buttons. Only the compact
-   Favorites title stays fixed; its count/column toolbar scrolls with the list.
-8. Open album and time pickers, scroll and select an album/year/month, then
-   close by the close button, backdrop, or Android back. Background surfaces
-   pause and resume; the picker keeps its virtualized list and source in one
-   Modal window. Change the Android glass preference and repeat.
+Run `node --test modules/liquid-glass/tests/ui-contracts.test.cjs` for the
+focused JS contracts: material fallback, power transitions and settings,
+notice dismissal, source separation, compact analysis and bounded controls.
+These mocks do not execute Yoga or verify native pixels, FPS or GPU memory.
+Real-device checks cover glass while scrolling and switching themes, rounded
+corners in both power states, low-power entry/exit, the adaptation switch,
+picker windows, and narrow screens with large fonts. Native builds and device
+verification are performed by the maintainer; no performance gain is claimed
+from the JS checks or from the reduced sample dimensions alone.

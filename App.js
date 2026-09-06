@@ -26,6 +26,8 @@ import { subscribeMemoryWarning } from './src/utils/batteryUtils';
 import { SettingsProvider, useSettings } from './src/context/SettingsContext';
 import { AppProvider } from './src/context/AppContext';
 import { GlassEffectsProvider } from './src/context/GlassEffectsContext';
+import { PowerModeProvider } from './src/context/PowerModeContext';
+import LowPowerNotice from './src/components/LowPowerNotice';
 import RootNavigator from './src/navigation';
 import OnboardingScreen from './src/screens/OnboardingScreen';
 import { ensureMediaPermission, getMediaPermission } from './src/utils/permissions';
@@ -307,6 +309,7 @@ function AppInner() {
       >
         <StatusBar style={isDark ? 'light' : 'dark'} />
         <RootNavigator />
+        <LowPowerNotice />
       </NavigationContainer>
     </PermissionGate>
   );
@@ -318,11 +321,13 @@ export default function App() {
       <SafeAreaProvider>
         <SettingsProvider>
           <AppDialogHost />
-          <GlassEffectsProvider>
-            <AppProvider>
-              <AppInner />
-            </AppProvider>
-          </GlassEffectsProvider>
+          <PowerModeProvider>
+            <GlassEffectsProvider>
+              <AppProvider>
+                <AppInner />
+              </AppProvider>
+            </GlassEffectsProvider>
+          </PowerModeProvider>
         </SettingsProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>

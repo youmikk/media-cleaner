@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
+import { iosShapes } from '../theme/shapes';
 import { getRawAlbums } from '../utils/albumHelpers';
 
 /**
@@ -80,6 +81,7 @@ const styles = StyleSheet.create({
   sheet: {
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
+    ...iosShapes.sheet,
     padding: 20,
     paddingBottom: 34,
   },

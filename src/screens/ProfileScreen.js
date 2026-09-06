@@ -15,6 +15,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
+import { iosShapes } from '../theme/shapes';
 import { useFavorites, useStats, useTrash } from '../context/AppContext';
 import SuggestionCard from '../components/SuggestionCard';
 import StorageChart from '../components/StorageChart';
@@ -1021,6 +1022,15 @@ export default function ProfileScreen({ navigation }) {
             )}
           </SettingsSubGroup>
 
+          <SettingsSubGroup title={t('settings_group_performance')} colors={colors}>
+            <ToggleRow
+              label={t('setting_adaptive_low_power')}
+              value={settings.adaptiveLowPower !== false}
+              onChange={(value) => setSetting('adaptiveLowPower', value)}
+              divider={false}
+            />
+          </SettingsSubGroup>
+
           <SettingsSubGroup title={t('settings_group_appearance')} colors={colors}>
             <OptionPicker
               label={t('setting_theme')}
@@ -1112,8 +1122,8 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingVertical: 4,
   },
-  listCard: { borderRadius: 12, overflow: 'hidden' },
-  settingsCard: { borderRadius: 12, paddingHorizontal: 14 },
+  listCard: { borderRadius: 12, ...iosShapes.group, overflow: 'hidden' },
+  settingsCard: { borderRadius: 12, ...iosShapes.group, paddingHorizontal: 14 },
   rowLabel: { fontSize: 14, fontWeight: '600', flexShrink: 1 },
   segmented: { flexDirection: 'row', borderRadius: 10, padding: 3 },
   segment: {

@@ -33,6 +33,7 @@ export const DEFAULT_SETTINGS = {
   favoriteColumns: 3,
   theme: 'system', // 'system' | 'light' | 'dark'
   androidLiquidGlass: true,
+  adaptiveLowPower: true,
   language: 'system', // 'system' (follow device) | 'zh' | 'en'
 };
 

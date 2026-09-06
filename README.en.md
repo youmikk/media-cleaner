@@ -20,6 +20,7 @@ MediaCleaner is an open-source tool for organizing your photo library. Review ph
 - **Compression**: Choose a quality level and create a new file. Deleting the original remains your choice.
 - **Reminders**: Set a reminder window that fits your schedule.
 - **Adaptive appearance**: Light and dark themes, Chinese and English, and Liquid Glass on supported devices, with an optional toggle on Android.
+- **Low Power Mode**: A notice on entry and an optional adaptation setting for glass sampling, animations, and analysis pacing.
 
 ## Privacy and Data
 
@@ -37,4 +38,4 @@ Report bugs and suggest improvements through [Issues](https://github.com/youmikk
 
 This project uses the [MIT License](./LICENSE). Redistribute it with the required copyright and permission notices.
 
-The Android Liquid Glass effect uses the open-source shader from [AndroidLiquidGlassView](https://github.com/QmDeve/AndroidLiquidGlassView). Thanks to its contributors. [Third-party license](./modules/liquid-glass/LICENSE-AndroidLiquidGlassView.txt)
+The Android Liquid Glass effect uses the official refraction and highlight shaders from [Kyant0/AndroidLiquidGlass](https://github.com/Kyant0/AndroidLiquidGlass/) 1.0.6, hosted in a local native View for React Native. [Integration notes](./modules/liquid-glass/README.md) · [Apache 2.0 license](./modules/liquid-glass/android/src/main/assets/licenses/AndroidLiquidGlass.txt)

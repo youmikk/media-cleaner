@@ -26,9 +26,12 @@ class LiquidGlassModule : Module() {
       Events("onStatus")
       Prop("sourceKey") { view: LiquidGlassView, value: String -> view.sourceKey = value }
       Prop("effectEnabled") { view: LiquidGlassView, value: Boolean -> view.effectEnabled = value }
+      Prop("lowPowerMode") { view: LiquidGlassView, value: Boolean -> view.lowPowerMode = value }
       Prop("cornerRadius") { view: LiquidGlassView, value: Float -> view.radiusDp = value }
       Prop("surfaceTint") { view: LiquidGlassView, value: Int -> view.surfaceTint = value }
       Prop("fallbackColor") { view: LiquidGlassView, value: Int -> view.fallbackColor = value }
+      Prop("highlightColor") { view: LiquidGlassView, value: Int -> view.highlightColor = value }
+      Prop("shadowColor") { view: LiquidGlassView, value: Int -> view.shadowColor = value }
       OnViewDidUpdateProps { view: LiquidGlassView -> view.applySettings() }
       OnViewDestroys { view: LiquidGlassView -> view.dispose() }
     }

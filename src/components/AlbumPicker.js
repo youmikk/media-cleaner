@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
+import { iosShapes } from '../theme/shapes';
 import ProgressRing from './ProgressRing';
 import { pickerStyles } from './pickerButtonStyle';
 import AppBottomSheet from './AppBottomSheet';
@@ -205,7 +206,7 @@ const styles = StyleSheet.create({
   // Geometry comes from pickerStyles.button — only the flex behaviour is
   // local, so the album name gets the room it needs without pushing the
   // other controls out of the row.
-  button: { flex: 1, minWidth: 0 },
+  button: { flexGrow: 1, flexShrink: 1, flexBasis: 160, minWidth: 0 },
   list: { maxHeight: 420 },
   backdrop: {
     flex: 1,
@@ -215,6 +216,7 @@ const styles = StyleSheet.create({
   sheet: {
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
+    ...iosShapes.sheet,
     padding: 20,
     paddingBottom: 34,
   },

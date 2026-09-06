@@ -3,6 +3,7 @@ import { View, Text, Pressable, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
 import { pickerStyles } from './pickerButtonStyle';
+import { iosShapes } from '../theme/shapes';
 
 export const MIN_GROUP = 2;
 export const MAX_GROUP = 20;
@@ -86,6 +87,7 @@ const styles = StyleSheet.create({
     width: 28,
     height: 36,
     borderRadius: 8,
+    ...iosShapes.control,
     alignItems: 'center',
     justifyContent: 'center',
   },

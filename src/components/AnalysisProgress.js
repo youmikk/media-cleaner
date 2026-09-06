@@ -1,10 +1,11 @@
 import React, { useRef } from 'react';
-import { View, Text, Pressable, ScrollView, StyleSheet, useWindowDimensions } from 'react-native';
+import { View, Text, Pressable, StyleSheet, useWindowDimensions } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
 import GlassSurface from './GlassSurface';
 import { getTabBarLayout } from '../utils/tabBarLayout';
+import { iosShapes } from '../theme/shapes';
 
 /**
  * Non-blocking analysis overlay pinned above the tab bar.
@@ -18,7 +19,6 @@ export default function AnalysisProgress({
   const insets = useSafeAreaInsets();
   const dimensions = useWindowDimensions();
   const tabBarLayout = getTabBarLayout(dimensions, insets);
-  const maxLabelHeight = Math.max(48, Math.min(112, dimensions.height - insets.top - tabBarLayout.clearance - 84));
 
   // ETA from the observed rate. Keyed by total so a new run resets it.
   const etaRef = useRef({ total: 0, startTime: 0, startDone: 0 });
@@ -50,7 +50,7 @@ export default function AnalysisProgress({
     done: state.done,
     total: state.total,
   });
-  if (state.memoryPaused) label = t('analysis_paused_low_power');
+  if (state.memoryPaused) label = t('analysis_paused_memory');
   else if (state.lowPower) label = `${label} · ${t('analysis_low_power_chunk')}`;
   else if (etaLabel) label = `${label} · ${etaLabel}`;
 
@@ -64,18 +64,13 @@ export default function AnalysisProgress({
       <GlassSurface androidSource={androidSource} effectEnabled={effectEnabled} style={[styles.card, { borderColor: colors.border }]}>
         <View style={styles.inner}>
           <View style={styles.row}>
-            <ScrollView style={[styles.labelViewport, { maxHeight: maxLabelHeight }]} nestedScrollEnabled>
-              <Text style={[styles.text, { color: colors.text }]}>{label}</Text>
-            </ScrollView>
-            <Pressable
-              onPress={onCancel}
-              hitSlop={4}
-              style={({ pressed }) => [styles.cancel, pressed && { backgroundColor: colors.elevated }]}
-              accessibilityRole="button"
-              accessibilityLabel={t('cancel')}
+            <Text
+              style={[styles.text, { color: colors.text }]}
+              numberOfLines={dimensions.fontScale > 1.3 ? 2 : 1}
+              accessibilityLabel={label}
             >
-              <Ionicons name="close-circle" size={22} color={colors.glassSubtext} accessible={false} />
-            </Pressable>
+              {label}
+            </Text>
           </View>
           <View style={[styles.track, { backgroundColor: colors.chartTrack }]}>
             <View
@@ -85,6 +80,14 @@ export default function AnalysisProgress({
               ]}
             />
           </View>
+          <Pressable
+            onPress={onCancel}
+            style={({ pressed }) => [styles.cancel, pressed && { backgroundColor: colors.elevated }]}
+            accessibilityRole="button"
+            accessibilityLabel={t('cancel')}
+          >
+            <Ionicons name="close-circle" size={22} color={colors.glassSubtext} accessible={false} />
+          </Pressable>
         </View>
       </GlassSurface>
     </View>
@@ -99,14 +102,15 @@ const styles = StyleSheet.create({
   },
   card: {
     borderRadius: 16,
+    ...iosShapes.floating,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
   },
   inner: { padding: 12 },
-  row: { flexDirection: 'row', alignItems: 'center' },
-  labelViewport: { flex: 1, minWidth: 0 },
-  text: { fontSize: 13, fontWeight: '600' },
-  cancel: { marginLeft: 8, minWidth: 48, minHeight: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
+  row: { minHeight: 22, justifyContent: 'center', paddingRight: 36 },
+  text: { minWidth: 0, fontSize: 13, lineHeight: 18, fontWeight: '600' },
+  // Keep the full touch target without making the label row 48 points tall.
+  cancel: { position: 'absolute', top: 0, right: 0, width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
   track: { height: 4, borderRadius: 2, marginTop: 8, overflow: 'hidden' },
   fill: { height: 4, borderRadius: 2 },
 });

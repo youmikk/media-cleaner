@@ -20,6 +20,7 @@
 - **压缩工具**：选择压缩质量并生成新文件，是否删除原文件由你决定。
 - **清理提醒**：设置适合自己的提醒时间区间。
 - **自适应外观**：支持深浅主题和中英文，液态玻璃按设备能力适配，Android 可手动开关。
+- **低电量适配**：进入低电量模式时提示，可开关自动省电适配，调节玻璃采样、动画和分析节奏。
 
 ## 隐私与数据
 
@@ -37,4 +38,4 @@ Android 可开启应用回收站，暂存已删除内容 30 天并支持恢复�
 
 项目采用 [MIT License](./LICENSE)，分发时须保留版权与许可声明。
 
-Android 液态玻璃效果使用了 [AndroidLiquidGlassView](https://github.com/QmDeve/AndroidLiquidGlassView) 的开源着色器，感谢原作者的贡献。[第三方许可证](./modules/liquid-glass/LICENSE-AndroidLiquidGlassView.txt)
+Android 液态玻璃效果使用 [Kyant0/AndroidLiquidGlass](https://github.com/Kyant0/AndroidLiquidGlass/) 1.0.6 的官方折射与高光着色器，通过本地原生 View 接入 React Native。[接入说明](./modules/liquid-glass/README.md) · [Apache 2.0 许可证](./modules/liquid-glass/android/src/main/assets/licenses/AndroidLiquidGlass.txt)

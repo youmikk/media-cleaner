@@ -1,16 +1,13 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { AccessibilityInfo, AppState, Platform } from 'react-native';
-import { subscribeLowPower } from '../utils/batteryUtils';
+import { usePowerMode } from './PowerModeContext';
 
 const GlassEffectsContext = createContext({ effectsEnabled: false, reduceMotion: true });
 
 // One subscription for the whole application, not one battery/a11y listener
 // per card. The first frame remains visible while system preferences load.
 export function GlassEffectsProvider({ children }) {
-  // Start with effects on. The async system preference reads below may turn
-  // them off, but a missing API in Expo Go/older binaries must not leave the
-  // entire app permanently opaque.
-  const [lowPower, setLowPower] = useState(false);
+  const { adaptiveLowPower } = usePowerMode();
   const [reduceMotion, setReduceMotion] = useState(true);
   const [reduceTransparency, setReduceTransparency] = useState(false);
   // AppState.currentState can be null during bridge startup even though the
@@ -21,17 +18,7 @@ export function GlassEffectsProvider({ children }) {
   useEffect(() => {
     let live = true;
     let preferenceRead = 0;
-    let powerRead = 0;
-    let stopPower = () => {};
     const subscriptions = [];
-    const refreshPower = () => {
-      const read = ++powerRead;
-      setLowPower(true);
-      stopPower();
-      stopPower = subscribeLowPower((value) => {
-        if (live && read === powerRead) setLowPower(value);
-      });
-    };
     const readPreferences = () => {
       const read = ++preferenceRead;
       Promise.allSettled([
@@ -59,7 +46,6 @@ export function GlassEffectsProvider({ children }) {
       }
     };
     readPreferences();
-    refreshPower();
     listen(AccessibilityInfo, 'reduceMotionChanged', () => readPreferences());
     if (Platform.OS === 'ios') {
       listen(AccessibilityInfo, 'reduceTransparencyChanged', () => readPreferences());
@@ -69,13 +55,11 @@ export function GlassEffectsProvider({ children }) {
       if (state === 'active') {
         setMemoryLimited(false);
         readPreferences();
-        refreshPower();
       }
     });
     listen(AppState, 'memoryWarning', () => setMemoryLimited(true));
     return () => {
       live = false;
-      stopPower();
       subscriptions.forEach((subscription) => {
         try {
           subscription?.remove();
@@ -87,9 +71,12 @@ export function GlassEffectsProvider({ children }) {
   }, []);
 
   const value = useMemo(() => ({
-    effectsEnabled: active && !lowPower && !reduceTransparency && !memoryLimited,
-    reduceMotion,
-  }), [active, lowPower, reduceTransparency, memoryLimited, reduceMotion]);
+    effectsEnabled: active && !reduceTransparency && !memoryLimited,
+    // Power adaptation affects our animations and Android capture quality.
+    // UIKit retains control of the native iOS material in Low Power Mode.
+    reduceMotion: reduceMotion || adaptiveLowPower,
+    lowPower: adaptiveLowPower,
+  }), [active, adaptiveLowPower, reduceTransparency, memoryLimited, reduceMotion]);
 
   return <GlassEffectsContext.Provider value={value}>{children}</GlassEffectsContext.Provider>;
 }

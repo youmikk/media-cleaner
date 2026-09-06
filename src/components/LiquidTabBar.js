@@ -26,6 +26,8 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
   const insets = useSafeAreaInsets();
   const dimensions = useWindowDimensions();
   const layout = getTabBarLayout(dimensions, insets, state.routes.length);
+  const barRadius = Platform.OS === 'ios' ? layout.height / 2 : 30;
+  const innerRadius = Math.max(0, barRadius - layout.padding);
   const pillX = useSharedValue(state.index * layout.tabWidth);
   const animateSelection = !reduceMotion && effectsEnabled;
   const barRef = useRef(null);
@@ -94,7 +96,7 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
     }]}>
       <GlassSurface
         androidSource={focusedRoute.name}
-        style={[styles.capsule, { width: layout.width, borderColor: colors.border }]}
+        style={[styles.capsule, { width: layout.width, borderRadius: barRadius, borderColor: colors.border }]}
       >
         <View
           ref={barRef}
@@ -106,7 +108,7 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
           <Animated.View pointerEvents="none" style={[
             styles.pill,
             { left: layout.padding, top: layout.padding, bottom: layout.padding,
-              width: layout.tabWidth, backgroundColor: colors.accentSoft },
+              width: layout.tabWidth, borderRadius: innerRadius, backgroundColor: colors.accentSoft },
             pillStyle,
           ]} />
           {state.routes.map((route, index) => {
@@ -120,7 +122,7 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
                 onPress={() => pressRoute(index)}
                 onLongPress={() => navigation.emit({ type: 'tabLongPress', target: route.key })}
                 android_ripple={{ color: colors.accentSoft }}
-                style={({ pressed }) => [styles.tab, { width: layout.tabWidth }, pressed && { backgroundColor: colors.elevated }]}
+                style={({ pressed }) => [styles.tab, { width: layout.tabWidth, borderRadius: innerRadius }, pressed && { backgroundColor: colors.elevated }]}
                 accessibilityRole="tab"
                 accessibilityLabel={options.tabBarAccessibilityLabel || labels[route.name]}
                 accessibilityState={{ selected: focused }}
@@ -143,7 +145,7 @@ const styles = StyleSheet.create({
   wrap: { position: 'absolute', alignItems: 'center' },
   capsule: { borderRadius: 30, borderCurve: 'continuous', borderWidth: StyleSheet.hairlineWidth },
   row: { flexDirection: 'row' },
-  pill: { position: 'absolute', borderRadius: 24 },
-  tab: { minHeight: 48, alignItems: 'center', justifyContent: 'center', paddingVertical: 4, paddingHorizontal: 4, borderRadius: 24, overflow: 'hidden' },
+  pill: { position: 'absolute', borderRadius: 24, borderCurve: 'continuous' },
+  tab: { minHeight: 48, alignItems: 'center', justifyContent: 'center', paddingVertical: 4, paddingHorizontal: 4, borderRadius: 24, borderCurve: 'continuous', overflow: 'hidden' },
   label: { fontSize: 12, lineHeight: 16, marginTop: 3, textAlign: 'center' },
 });

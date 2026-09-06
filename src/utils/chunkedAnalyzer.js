@@ -10,7 +10,6 @@ import { groupBursts } from './burstDetection';
 import { log } from './logger';
 import { runMediaWork } from './mediaWorkScheduler';
 import {
-  subscribeLowPower,
   subscribeMemoryWarning,
   chunkSizeFor,
 } from './batteryUtils';
@@ -293,13 +292,15 @@ class ChunkedAnalyzer {
     return m;
   }
 
+  setLowPowerMode(enabled) {
+    if (this.lowPower === enabled) return;
+    this.lowPower = enabled;
+    this._emit({ lowPower: enabled });
+  }
+
   _initPowerAdaptation() {
     if (this._powerInit) return;
     this._powerInit = true;
-    subscribeLowPower((low) => {
-      this.lowPower = low;
-      this._emit({ lowPower: low });
-    });
     subscribeMemoryWarning(() => {
       this.memoryPaused = true;
       this._emit({ memoryPaused: true });
