@@ -11,7 +11,7 @@ import {
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
-import { iosShapes } from '../theme/shapes';
+import { surfaceShapes } from '../theme/shapes';
 import IconButton from './IconButton';
 import PhotoViewer from './PhotoViewer';
 import { getAssetsByIds } from '../utils/albumHelpers';
@@ -157,7 +157,7 @@ const styles = StyleSheet.create({
   sheet: {
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    ...iosShapes.sheet,
+    ...surfaceShapes.sheet,
     padding: 16,
     paddingBottom: 30,
   },

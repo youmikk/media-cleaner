@@ -5,7 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
 import GlassSurface from './GlassSurface';
 import { getTabBarLayout } from '../utils/tabBarLayout';
-import { iosShapes } from '../theme/shapes';
+import { surfaceShapes } from '../theme/shapes';
 
 /**
  * Non-blocking analysis overlay pinned above the tab bar.
@@ -102,7 +102,7 @@ const styles = StyleSheet.create({
   },
   card: {
     borderRadius: 16,
-    ...iosShapes.floating,
+    ...surfaceShapes.floating,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
   },

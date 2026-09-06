@@ -11,7 +11,7 @@ import {
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
-import { iosShapes } from '../theme/shapes';
+import { surfaceShapes } from '../theme/shapes';
 import GlassSurface from './GlassSurface';
 import AppBottomSheet from './AppBottomSheet';
 
@@ -388,7 +388,7 @@ const styles = StyleSheet.create({
     width: 270,
     maxWidth: '100%',
     borderRadius: 26,
-    ...iosShapes.menu,
+    ...surfaceShapes.menu,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
   },
@@ -396,7 +396,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     right: 16, // trailing-aligned with the settings rows
   },
-  menu: { borderRadius: 26, ...iosShapes.menu },
+  menu: { borderRadius: 26, ...surfaceShapes.menu },
   headerRow: {
     paddingHorizontal: 16,
     paddingTop: 12,

@@ -11,6 +11,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { useSettings } from '../context/SettingsContext';
+import { surfaceShapes } from '../theme/shapes';
 
 let presentDialog = null;
 
@@ -146,7 +147,7 @@ const styles = StyleSheet.create({
     padding: 24,
   },
   dialog: {
-    borderRadius: 16,
+    ...surfaceShapes.menu,
     borderWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: 24,
     paddingTop: 24,

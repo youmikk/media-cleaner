@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
-import { iosShapes } from '../theme/shapes';
+import { surfaceShapes } from '../theme/shapes';
 import { pickerStyles } from './pickerButtonStyle';
 import AppBottomSheet from './AppBottomSheet';
 
@@ -243,7 +243,7 @@ const styles = StyleSheet.create({
   sheet: {
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    ...iosShapes.sheet,
+    ...surfaceShapes.sheet,
     padding: 20,
     paddingBottom: 34,
   },

@@ -11,6 +11,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
+import { surfaceShapes } from '../theme/shapes';
 import { useTrash } from '../context/AppContext';
 import * as trashManager from '../utils/trashManager';
 import { formatBytes } from '../utils/albumHelpers';
@@ -584,7 +585,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    borderRadius: 20,
+    ...surfaceShapes.toolbar,
     borderWidth: StyleSheet.hairlineWidth,
   },
   actionsInner: {
@@ -603,7 +604,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    borderRadius: 14,
+    ...surfaceShapes.group,
     borderWidth: 1,
     paddingVertical: 12,
     paddingHorizontal: 10,

@@ -2,6 +2,7 @@ import React, { useId, useState } from 'react';
 import { Modal, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
+import { surfaceShapes } from '../theme/shapes';
 import IconButton from './IconButton';
 import GlassBackdrop from './GlassBackdrop';
 import GlassSurface from './GlassSurface';
@@ -116,9 +117,7 @@ const styles = StyleSheet.create({
   backdrop: { flex: 1, justifyContent: 'flex-end' },
   sheet: {
     maxHeight: '88%',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    overflow: 'hidden',
+    ...surfaceShapes.sheet,
     paddingHorizontal: 16,
     paddingTop: 8,
     elevation: 12,

@@ -3,7 +3,7 @@ import { View, Text, Pressable, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
-import { iosShapes } from '../theme/shapes';
+import { surfaceShapes } from '../theme/shapes';
 import GlassSurface from './GlassSurface';
 import { formatDate } from '../utils/albumHelpers';
 
@@ -200,7 +200,7 @@ const styles = StyleSheet.create({
   wrap: { position: 'absolute', left: 16, right: 16, alignItems: 'center' },
   bar: {
     borderRadius: 28,
-    ...iosShapes.toolbar,
+    ...surfaceShapes.toolbar,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
     alignSelf: 'stretch',

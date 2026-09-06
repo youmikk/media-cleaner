@@ -1,10 +1,10 @@
 import { Platform } from 'react-native';
 
-// iOS 26 uses rounder, continuous outlines with nested controls following
-// their container. These are app choices based on the HIG, not system metrics.
-// Keep Android's existing dimensions and radii independently configurable.
-const continuous = { borderCurve: 'continuous' };
-export const iosShapes = Platform.OS === 'ios' ? {
+// Both platforms share the HIG-inspired radius hierarchy. UIKit supports
+// continuous curves; Android uses native round-rect clipping with these radii.
+// These are app design choices, not fixed Apple system metrics.
+const continuous = Platform.OS === 'ios' ? { borderCurve: 'continuous' } : {};
+export const surfaceShapes = {
   control: { ...continuous, borderRadius: 999 },
   floating: { ...continuous, borderRadius: 24 },
   toolbar: { ...continuous, borderRadius: 28 },
@@ -16,6 +16,4 @@ export const iosShapes = Platform.OS === 'ios' ? {
     borderTopRightRadius: 32,
     overflow: 'hidden',
   },
-} : {
-  control: {}, floating: {}, toolbar: {}, group: {}, menu: {}, sheet: {},
 };

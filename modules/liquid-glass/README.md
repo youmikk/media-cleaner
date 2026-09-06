@@ -66,11 +66,13 @@ and [a 60Hz ProMotion ceiling and some disabled visual effects](https://support.
 Neither statement requires replacing native glass with a solid app surface.
 Actual UIKit appearance remains system-controlled.
 
-The iOS shape overrides in `src/theme/shapes.js` follow Apple's
+The shared radius hierarchy in `src/theme/shapes.js` follows Apple's
 [rounded and concentric shape guidance](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass).
-The tab capsule uses half its layout height, with its inner radius reduced
-by the content inset. Controls and sheets use continuous curves; these are
-app-selected dimensions, not claimed Apple system constants.
+On both platforms the tab capsule uses half its layout height, with its inner
+radius reduced by the content inset. Controls, floating surfaces, groups and
+sheets share radius values. iOS uses continuous curves; Android uses native
+round-rect geometry, including in the lens shader. These are app-selected
+dimensions, not claimed Apple system constants.
 
 ## Compatibility
 

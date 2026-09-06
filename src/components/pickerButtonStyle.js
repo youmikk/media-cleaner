@@ -1,5 +1,5 @@
 import { Platform, StyleSheet } from 'react-native';
-import { iosShapes } from '../theme/shapes';
+import { surfaceShapes } from '../theme/shapes';
 
 /**
  * ONE geometry for every control in the album-select controls row: the album
@@ -24,7 +24,7 @@ export const pickerStyles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 4,
     borderRadius: 14,
-    ...iosShapes.control,
+    ...surfaceShapes.control,
     borderWidth: StyleSheet.hairlineWidth,
   },
   text: { fontSize: 14, fontWeight: '600', flexShrink: 1, minWidth: 0 },

@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSettings } from '../context/SettingsContext';
 import { useGlassEffects } from '../context/GlassEffectsContext';
 import { getTabBarLayout } from '../utils/tabBarLayout';
+import { surfaceShapes } from '../theme/shapes';
 import GlassSurface from './GlassSurface';
 
 const HIDDEN_ROUTES = [
@@ -26,7 +27,7 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
   const insets = useSafeAreaInsets();
   const dimensions = useWindowDimensions();
   const layout = getTabBarLayout(dimensions, insets, state.routes.length);
-  const barRadius = Platform.OS === 'ios' ? layout.height / 2 : 30;
+  const barRadius = layout.height / 2;
   const innerRadius = Math.max(0, barRadius - layout.padding);
   const pillX = useSharedValue(state.index * layout.tabWidth);
   const animateSelection = !reduceMotion && effectsEnabled;
@@ -143,9 +144,9 @@ export default function LiquidTabBar({ state, descriptors, navigation }) {
 
 const styles = StyleSheet.create({
   wrap: { position: 'absolute', alignItems: 'center' },
-  capsule: { borderRadius: 30, borderCurve: 'continuous', borderWidth: StyleSheet.hairlineWidth },
+  capsule: { ...surfaceShapes.control, borderWidth: StyleSheet.hairlineWidth },
   row: { flexDirection: 'row' },
-  pill: { position: 'absolute', borderRadius: 24, borderCurve: 'continuous' },
-  tab: { minHeight: 48, alignItems: 'center', justifyContent: 'center', paddingVertical: 4, paddingHorizontal: 4, borderRadius: 24, borderCurve: 'continuous', overflow: 'hidden' },
+  pill: { position: 'absolute', ...surfaceShapes.control },
+  tab: { minHeight: 48, alignItems: 'center', justifyContent: 'center', paddingVertical: 4, paddingHorizontal: 4, ...surfaceShapes.control, overflow: 'hidden' },
   label: { fontSize: 12, lineHeight: 16, marginTop: 3, textAlign: 'center' },
 });

@@ -13,7 +13,7 @@ import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../context/SettingsContext';
-import { iosShapes } from '../theme/shapes';
+import { surfaceShapes } from '../theme/shapes';
 import { useFavorites } from '../context/AppContext';
 import { getAssetsByIds } from '../utils/albumHelpers';
 import { getVideoThumbnail } from '../utils/thumbCache';
@@ -246,7 +246,7 @@ const styles = StyleSheet.create({
   header: {
     position: 'absolute', top: 0, left: 0, right: 0, zIndex: 1,
     borderRadius: 16, borderWidth: StyleSheet.hairlineWidth,
-    ...iosShapes.toolbar,
+    ...surfaceShapes.toolbar,
   },
   topBar: {
     minHeight: 56,
