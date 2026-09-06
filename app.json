@@ -17,7 +17,8 @@
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "净相 (MediaCleaner) needs access to your photo library to help you review and clean up photos and videos.",
         "NSPhotoLibraryAddUsageDescription": "净相 (MediaCleaner) needs write access to move, restore and delete photos on your behalf.",
-        "CADisableMinimumFrameDurationOnPhone": true
+        "CADisableMinimumFrameDurationOnPhone": true,
+        "UIDesignRequiresCompatibility": false
       }
     },
     "android": {

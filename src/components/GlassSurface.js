@@ -55,6 +55,7 @@ export default function GlassSurface({
   const androidFallback = processColor(colors.elevated) ?? 0;
   const layerStyle = [StyleSheet.absoluteFill, { borderRadius: radius }];
   const showEffect = effectsEnabled && effectEnabled;
+  const nativeIOSGlass = Platform.OS === 'ios' && GlassView && liquidGlassAvailable;
   const nativeAndroidGlass =
     Platform.OS === 'android' && androidSource && androidLiquidGlassAvailable && NativeGlassView;
   let material = null;
@@ -90,13 +91,14 @@ export default function GlassSurface({
         <View style={[StyleSheet.absoluteFill, { backgroundColor: surfaceTint }]} />
       </BlurView>
     );
-  } else if (showEffect && Platform.OS === 'ios' && GlassView && liquidGlassAvailable) {
+  } else if (showEffect && nativeIOSGlass) {
     material = (
       <GlassView
         pointerEvents="none"
         accessible={false}
         accessibilityElementsHidden
         style={layerStyle}
+        borderRadius={radius}
         glassEffectStyle={glassEffectStyle}
         tintColor={surfaceTint}
         colorScheme={isDark ? 'dark' : 'light'}
