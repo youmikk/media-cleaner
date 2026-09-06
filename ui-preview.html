@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>净相 · 移动端 UI 视觉稿</title>
+    <style>
+      :root {
+        --ink: #1d2928;
+        --muted: #71807b;
+        --line: #dce5df;
+        --page: #f1f5f2;
+        --surface: #ffffff;
+        --surface-soft: #f7faf8;
+        --nav: #202d2b;
+        --nav-muted: #a8b5b0;
+        --accent: #d96852;
+        --accent-dark: #a94738;
+        --accent-soft: #fde9e3;
+        --sage: #5f8d76;
+        --sage-soft: #e8f3ed;
+        --lavender: #7d77a7;
+        --lavender-soft: #eeecf8;
+        --radius-xl: 26px;
+        --radius-lg: 19px;
+        --radius-md: 14px;
+        --shadow: 0 20px 48px rgba(28, 48, 42, .12);
+      }
+
+      * { box-sizing: border-box; }
+      html { background: #dfe8e3; }
+      body {
+        margin: 0;
+        min-width: 320px;
+        color: var(--ink);
+        background: #dfe8e3;
+        font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      button { font: inherit; cursor: default; }
+      svg { display: block; }
+
+      .phone {
+        position: relative;
+        width: min(100%, 430px);
+        min-height: 100vh;
+        margin: 0 auto;
+        overflow: hidden;
+        background: var(--page);
+      }
+
+      .status-bar {
+        height: env(safe-area-inset-top, 18px);
+        min-height: 18px;
+        background: var(--page);
+      }
+
+      .screen {
+        min-height: calc(100vh - env(safe-area-inset-top, 18px));
+        padding: 0 18px 100px;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 18px 2px 22px;
+      }
+
+      .greeting { min-width: 0; }
+      .overline {
+        margin-bottom: 6px;
+        color: var(--accent-dark);
+        font-size: 11px;
+        font-weight: 850;
+        letter-spacing: .08em;
+      }
+      h1, h2, h3, p { margin: 0; }
+      h1 { font-size: 25px; line-height: 1.16; letter-spacing: -.03em; }
+      .greeting p { margin-top: 7px; color: var(--muted); font-size: 12px; }
+
+      .profile-button {
+        display: grid;
+        place-items: center;
+        flex: 0 0 auto;
+        width: 43px;
+        height: 43px;
+        color: #fff;
+        background: var(--nav);
+        border: 0;
+        border-radius: 50%;
+        font-size: 14px;
+        font-weight: 850;
+      }
+
+      .hero {
+        position: relative;
+        overflow: hidden;
+        padding: 22px;
+        background: var(--nav);
+        border-radius: var(--radius-xl);
+        box-shadow: var(--shadow);
+      }
+      .hero::after {
+        position: absolute;
+        right: -42px;
+        bottom: -62px;
+        width: 176px;
+        height: 176px;
+        border: 1px solid rgba(255,255,255,.12);
+        border-radius: 50%;
+        content: "";
+      }
+      .hero::before {
+        position: absolute;
+        right: 32px;
+        bottom: -92px;
+        width: 210px;
+        height: 210px;
+        border: 1px solid rgba(255,255,255,.07);
+        border-radius: 50%;
+        content: "";
+      }
+      .hero-copy { position: relative; z-index: 1; max-width: 250px; }
+      .hero .overline { color: #f4b2a3; }
+      .hero h2 { color: #fff; font-size: 27px; line-height: 1.15; letter-spacing: -.04em; }
+      .hero p { margin-top: 10px; color: #b8c7c1; font-size: 12px; line-height: 1.65; }
+      .hero-actions { display: flex; gap: 8px; margin-top: 20px; }
+      .primary, .ghost {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        min-height: 42px;
+        padding: 0 13px;
+        border: 0;
+        border-radius: 11px;
+        font-size: 12px;
+        font-weight: 850;
+      }
+      .primary { color: #fff; background: var(--accent); }
+      .ghost { color: #f8fffb; background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.16); }
+      .primary svg, .ghost svg { width: 16px; height: 16px; }
+
+      .hero-progress {
+        position: absolute;
+        right: 19px;
+        bottom: 20px;
+        z-index: 1;
+        display: grid;
+        place-items: center;
+        width: 78px;
+        height: 78px;
+        border-radius: 50%;
+        background: conic-gradient(var(--accent) 0 72%, #536661 72% 100%);
+      }
+      .hero-progress::after {
+        display: grid;
+        place-items: center;
+        width: 58px;
+        height: 58px;
+        color: #fff;
+        background: var(--nav);
+        border-radius: 50%;
+        content: "72%";
+        font-size: 15px;
+        font-weight: 850;
+      }
+
+      .album-focus {
+        margin: 22px 0 4px;
+        padding: 18px 0 14px;
+        text-align: center;
+      }
+      .album-focus-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 3px;
+        text-align: left;
+      }
+      .album-focus-title { font-size: 18px; font-weight: 850; letter-spacing: -.02em; }
+      .album-focus-meta { margin-top: 4px; color: var(--muted); font-size: 11px; }
+      .album-focus-switch {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        min-height: 34px;
+        padding: 0 10px;
+        color: var(--accent-dark);
+        background: var(--accent-soft);
+        border: 0;
+        border-radius: 10px;
+        font-size: 10px;
+        font-weight: 850;
+      }
+      .album-focus-switch svg { width: 14px; height: 14px; }
+      .fan-stage {
+        position: relative;
+        height: 225px;
+        margin: 12px auto 0;
+      }
+      .fan-card {
+        position: absolute;
+        top: 18px;
+        left: 50%;
+        width: 138px;
+        height: 182px;
+        margin-left: -69px;
+        overflow: hidden;
+        background: #fff;
+        border: 6px solid #fff;
+        border-radius: 17px;
+        box-shadow: 0 12px 25px rgba(28, 48, 42, .16);
+      }
+      .fan-card img { display: block; width: 100%; height: 100%; object-fit: cover; }
+      .fan-card.left { transform: translateX(-77px) rotate(-13deg); }
+      .fan-card.right { transform: translateX(77px) rotate(13deg); }
+      .fan-card.center { top: 6px; z-index: 2; transform: rotate(1deg); }
+      .fan-card.center::after {
+        position: absolute;
+        right: 8px;
+        bottom: 8px;
+        display: grid;
+        place-items: center;
+        width: 27px;
+        height: 27px;
+        color: #fff;
+        background: rgba(32, 45, 43, .72);
+        border-radius: 50%;
+        content: "3";
+        font-size: 10px;
+        font-weight: 850;
+      }
+      .fan-caption { color: var(--muted); font-size: 11px; }
+      .fan-caption strong { color: var(--ink); font-size: 12px; }
+
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+        margin: 14px 0 26px;
+      }
+      .stat {
+        min-width: 0;
+        padding: 13px 11px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: var(--radius-md);
+      }
+      .stat-label { display: block; color: var(--muted); font-size: 10px; line-height: 1.3; }
+      .stat strong { display: block; margin-top: 8px; font-size: 17px; letter-spacing: -.02em; }
+      .stat small { display: block; margin-top: 3px; color: var(--sage); font-size: 9px; font-weight: 800; }
+
+      .section { margin-top: 25px; }
+      .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+      .section-heading h2 { font-size: 18px; letter-spacing: -.02em; }
+      .section-heading p { margin-top: 4px; color: var(--muted); font-size: 11px; }
+      .section-link { flex: 0 0 auto; color: var(--accent-dark); font-size: 11px; font-weight: 850; }
+
+      .suggestion-scroll {
+        display: flex;
+        gap: 11px;
+        overflow-x: auto;
+        margin: 0 -18px;
+        padding: 0 18px 4px;
+        scrollbar-width: none;
+      }
+      .suggestion-scroll::-webkit-scrollbar { display: none; }
+      .suggestion {
+        flex: 0 0 232px;
+        overflow: hidden;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: var(--radius-lg);
+      }
+      .suggestion-image { display: block; width: 100%; height: 128px; object-fit: cover; }
+      .suggestion-body { padding: 14px; }
+      .suggestion-kicker { color: var(--accent-dark); font-size: 10px; font-weight: 850; letter-spacing: .06em; }
+      .suggestion h3 { margin-top: 7px; font-size: 16px; }
+      .suggestion p { min-height: 35px; margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.55; }
+      .suggestion-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 13px; }
+      .suggestion-count { color: var(--ink); font-size: 11px; font-weight: 800; }
+      .arrow-button { display: grid; place-items: center; width: 29px; height: 29px; color: #fff; background: var(--accent); border-radius: 50%; }
+      .arrow-button svg { width: 14px; height: 14px; }
+
+      .album-list { display: grid; gap: 9px; }
+      .album-row {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        min-height: 70px;
+        padding: 10px 12px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: var(--radius-md);
+      }
+      .album-thumb { flex: 0 0 auto; width: 48px; height: 48px; object-fit: cover; border-radius: 12px; }
+      .album-info { min-width: 0; flex: 1; }
+      .album-info strong { display: block; font-size: 13px; }
+      .album-info span { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
+      .album-progress { flex: 0 0 auto; width: 46px; text-align: right; color: var(--sage); font-size: 11px; font-weight: 850; }
+      .album-bar { height: 4px; margin-top: 7px; overflow: hidden; background: #edf1ee; border-radius: 99px; }
+      .album-bar span { display: block; width: 68%; height: 100%; background: var(--sage); border-radius: inherit; }
+      .album-row:nth-child(2) .album-bar span { width: 52%; background: var(--lavender); }
+
+      .bottom-nav {
+        position: fixed;
+        right: max(12px, calc((100vw - 430px) / 2 + 12px));
+        bottom: max(12px, env(safe-area-inset-bottom, 12px));
+        left: max(12px, calc((100vw - 430px) / 2 + 12px));
+        z-index: 4;
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 3px;
+        padding: 7px;
+        background: rgba(32, 45, 43, .98);
+        border-radius: 18px;
+        box-shadow: 0 14px 30px rgba(20, 34, 31, .22);
+      }
+      .bottom-item { display: grid; place-items: center; gap: 3px; min-height: 51px; color: var(--nav-muted); border-radius: 12px; font-size: 9px; font-weight: 750; }
+      .bottom-item.active { color: #fff; background: #344743; }
+      .bottom-item svg { width: 18px; height: 18px; }
+
+      @media (min-width: 600px) {
+        .phone { min-height: 860px; margin: 24px auto; border: 1px solid #ccd9d2; border-radius: 34px; box-shadow: var(--shadow); }
+        .bottom-nav { position: absolute; right: 12px; bottom: 15px; left: 12px; }
+      }
+      @media (max-width: 360px) {
+        .screen { padding-right: 14px; padding-left: 14px; }
+        .suggestion-scroll { margin-right: -14px; margin-left: -14px; padding-right: 14px; padding-left: 14px; }
+        .hero { padding: 19px; }
+        .hero h2 { font-size: 24px; }
+        .hero-progress { right: 14px; bottom: 16px; transform: scale(.9); transform-origin: bottom right; }
+        .fan-card { width: 121px; height: 165px; margin-left: -60.5px; }
+        .fan-card.left { transform: translateX(-65px) rotate(-13deg); }
+        .fan-card.right { transform: translateX(65px) rotate(13deg); }
+        .fan-stage { height: 208px; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="phone">
+      <div class="status-bar"></div>
+      <main class="screen">
+        <header class="topbar">
+          <div class="greeting">
+            <div class="overline">净相 · 相册整理</div>
+            <h1>下午好，今天整理一点点</h1>
+            <p>从最值得处理的内容开始。</p>
+          </div>
+          <button class="profile-button" aria-label="打开我的页面">我</button>
+        </header>
+
+        <section class="hero" aria-labelledby="hero-title">
+          <div class="hero-copy">
+            <div class="overline">本周整理进度</div>
+            <h2 id="hero-title">让相册回到轻盈状态</h2>
+            <p>已完成的内容不会重复出现。接着上次的进度继续整理。</p>
+            <div class="hero-actions">
+              <button class="primary"><i data-lucide="play" aria-hidden="true"></i>开始清理</button>
+              <button class="ghost"><i data-lucide="sparkles" aria-hidden="true"></i>看建议</button>
+            </div>
+          </div>
+          <div class="hero-progress" aria-label="本周清理进度 72%"></div>
+        </section>
+
+        <section class="album-focus" aria-labelledby="album-focus-title">
+          <div class="album-focus-head">
+            <div><h2 id="album-focus-title" class="album-focus-title">相机</h2><p class="album-focus-meta">最近照片 · 640 项待整理</p></div>
+            <button class="album-focus-switch"><i data-lucide="sliders-horizontal" aria-hidden="true"></i>筛选</button>
+          </div>
+          <div class="fan-stage" aria-label="相机相册照片预览">
+            <div class="fan-card left"><img src="https://images.unsplash.com/photo-1500534623283-312aade485b7?auto=format&fit=crop&w=480&q=86" alt="山间风景照片" /></div>
+            <div class="fan-card right"><img src="https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=480&q=86" alt="海边风景照片" /></div>
+            <div class="fan-card center"><img src="https://images.unsplash.com/photo-1501785888041-af3ef285b470?auto=format&fit=crop&w=480&q=86" alt="湖面和山脉照片" /></div>
+          </div>
+          <div class="fan-caption"><strong>2026 年 9 月</strong>　继续上次的整理进度</div>
+        </section>
+
+        <section class="stats" aria-label="相册统计">
+          <article class="stat"><span class="stat-label">待整理</span><strong>1,286</strong><small>↓ 128 项</small></article>
+          <article class="stat"><span class="stat-label">已释放</span><strong>8.4 GB</strong><small>本周累计</small></article>
+          <article class="stat"><span class="stat-label">本周整理</span><strong>3 次</strong><small>保持节奏</small></article>
+        </section>
+
+        <section class="section" aria-labelledby="suggestion-title">
+          <div class="section-heading">
+            <div><h2 id="suggestion-title">智能建议</h2><p>先处理最值得看的内容</p></div>
+            <span class="section-link">全部</span>
+          </div>
+          <div class="suggestion-scroll">
+            <article class="suggestion">
+              <img class="suggestion-image" src="https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=760&q=84" alt="一组相似的人像照片" />
+              <div class="suggestion-body"><div class="suggestion-kicker">优先处理</div><h3>重复照片</h3><p>找出内容相近的照片，留下最满意的一张。</p><div class="suggestion-footer"><span class="suggestion-count">128 张 · 1.2 GB</span><span class="arrow-button"><i data-lucide="arrow-up-right" aria-hidden="true"></i></span></div></div>
+            </article>
+            <article class="suggestion">
+              <img class="suggestion-image" src="https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=760&q=84" alt="户外风景照片" />
+              <div class="suggestion-body"><div class="suggestion-kicker" style="color: var(--lavender);">占用空间</div><h3>最大文件</h3><p>优先查看体积较大的照片和视频。</p><div class="suggestion-footer"><span class="suggestion-count">42 项 · 3.8 GB</span><span class="arrow-button" style="background: var(--lavender);"><i data-lucide="arrow-up-right" aria-hidden="true"></i></span></div></div>
+            </article>
+            <article class="suggestion">
+              <img class="suggestion-image" src="https://images.unsplash.com/photo-1494438639946-1ebd1d20bf85?auto=format&fit=crop&w=760&q=84" alt="桌面上的相机和照片" />
+              <div class="suggestion-body"><div class="suggestion-kicker" style="color: var(--sage);">轻量整理</div><h3>旧截图</h3><p>集中查看已经不再需要的临时图片。</p><div class="suggestion-footer"><span class="suggestion-count">96 张 · 420 MB</span><span class="arrow-button" style="background: var(--sage);"><i data-lucide="arrow-up-right" aria-hidden="true"></i></span></div></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="section" aria-labelledby="album-title">
+          <div class="section-heading"><div><h2 id="album-title">按相册整理</h2><p>保留原始照片信息</p></div><span class="section-link">查看全部</span></div>
+          <div class="album-list">
+            <article class="album-row"><img class="album-thumb" src="https://images.unsplash.com/photo-1519681393784-d120267933ba?auto=format&fit=crop&w=160&q=84" alt="相机相册缩略图" /><div class="album-info"><strong>相机</strong><span>640 项待整理</span><div class="album-bar"><span></span></div></div><span class="album-progress">68%</span></article>
+            <article class="album-row"><img class="album-thumb" src="https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=160&q=84" alt="社交应用相册缩略图" /><div class="album-info"><strong>社交应用</strong><span>384 项待整理</span><div class="album-bar"><span></span></div></div><span class="album-progress" style="color: var(--lavender);">52%</span></article>
+          </div>
+        </section>
+      </main>
+
+      <nav class="bottom-nav" aria-label="主导航">
+        <div class="bottom-item active"><i data-lucide="layout-dashboard" aria-hidden="true"></i><span>首页</span></div>
+        <div class="bottom-item"><i data-lucide="sparkles" aria-hidden="true"></i><span>建议</span></div>
+        <div class="bottom-item"><i data-lucide="heart" aria-hidden="true"></i><span>喜欢</span></div>
+        <div class="bottom-item"><i data-lucide="user-round" aria-hidden="true"></i><span>我的</span></div>
+      </nav>
+    </div>
+    <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+    <script>lucide.createIcons();</script>
+  </body>
+</html>
