@@ -1,6 +1,6 @@
 {
   "name": "media-cleaner",
-  "version": "1.3",
+  "version": "1.30.0",
   "description": "Offline, on-device photo and video cleaner for iOS and Android",
   "license": "MIT",
   "main": "node_modules/expo/AppEntry.js",
