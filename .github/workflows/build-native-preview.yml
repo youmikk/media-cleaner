@@ -1,0 +1,173 @@
+name: Native preview (SwiftUI / Compose)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: '构建源码分支、标签或提交'
+        type: string
+        required: true
+        default: native-foundation
+      platform:
+        description: Platform
+        type: choice
+        default: both
+        options: [both, android, ios]
+      prerelease:
+        description: '构建成功后发布为 GitHub 预发行版本（不勾选则仅保存构建产物）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-preview-${{ inputs.source_ref }}-${{ inputs.platform }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.source.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+      - name: Resolve source and native version
+        id: source
+        run: |
+          VERSION=$(node -p "require('./native/version.json').version")
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo '::error::原生版本号必须采用 x.y.z 格式。'
+            exit 1
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  android:
+    needs: prepare
+    if: inputs.platform != 'ios'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: native/android
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Compile isolated preview APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MediaCleaner-Native-Android-Preview
+          path: native/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          overwrite: true
+
+  ios:
+    needs: prepare
+    if: inputs.platform != 'android'
+    runs-on: macos-26
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: native/ios
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - name: Select Xcode 26
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          test -n "$XCODE"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+      - name: Generate native project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+      - name: Compile unsigned device app
+        run: |
+          xcodebuild -project MediaCleanerNative.xcodeproj -scheme MediaCleanerNative \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+      - name: Package preview IPA
+        run: |
+          mkdir -p build/Payload
+          cp -R build/Build/Products/Release-iphoneos/MediaCleaner.app build/Payload/
+          cd build
+          zip -qry MediaCleaner-Native-Preview-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MediaCleaner-Native-iOS-Preview
+          path: native/ios/build/MediaCleaner-Native-Preview-unsigned.ipa
+          if-no-files-found: error
+          overwrite: true
+
+  prerelease:
+    needs: [prepare, android, ios]
+    if: >-
+      ${{ always() && !cancelled() && inputs.prerelease && needs.prepare.result == 'success' &&
+          ((inputs.platform == 'both' && needs.android.result == 'success' && needs.ios.result == 'success') ||
+           (inputs.platform == 'android' && needs.android.result == 'success') ||
+           (inputs.platform == 'ios' && needs.ios.result == 'success')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: MediaCleaner-Native-*-Preview
+          path: artifacts
+          merge-multiple: true
+      - name: Publish native pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PLATFORM: ${{ inputs.platform }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          TAG="v${VERSION}-native.${GITHUB_RUN_NUMBER}"
+          FILES=()
+          if [ "$PLATFORM" != 'ios' ]; then
+            test -s artifacts/app-debug.apk
+            mv artifacts/app-debug.apk artifacts/MediaCleaner-Native-Android-Preview.apk
+            FILES+=(artifacts/MediaCleaner-Native-Android-Preview.apk)
+          fi
+          if [ "$PLATFORM" != 'android' ]; then
+            test -s artifacts/MediaCleaner-Native-Preview-unsigned.ipa
+            FILES+=(artifacts/MediaCleaner-Native-Preview-unsigned.ipa)
+          fi
+
+          if RELEASE=$(gh release view "$TAG" --json isPrerelease,targetCommitish); then
+            # A rerun may update only this commit's existing native pre-release.
+            if ! jq -e --arg sha "$SOURCE_SHA" \
+              '.isPrerelease == true and .targetCommitish == $sha' <<< "$RELEASE"; then
+              echo '::error::已有标签不属于本次提交的预发行版本，停止发布。'
+              exit 1
+            fi
+          else
+            gh release create "$TAG" --draft --prerelease --latest=false \
+              --target "$SOURCE_SHA" \
+              --title "MediaCleaner ${VERSION} 原生预览 ${GITHUB_RUN_NUMBER}" \
+              --notes-file native/shared/PREVIEW-RELEASE.md
+          fi
+          gh release upload "$TAG" "${FILES[@]}" --clobber
+          gh release edit "$TAG" --draft=false --prerelease --latest=false
