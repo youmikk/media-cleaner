@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "applicationId": "com.mediacleaner.app.nativepreview",
+  "channels": {
+    "stable": {},
+    "preview": {}
+  }
+}

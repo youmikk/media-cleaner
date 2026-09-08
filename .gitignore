@@ -13,6 +13,7 @@ web-build/
 *.p12
 *.key
 *.mobileprovision
+/.signing-native/
 .DS_Store
 npm-debug.*
 yarn-debug.*

@@ -13,10 +13,14 @@ on:
         type: choice
         default: both
         options: [both, android, ios]
-      prerelease:
-        description: '构建成功后发布为 GitHub 预发行版本（不勾选则仅保存构建产物）'
+      release:
+        description: '构建成功后发布到 GitHub Releases'
         type: boolean
         default: false
+      prerelease:
+        description: '标记为预发行版本（仅在勾选发布时生效；关闭即正式发行）'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -32,12 +36,16 @@ jobs:
     outputs:
       sha: ${{ steps.source.outputs.sha }}
       version: ${{ steps.source.outputs.version }}
+      preview: ${{ steps.source.outputs.preview }}
+      ios_preview: ${{ steps.source.outputs.ios_preview }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.source_ref }}
       - name: Resolve source and native version
         id: source
+        env:
+          IS_PREVIEW: ${{ !inputs.release || inputs.prerelease }}
         run: |
           VERSION=$(node -p "require('./native/version.json').version")
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -46,33 +54,63 @@ jobs:
           fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "preview=$IS_PREVIEW" >> "$GITHUB_OUTPUT"
+          if [ "$IS_PREVIEW" = 'true' ]; then
+            echo 'ios_preview=YES' >> "$GITHUB_OUTPUT"
+          else
+            echo 'ios_preview=NO' >> "$GITHUB_OUTPUT"
+          fi
 
   android:
     needs: prepare
     if: inputs.platform != 'ios'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      NATIVE_ANDROID_KEYSTORE_BASE64: ${{ secrets.NATIVE_ANDROID_KEYSTORE_BASE64 }}
+      NATIVE_STORE_PASSWORD: ${{ secrets.NATIVE_ANDROID_KEYSTORE_PASSWORD }}
+      NATIVE_KEY_ALIAS: ${{ secrets.NATIVE_ANDROID_KEY_ALIAS }}
+      NATIVE_KEY_PASSWORD: ${{ secrets.NATIVE_ANDROID_KEY_PASSWORD }}
     defaults:
       run:
         working-directory: native/android
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.sha }}
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
       - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
+      - name: Configure persistent Android signing
+        env:
+          PUBLISH: ${{ inputs.release }}
+        run: |
+          if [ -n "$NATIVE_ANDROID_KEYSTORE_BASE64" ]; then
+            test -n "$NATIVE_STORE_PASSWORD" && test -n "$NATIVE_KEY_ALIAS" && test -n "$NATIVE_KEY_PASSWORD"
+            printf '%s' "$NATIVE_ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/native-release.keystore"
+            echo "NATIVE_KEYSTORE_FILE=$RUNNER_TEMP/native-release.keystore" >> "$GITHUB_ENV"
+          elif [ "$PUBLISH" = 'true' ]; then
+            echo '::error::发布 APK 需要配置 NATIVE_ANDROID_KEYSTORE_BASE64、NATIVE_ANDROID_KEYSTORE_PASSWORD、NATIVE_ANDROID_KEY_ALIAS、NATIVE_ANDROID_KEY_PASSWORD，确保以后可覆盖升级。'
+            exit 1
+          fi
       - name: Compile isolated preview APK
+        env:
+          NATIVE_PREVIEW: ${{ needs.prepare.outputs.preview }}
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+          VARIANT=Debug
+          if [ -n "${NATIVE_KEYSTORE_FILE:-}" ]; then VARIANT=Release; fi
+          ./gradlew ":app:assemble$VARIANT" --no-daemon --stacktrace \
+            -PnativeBuildNumber="$GITHUB_RUN_NUMBER" -PnativePrerelease="$NATIVE_PREVIEW"
+          mkdir -p output
+          cp "app/build/outputs/apk/${VARIANT,,}/app-${VARIANT,,}.apk" output/MediaCleaner-Native-Android.apk
       - uses: actions/upload-artifact@v4
         with:
           name: MediaCleaner-Native-Android-Preview
-          path: native/android/app/build/outputs/apk/debug/app-debug.apk
+          path: native/android/output/MediaCleaner-Native-Android.apk
           if-no-files-found: error
           overwrite: true
 
@@ -85,7 +123,7 @@ jobs:
       run:
         working-directory: native/ios
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.sha }}
       - name: Select Xcode 26
@@ -102,33 +140,37 @@ jobs:
           xcodebuild -project MediaCleanerNative.xcodeproj -scheme MediaCleanerNative \
             -configuration Release -sdk iphoneos -derivedDataPath build \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            MC_PRERELEASE="${{ needs.prepare.outputs.ios_preview }}" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
       - name: Package preview IPA
         run: |
           mkdir -p build/Payload
           cp -R build/Build/Products/Release-iphoneos/MediaCleaner.app build/Payload/
           cd build
-          zip -qry MediaCleaner-Native-Preview-unsigned.ipa Payload
+          zip -qry MediaCleaner-Native-iOS-unsigned.ipa Payload
       - uses: actions/upload-artifact@v4
         with:
           name: MediaCleaner-Native-iOS-Preview
-          path: native/ios/build/MediaCleaner-Native-Preview-unsigned.ipa
+          path: native/ios/build/MediaCleaner-Native-iOS-unsigned.ipa
           if-no-files-found: error
           overwrite: true
 
-  prerelease:
+  publish:
     needs: [prepare, android, ios]
     if: >-
-      ${{ always() && !cancelled() && inputs.prerelease && needs.prepare.result == 'success' &&
+      ${{ always() && !cancelled() && inputs.release && needs.prepare.result == 'success' &&
           ((inputs.platform == 'both' && needs.android.result == 'success' && needs.ios.result == 'success') ||
            (inputs.platform == 'android' && needs.android.result == 'success') ||
            (inputs.platform == 'ios' && needs.ios.result == 'success')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: native-release-publishing
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.sha }}
       - uses: actions/download-artifact@v4
@@ -136,38 +178,45 @@ jobs:
           pattern: MediaCleaner-Native-*-Preview
           path: artifacts
           merge-multiple: true
-      - name: Publish native pre-release
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Publish native release and update feed
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PLATFORM: ${{ inputs.platform }}
           SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          PREVIEW: ${{ needs.prepare.outputs.preview }}
         run: |
-          TAG="v${VERSION}-native.${GITHUB_RUN_NUMBER}"
+          CHANNEL=stable
+          if [ "$PREVIEW" = 'true' ]; then CHANNEL=preview; fi
+          TAG="native-v${VERSION}-${CHANNEL}.${GITHUB_RUN_NUMBER}"
+          export TAG CHANNEL
           FILES=()
           if [ "$PLATFORM" != 'ios' ]; then
-            test -s artifacts/app-debug.apk
-            mv artifacts/app-debug.apk artifacts/MediaCleaner-Native-Android-Preview.apk
-            FILES+=(artifacts/MediaCleaner-Native-Android-Preview.apk)
+            test -s artifacts/MediaCleaner-Native-Android.apk
+            FILES+=(artifacts/MediaCleaner-Native-Android.apk)
           fi
           if [ "$PLATFORM" != 'android' ]; then
-            test -s artifacts/MediaCleaner-Native-Preview-unsigned.ipa
-            FILES+=(artifacts/MediaCleaner-Native-Preview-unsigned.ipa)
+            test -s artifacts/MediaCleaner-Native-iOS-unsigned.ipa
+            FILES+=(artifacts/MediaCleaner-Native-iOS-unsigned.ipa)
           fi
 
           if RELEASE=$(gh release view "$TAG" --json isPrerelease,targetCommitish); then
-            # A rerun may update only this commit's existing native pre-release.
-            if ! jq -e --arg sha "$SOURCE_SHA" \
-              '.isPrerelease == true and .targetCommitish == $sha' <<< "$RELEASE"; then
-              echo '::error::已有标签不属于本次提交的预发行版本，停止发布。'
+            # A rerun may update only this commit and release channel.
+            if ! jq -e --arg sha "$SOURCE_SHA" --argjson preview "$PREVIEW" \
+              '.isPrerelease == $preview and .targetCommitish == $sha' <<< "$RELEASE"; then
+              echo '::error::已有标签与当前提交或发布通道不一致，停止发布。'
               exit 1
             fi
           else
-            gh release create "$TAG" --draft --prerelease --latest=false \
+            gh release create "$TAG" --draft --prerelease="$PREVIEW" --latest=false \
               --target "$SOURCE_SHA" \
-              --title "MediaCleaner ${VERSION} 原生预览 ${GITHUB_RUN_NUMBER}" \
+              --title "MediaCleaner Native ${VERSION} ${CHANNEL} (${GITHUB_RUN_NUMBER})" \
               --notes-file native/shared/PREVIEW-RELEASE.md
           fi
           gh release upload "$TAG" "${FILES[@]}" --clobber
-          gh release edit "$TAG" --draft=false --prerelease --latest=false
+          gh release edit "$TAG" --draft=false --prerelease="$PREVIEW" --latest=false
+          node native/scripts/update-release-feed.mjs
