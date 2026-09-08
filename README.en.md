@@ -10,6 +10,8 @@ An offline photo and video cleaner for iOS and Android.
 
 MediaCleaner is an open-source tool for organizing your photo library. Review photos and videos in small groups by album and date, with suggestions that bring duplicates, old screenshots, and large files together for review. Pause whenever you need to and pick up where you left off.
 
+The native iOS and Android migration is underway. See the [native feature plan](./native/shared/FEATURES.md) and the [native project skeleton](./native/README.md) for the staged rollout.
+
 ## Features
 
 - **Group-based cleaning**: Filter by album, year, or month, choose a group size, and review your keep and delete decisions together.

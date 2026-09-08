@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "product": "MediaCleaner",
+  "stage": "native-foundation",
+  "verification": "source-and-metadata-only",
+  "platforms": {
+    "ios": {
+      "stack": "SwiftUI + PhotoKit + AVKit",
+      "minimumOS": "17",
+      "identifier": "com.mediacleaner.app.nativepreview"
+    },
+    "android": {
+      "stack": "Kotlin + Compose + MediaStore + Media3",
+      "minimumApi": 30,
+      "identifier": "com.mediacleaner.app.nativepreview"
+    }
+  },
+  "phases": [
+    {
+      "id": "P0",
+      "name": "框架与主流程",
+      "sourceImplemented": [
+        "native-projects",
+        "root-tabs",
+        "native-glass",
+        "permissions",
+        "album-browser",
+        "paged-thumbnails",
+        "bounded-group-review",
+        "undo",
+        "system-batch-delete",
+        "per-type-session-resume",
+        "global-reviewed-records",
+        "single-video-player",
+        "theme-system-language"
+      ],
+      "next": [
+        "date-filter",
+        "frozen-random-queue",
+        "history-statistics",
+        "old-data-import"
+      ],
+      "deviceVerification": "pending"
+    },
+    {
+      "id": "P1",
+      "name": "效率和媒体能力",
+      "planned": [
+        "incremental-analysis",
+        "smart-suggestions",
+        "favorites",
+        "viewer-share",
+        "live-photo",
+        "exif-location",
+        "album-categorization",
+        "android-recycle-bin",
+        "adaptive-low-power",
+        "language-picker",
+        "diagnostics"
+      ]
+    },
+    {
+      "id": "P2",
+      "name": "工具与扩展",
+      "planned": [
+        "insights",
+        "compression",
+        "reminders",
+        "update-channel",
+        "feedback-about",
+        "android-legacy-support"
+      ]
+    }
+  ]
+}

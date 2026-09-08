@@ -1,0 +1,9 @@
+**/.gradle/
+**/.kotlin/
+**/.idea/
+**/build/
+**/local.properties
+**/xcuserdata/
+**/*.xcuserstate
+ios/*.xcodeproj/
+artifacts/
