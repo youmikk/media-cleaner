@@ -73,7 +73,7 @@ class ReviewStore(context: Context) : SQLiteOpenHelper(context, "native-review.d
         db.beginTransaction()
         try {
             session.assets.forEach { asset ->
-                db.execSQL("INSERT OR IGNORE INTO reviewed(kind, asset_id) VALUES (?, ?)", arrayOf(session.kind.name, asset.id))
+                db.execSQL("INSERT OR IGNORE INTO reviewed(kind, asset_id) VALUES (?, ?)", arrayOf<Any>(session.kind.name, asset.id))
             }
             db.delete("sessions", "kind = ?", arrayOf(session.kind.name))
             db.setTransactionSuccessful()
