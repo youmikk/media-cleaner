@@ -8,6 +8,10 @@ on:
         type: choice
         default: both
         options: [both, android, ios]
+      prerelease:
+        description: '构建成功后发布为 GitHub 预发行版本（不勾选则仅保存构建产物）'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,6 +45,7 @@ jobs:
           name: MediaCleaner-Native-Android-Preview
           path: native/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          overwrite: true
 
   ios:
     if: inputs.platform != 'android'
@@ -77,3 +82,57 @@ jobs:
           name: MediaCleaner-Native-iOS-Preview
           path: native/ios/build/MediaCleaner-Native-Preview-unsigned.ipa
           if-no-files-found: error
+          overwrite: true
+
+  prerelease:
+    needs: [android, ios]
+    if: >-
+      ${{ always() && !cancelled() && inputs.prerelease &&
+          ((inputs.platform == 'both' && needs.android.result == 'success' && needs.ios.result == 'success') ||
+           (inputs.platform == 'android' && needs.android.result == 'success') ||
+           (inputs.platform == 'ios' && needs.ios.result == 'success')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: MediaCleaner-Native-*-Preview
+          path: artifacts
+          merge-multiple: true
+      - name: Publish native pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          VERSION=$(node -p "require('./app.json').expo.version")
+          TAG="v${VERSION}-native.${GITHUB_RUN_NUMBER}"
+          FILES=()
+          if [ "$PLATFORM" != 'ios' ]; then
+            test -s artifacts/app-debug.apk
+            mv artifacts/app-debug.apk artifacts/MediaCleaner-Native-Android-Preview.apk
+            FILES+=(artifacts/MediaCleaner-Native-Android-Preview.apk)
+          fi
+          if [ "$PLATFORM" != 'android' ]; then
+            test -s artifacts/MediaCleaner-Native-Preview-unsigned.ipa
+            FILES+=(artifacts/MediaCleaner-Native-Preview-unsigned.ipa)
+          fi
+
+          if RELEASE=$(gh release view "$TAG" --json isPrerelease,targetCommitish); then
+            # A rerun may update only this commit's existing native pre-release.
+            if ! jq -e --arg sha "$GITHUB_SHA" \
+              '.isPrerelease == true and .targetCommitish == $sha' <<< "$RELEASE"; then
+              echo '::error::已有标签不属于本次提交的预发行版本，停止发布。'
+              exit 1
+            fi
+          else
+            gh release create "$TAG" --draft --prerelease --latest=false \
+              --target "$GITHUB_SHA" \
+              --title "MediaCleaner ${VERSION} 原生预览 ${GITHUB_RUN_NUMBER}" \
+              --notes-file native/shared/PREVIEW-RELEASE.md
+          fi
+          gh release upload "$TAG" "${FILES[@]}" --clobber
+          gh release edit "$TAG" --draft=false --prerelease --latest=false

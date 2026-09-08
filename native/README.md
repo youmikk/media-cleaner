@@ -32,7 +32,9 @@ Android 预览以 API 30 起步，使用 MediaStore 批量删除确认。Android
 - Android Studio 打开 `native/android`；独立 Gradle wrapper 已随源码提供。
 - macOS 在 `native/ios` 执行 `xcodegen generate`，打开 `MediaCleanerNative.xcodeproj`。
 - `build-native-preview.yml` 合入默认分支后，GitHub Actions 才会显示 `Native preview (SwiftUI / Compose)`，由维护者手动选平台构建。
-- workflow 只上传预览 artifact，不发布 GitHub Release；iOS 产物未签名，需要自行签名安装。
+- workflow 默认只上传预览 artifact。勾选“构建成功后发布为 GitHub 预发行版本”后，所选平台全部成功才会创建 Pre-release，并上传 APK / IPA。
+- 预发行标签自动采用 `v<版本>-native.<构建编号>`；重跑同一次构建更新对应预发行附件，不标记为 Latest，不修改正式版更新清单。
+- iOS 产物未签名，需要自行签名安装。
 - 双端预览标识均为 `com.mediacleaner.app.nativepreview`，可与旧版并装。
 - 原生预览不读取或覆盖旧版的收藏、清理会话或分析缓存。正式替换前必须完成数据导入、签名和升级验证。
 - 标记本身不删除；系统确认删除的是设备媒体原件，独立安装标识不会隔离相册内容。
