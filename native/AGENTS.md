@@ -4,6 +4,7 @@ The user authorized independent SwiftUI and Kotlin/Compose apps under `native/`.
 The root React Native/Expo conventions apply only to the legacy application.
 
 - Work in the main agent; do not start sub-agents.
+- Use purpose-based branch names without tool prefixes. Commit attribution must contain only the repository owner's identity, with no additional author trailers.
 - Do not run Gradle, Xcode, EAS or local native builds unless the user asks.
 - Public platform APIs only. Do not use PhotoKit resource KVC for file sizes.
 - Keep preview identifiers separate from `com.mediacleaner.app` until the old-data import is implemented and verified.

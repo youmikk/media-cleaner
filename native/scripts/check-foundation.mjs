@@ -15,16 +15,19 @@ const walk = (directory) => readdirSync(path.join(root, directory), { withFileTy
   .flatMap((item) => item.isDirectory() ? walk(`${directory}/${item.name}`) : [`${directory}/${item.name}`]);
 const equalKeys = (a, b) => assert.deepEqual([...a.keys()].sort(), [...b.keys()].sort());
 
-const version = json('release.json').version;
-assert.equal(json('app.json').expo.version, version);
-assert.equal(json('package.json').version, version);
-assert.equal(json('package-lock.json').version, version);
-assert.equal(json('package-lock.json').packages[''].version, version);
+const legacyVersion = json('release.json').version;
+assert.equal(json('app.json').expo.version, legacyVersion);
+assert.equal(json('package.json').version, legacyVersion);
+assert.equal(json('package-lock.json').version, legacyVersion);
+assert.equal(json('package-lock.json').packages[''].version, legacyVersion);
 const updater = parse(read('src/utils/updateChecker.js'), { sourceType: 'module' });
 const declaration = updater.program.body.flatMap((node) => node.declaration?.declarations || [])
   .find((node) => node.id?.name === 'APP_VERSION');
-assert.equal(declaration?.init?.value, version);
-assert.equal(json('release.json').tag, `v${version}`);
+assert.equal(declaration?.init?.value, legacyVersion);
+assert.equal(json('release.json').tag, `v${legacyVersion}`);
+
+const version = json('native/version.json').version;
+assert.match(version, /^\d+\.\d+\.\d+$/);
 
 const android = 'native/android/app/src/main';
 const ios = 'native/ios/MediaCleanerNative';
@@ -98,8 +101,14 @@ for (const file of ['native/android/gradlew', 'native/android/gradlew.bat', 'nat
 const workflow = yaml.load(read('.github/workflows/build-native-preview.yml'));
 assert.deepEqual(Object.keys(workflow.on), ['workflow_dispatch']);
 assert.equal(workflow.permissions.contents, 'read');
+assert.equal(workflow.on.workflow_dispatch.inputs.source_ref.default, 'native-foundation');
+assert.equal(workflow.on.workflow_dispatch.inputs.prerelease.default, false);
+for (const name of ['android', 'ios', 'prerelease']) {
+  const checkout = workflow.jobs[name].steps.find((step) => step.uses?.startsWith('actions/checkout'));
+  assert.equal(checkout.with.ref, '${{ needs.prepare.outputs.sha }}');
+}
 assert.equal(workflow.jobs.android.steps.find((step) => step.uses?.startsWith('actions/setup-java')).with['java-version'], '21');
 const plan = json('native/shared/feature-matrix.json');
 assert.deepEqual(plan.phases.map((phase) => phase.id), ['P0', 'P1', 'P2']);
-console.log(`Native foundation metadata OK. Version ${version}; Android ${en.size} strings; iOS ${swiftEn.size} strings.`);
+console.log(`Native foundation metadata OK. Native version ${version}; legacy version ${legacyVersion}; Android ${en.size} strings; iOS ${swiftEn.size} strings.`);
 console.log('Checked metadata/resources only. No native compiler, device or visual validation was run.');

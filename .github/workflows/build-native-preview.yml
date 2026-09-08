@@ -3,6 +3,11 @@ name: Native preview (SwiftUI / Compose)
 on:
   workflow_dispatch:
     inputs:
+      source_ref:
+        description: '构建源码分支、标签或提交'
+        type: string
+        required: true
+        default: native-foundation
       platform:
         description: Platform
         type: choice
@@ -17,11 +22,33 @@ permissions:
   contents: read
 
 concurrency:
-  group: native-preview-${{ github.ref }}-${{ inputs.platform }}
+  group: native-preview-${{ inputs.source_ref }}-${{ inputs.platform }}
   cancel-in-progress: true
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.source.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+      - name: Resolve source and native version
+        id: source
+        run: |
+          VERSION=$(node -p "require('./native/version.json').version")
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo '::error::原生版本号必须采用 x.y.z 格式。'
+            exit 1
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
   android:
+    needs: prepare
     if: inputs.platform != 'ios'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -30,6 +57,8 @@ jobs:
         working-directory: native/android
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -48,6 +77,7 @@ jobs:
           overwrite: true
 
   ios:
+    needs: prepare
     if: inputs.platform != 'android'
     runs-on: macos-26
     timeout-minutes: 45
@@ -56,6 +86,8 @@ jobs:
         working-directory: native/ios
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
       - name: Select Xcode 26
         run: |
           XCODE=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
@@ -85,9 +117,9 @@ jobs:
           overwrite: true
 
   prerelease:
-    needs: [android, ios]
+    needs: [prepare, android, ios]
     if: >-
-      ${{ always() && !cancelled() && inputs.prerelease &&
+      ${{ always() && !cancelled() && inputs.prerelease && needs.prepare.result == 'success' &&
           ((inputs.platform == 'both' && needs.android.result == 'success' && needs.ios.result == 'success') ||
            (inputs.platform == 'android' && needs.android.result == 'success') ||
            (inputs.platform == 'ios' && needs.ios.result == 'success')) }}
@@ -97,6 +129,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
       - uses: actions/download-artifact@v4
         with:
           pattern: MediaCleaner-Native-*-Preview
@@ -107,8 +141,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PLATFORM: ${{ inputs.platform }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          VERSION=$(node -p "require('./app.json').expo.version")
           TAG="v${VERSION}-native.${GITHUB_RUN_NUMBER}"
           FILES=()
           if [ "$PLATFORM" != 'ios' ]; then
@@ -123,14 +158,14 @@ jobs:
 
           if RELEASE=$(gh release view "$TAG" --json isPrerelease,targetCommitish); then
             # A rerun may update only this commit's existing native pre-release.
-            if ! jq -e --arg sha "$GITHUB_SHA" \
+            if ! jq -e --arg sha "$SOURCE_SHA" \
               '.isPrerelease == true and .targetCommitish == $sha' <<< "$RELEASE"; then
               echo '::error::已有标签不属于本次提交的预发行版本，停止发布。'
               exit 1
             fi
           else
             gh release create "$TAG" --draft --prerelease --latest=false \
-              --target "$GITHUB_SHA" \
+              --target "$SOURCE_SHA" \
               --title "MediaCleaner ${VERSION} 原生预览 ${GITHUB_RUN_NUMBER}" \
               --notes-file native/shared/PREVIEW-RELEASE.md
           fi

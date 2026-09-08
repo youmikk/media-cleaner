@@ -1,6 +1,6 @@
 # MediaCleaner 双端原生预览
 
-这是独立的 SwiftUI 和 Kotlin/Compose 工程，没有 React Native、Expo 或 JavaScript 运行时依赖。现有 1.30.0 发布版仍在仓库根目录。
+这是独立的 SwiftUI 和 Kotlin/Compose 工程，没有 React Native、Expo 或 JavaScript 运行时依赖。原生初始版本为 0.0.1，版本来源是 `native/version.json`，两端工程配置保持一致。现有 1.30.0 发布版仍在仓库根目录。
 
 [功能清单](shared/FEATURES.md) · [架构与数据契约](shared/CONTRACTS.md) · [界面规范](shared/DESIGN.md)
 
@@ -31,9 +31,10 @@ Android 预览以 API 30 起步，使用 MediaStore 批量删除确认。Android
 
 - Android Studio 打开 `native/android`；独立 Gradle wrapper 已随源码提供。
 - macOS 在 `native/ios` 执行 `xcodegen generate`，打开 `MediaCleanerNative.xcodeproj`。
-- `build-native-preview.yml` 合入默认分支后，GitHub Actions 才会显示 `Native preview (SwiftUI / Compose)`，由维护者手动选平台构建。
+- GitHub Actions 选择 `Native preview (SwiftUI / Compose)`，点击 `Run workflow`。入口放在 `main`，源码分支 `source_ref` 默认是 `native-foundation`，再选择要构建的平台。
+- 工作流先将源码分支解析为一个提交，两端构建及预发行都使用该提交。源码保留在原生分支即可打包，无需新建仓库。
 - workflow 默认只上传预览 artifact。勾选“构建成功后发布为 GitHub 预发行版本”后，所选平台全部成功才会创建 Pre-release，并上传 APK / IPA。
-- 预发行标签自动采用 `v<版本>-native.<构建编号>`；重跑同一次构建更新对应预发行附件，不标记为 Latest，不修改正式版更新清单。
+- 预发行标签自动采用 `v<原生版本>-native.<构建编号>`，初始版例如 `v0.0.1-native.1`；重跑同一次构建更新对应预发行附件，不标记为 Latest，不修改正式版更新清单。
 - iOS 产物未签名，需要自行签名安装。
 - 双端预览标识均为 `com.mediacleaner.app.nativepreview`，可与旧版并装。
 - 原生预览不读取或覆盖旧版的收藏、清理会话或分析缓存。正式替换前必须完成数据导入、签名和升级验证。
