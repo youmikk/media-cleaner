@@ -9,6 +9,7 @@ settings:
     TARGETED_DEVICE_FAMILY: "1"
     MARKETING_VERSION: "0.0.1"
     CURRENT_PROJECT_VERSION: "1"
+    MC_PRERELEASE: "YES"
 targets:
   MediaCleanerNative:
     type: application

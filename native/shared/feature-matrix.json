@@ -32,7 +32,10 @@
         "per-type-session-resume",
         "global-reviewed-records",
         "single-video-player",
-        "theme-system-language"
+        "theme-system-language",
+        "update-channel",
+        "daily-manual-update-check",
+        "download-mirrors"
       ],
       "next": [
         "date-filter",
@@ -66,7 +69,7 @@
         "insights",
         "compression",
         "reminders",
-        "update-channel",
+        "release-history",
         "feedback-about",
         "android-legacy-support"
       ]

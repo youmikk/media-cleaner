@@ -13,6 +13,7 @@ final class AppStore: ObservableObject {
         didSet { UserDefaults.standard.set(groupSize, forKey: "native.groupSize") }
     }
     let reviews = ReviewStore()
+    let updates = UpdateStore()
 }
 
 @MainActor

@@ -14,6 +14,8 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>MCPrerelease</key>
+	<string>$(MC_PRERELEASE)</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>UIDesignRequiresCompatibility</key>

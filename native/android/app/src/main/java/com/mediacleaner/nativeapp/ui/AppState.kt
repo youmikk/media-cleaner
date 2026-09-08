@@ -19,6 +19,7 @@ import kotlinx.coroutines.withContext
 enum class RootTab { PHOTOS, VIDEOS, PROFILE }
 
 class AppState(application: Application) : AndroidViewModel(application) {
+    val updates = UpdateState(application, viewModelScope)
     val library = MediaStoreLibrary(application)
     private val reviews = ReviewStore(application)
     private val preferences = application.getSharedPreferences("native-settings", 0)

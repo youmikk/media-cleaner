@@ -102,12 +102,22 @@ const workflow = yaml.load(read('.github/workflows/build-native-preview.yml'));
 assert.deepEqual(Object.keys(workflow.on), ['workflow_dispatch']);
 assert.equal(workflow.permissions.contents, 'read');
 assert.equal(workflow.on.workflow_dispatch.inputs.source_ref.default, 'native-foundation');
-assert.equal(workflow.on.workflow_dispatch.inputs.prerelease.default, false);
-for (const name of ['android', 'ios', 'prerelease']) {
+assert.equal(workflow.on.workflow_dispatch.inputs.release.default, false);
+assert.equal(workflow.on.workflow_dispatch.inputs.prerelease.default, true);
+for (const name of ['android', 'ios', 'publish']) {
   const checkout = workflow.jobs[name].steps.find((step) => step.uses?.startsWith('actions/checkout'));
   assert.equal(checkout.with.ref, '${{ needs.prepare.outputs.sha }}');
 }
 assert.equal(workflow.jobs.android.steps.find((step) => step.uses?.startsWith('actions/setup-java')).with['java-version'], '21');
+assert.equal(workflow.jobs.publish.permissions.contents, 'write');
+assert.ok(manifest.manifest['uses-permission'].some((node) => node.$['android:name'] === 'android.permission.INTERNET'));
+assert.ok(gradle.includes('UPDATE_PRERELEASE'));
+assert.equal(info.get('MCPrerelease'), '$(MC_PRERELEASE)');
+assert.equal(spec.settings.base.MC_PRERELEASE, 'YES');
+const feed = json('native/releases.json');
+assert.equal(feed.schemaVersion, 1);
+assert.equal(feed.applicationId, 'com.mediacleaner.app.nativepreview');
+assert.deepEqual(Object.keys(feed.channels).sort(), ['preview', 'stable']);
 const plan = json('native/shared/feature-matrix.json');
 assert.deepEqual(plan.phases.map((phase) => phase.id), ['P0', 'P1', 'P2']);
 console.log(`Native foundation metadata OK. Native version ${version}; legacy version ${legacyVersion}; Android ${en.size} strings; iOS ${swiftEn.size} strings.`);

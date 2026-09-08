@@ -37,4 +37,20 @@
     <string name="review_settings">每组数量</string>
     <string name="liquid_glass">液态玻璃</string>
     <string name="version_label">版本 %1$s</string>
+    <string name="updates_title">软件更新</string>
+    <string name="updates_automatic">自动检查更新</string>
+    <string name="updates_preview">接收预发行版本</string>
+    <string name="updates_source">下载线路</string>
+    <string name="updates_direct">GitHub 原站</string>
+    <string name="updates_mirror_one">国内加速 1</string>
+    <string name="updates_mirror_two">国内加速 2</string>
+    <string name="updates_check">检查更新</string>
+    <string name="updates_checking">正在检查更新</string>
+    <string name="updates_current">已是最新版本</string>
+    <string name="updates_failed">无法检查或打开更新，请检查网络或更换下载线路后重试。</string>
+    <string name="updates_available">发现新版本：%1$s</string>
+    <string name="updates_channel_preview">预发行版本</string>
+    <string name="updates_channel_stable">正式版本</string>
+    <string name="updates_download">下载更新</string>
+    <string name="updates_later">稍后</string>
 </resources>

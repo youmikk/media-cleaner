@@ -7,3 +7,4 @@
 **/*.xcuserstate
 ios/*.xcodeproj/
 artifacts/
+android/output/

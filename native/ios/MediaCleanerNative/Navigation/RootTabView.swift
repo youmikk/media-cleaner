@@ -21,5 +21,6 @@ struct RootTabView: View {
         }
         .tint(MCTheme.accent)
         .preferredColorScheme(store.theme == "system" ? nil : (store.theme == "dark" ? .dark : .light))
+        .overlay { UpdatePresentation(updates: store.updates) }
     }
 }

@@ -37,4 +37,20 @@
     <string name="review_settings">Items per group</string>
     <string name="liquid_glass">Liquid Glass</string>
     <string name="version_label">Version %1$s</string>
+    <string name="updates_title">Software update</string>
+    <string name="updates_automatic">Check automatically</string>
+    <string name="updates_preview">Include pre-releases</string>
+    <string name="updates_source">Download source</string>
+    <string name="updates_direct">GitHub</string>
+    <string name="updates_mirror_one">Mirror 1</string>
+    <string name="updates_mirror_two">Mirror 2</string>
+    <string name="updates_check">Check for updates</string>
+    <string name="updates_checking">Checking for updates</string>
+    <string name="updates_current">Up to date</string>
+    <string name="updates_failed">Could not check or open the update. Check your connection or select another source.</string>
+    <string name="updates_available">Update available: %1$s</string>
+    <string name="updates_channel_preview">Pre-release</string>
+    <string name="updates_channel_stable">Stable release</string>
+    <string name="updates_download">Download</string>
+    <string name="updates_later">Later</string>
 </resources>

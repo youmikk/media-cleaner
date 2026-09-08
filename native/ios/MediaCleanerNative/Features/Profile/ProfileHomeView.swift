@@ -17,7 +17,8 @@ struct ProfileHomeView: View {
                         ForEach([5, 10, 15, 20], id: \.self) { Text($0, format: .number).tag($0) }
                     }
                 }
-                Section { LabeledContent("version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") }
+                UpdateSettingsSection(updates: settings.updates)
+                Section { LabeledContent("version", value: "\(UpdateClient.currentVersion) (\(UpdateClient.currentBuild))") }
             }.navigationTitle("tab.profile")
         }
     }

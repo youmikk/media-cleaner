@@ -63,11 +63,13 @@ fun RootScreen(state: AppState) {
         else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE))
     }
     DisposableEffect(owner) {
-        val listener = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) state.refresh() }
+        val listener = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) {
+            state.refresh(); state.updates.check()
+        } }
         owner.lifecycle.addObserver(listener)
         onDispose { owner.lifecycle.removeObserver(listener) }
     }
-    LaunchedEffect(Unit) { state.refresh() }
+    LaunchedEffect(Unit) { state.refresh(); state.updates.check() }
 
     val session = state.review
     if (session != null) {
@@ -159,6 +161,7 @@ fun RootScreen(state: AppState) {
         text = { Text(stringResource(R.string.operation_failed_detail)) },
         confirmButton = { TextButton(onClick = state::clearError) { Text(stringResource(R.string.done)) } },
     )
+    if (state.review == null && !state.error) UpdatePrompt(state.updates)
 }
 
 @Composable
@@ -242,6 +245,7 @@ private fun SettingsScreen(state: AppState, bottomInset: Dp) {
                 Switch(state.glassEnabled, onCheckedChange = null)
             }
         }
-        item { Text(stringResource(R.string.version_label, BuildConfig.VERSION_NAME), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        item { UpdateSettings(state.updates) }
+        item { Text(stringResource(R.string.version_label, "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"), color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
 }
